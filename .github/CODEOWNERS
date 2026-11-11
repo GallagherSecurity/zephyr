@@ -1,0 +1,9 @@
+# The CODEOWNERS file is used to define individuals or teams that are responsible for code in a repository.
+# For more information, see https://docs.github.com/en/github/creating-cloning-and-archiving-repositories/about-code-owners
+* @GallagherSecurity/hbus-devices-developers
+
+# Ensure that the dev platform squad is notified when there are changes to the CODEOWNERS file. This is so that when
+# we get tool configurations in the repository, we can ensure that the dev platform squad is aware of the changes.
+.github/CODEOWNERS @GallagherSecurity/development-platforms-developers
+CODEOWNERS @GallagherSecurity/development-platforms-developers
+docs/CODEOWNERS @GallagherSecurity/development-platforms-developers
