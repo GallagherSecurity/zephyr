@@ -6,7 +6,7 @@
  */
 /dts-v1/;
 
-#include <espressif/esp32/esp32_d0wd_v3.dtsi>
+#include <espressif/esp32/esp32.dtsi>
 #include "m5stack_fire-pinctrl.dtsi"
 #include "grove_connectors.dtsi"
 #include "m5stack_mbus_connectors.dtsi"
@@ -106,6 +106,7 @@
 
 &flash0 {
 	reg = <0x0 DT_SIZE_M(16)>;
+	ranges = <0x0 0x0 DT_SIZE_M(16)>;
 };
 
 &psram0 {
@@ -127,6 +128,7 @@
 };
 
 &gpio0 {
+	gpio-reserved-ranges = <20 1>, <24 1>, <28 4>;
 	status = "okay";
 };
 

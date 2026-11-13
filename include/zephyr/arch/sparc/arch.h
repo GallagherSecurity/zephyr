@@ -53,7 +53,6 @@ extern "C" {
  * (1..15) to logical interrupt source number. For example by probing the
  * interrupt controller.
  */
-int z_sparc_int_get_source(int irl);
 void z_irq_spurious(const void *unused);
 
 
@@ -89,6 +88,19 @@ static ALWAYS_INLINE void arch_irq_unlock(unsigned int key)
 static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
 {
 	return key == 0;
+}
+
+/** Implementation of @ref arch_cpu_irqs_are_enabled. */
+static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
+{
+	/* No direct non-modifying probe available; briefly lock and
+	 * restore via the existing PIL trap interface.
+	 */
+	unsigned int key = arch_irq_lock();
+	bool enabled = arch_irq_unlocked(key);
+
+	arch_irq_unlock(key);
+	return enabled;
 }
 
 static ALWAYS_INLINE void arch_nop(void)

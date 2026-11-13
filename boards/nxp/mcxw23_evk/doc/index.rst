@@ -90,7 +90,14 @@ achieved by running the following command:
 
 .. code-block:: console
 
-   west blobs fetch hal_nxp
+   west blobs fetch hal_nxp -l "mcxw23"
+
+.. note::
+
+   The ``-l`` option takes a Python regular expression that is matched against
+   each blob's path. Passing ``"mcxw23"`` limits the download to the blobs
+   required by this board instead of fetching every NXP blob. Omit the option
+   (``west blobs fetch hal_nxp``) to fetch all NXP blobs.
 
 Programming and Debugging
 *************************
@@ -187,6 +194,16 @@ When Power Management is enabled :kconfig:option:`CONFIG_PM`, OSTIMER is used as
 OS tick timer.
 
 Limitation: Wakeup pin can't be used as wakeup source in Standby mode.
+
+Bluetooth
+=========
+
+Dynamic BLE TX Power Configuration
+----------------------------------
+
+MCXW23 supports dynamic BLE TX power configuration. However, there is a
+known limitation: when changing the TX power level, advertising must be
+restarted for the new power setting to take effect.
 
 .. include:: ../../common/board-footer.rst.inc
 

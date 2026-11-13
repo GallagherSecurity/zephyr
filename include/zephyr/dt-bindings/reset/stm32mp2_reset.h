@@ -4,8 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @file
+ * @brief STM32 reset controller devicetree helper macros for STM32MP2
+ * @ingroup reset_controller_stm32
+ */
+
 #ifndef ZEPHYR_INCLUDE_DT_BINDINGS_RESET_STM32MP2_RESET_H_
 #define ZEPHYR_INCLUDE_DT_BINDINGS_RESET_STM32MP2_RESET_H_
+
+/** @cond INTERNAL_HIDDEN */
 
 /**
  * Pack RCC register offset and bit in one 32-bit value.
@@ -22,6 +30,9 @@
 /* Reset reg */
 #define STM32_RST	0U
 
+/* Timer Peripheral */
+#define STM32_RESET_PERIPH_TIM12	0x728
+
 /* USART/UART Peripheral */
 #define STM32_RESET_PERIPH_USART1	0x77C
 #define STM32_RESET_PERIPH_USART2	0x780
@@ -33,10 +44,16 @@
 #define STM32_RESET_PERIPH_UART8	0x798
 #define STM32_RESET_PERIPH_UART9	0x79C
 
+/* Camera peripherals */
+#define STM32_RESET_PERIPH_CSI2		0x858
+#define STM32_RESET_PERIPH_DCMIPP	0x85C
+
 /* I3C Peripheral */
 #define STM32_RESET_PERIPH_I3C1		0x8C8
 #define STM32_RESET_PERIPH_I3C2		0x8CC
 #define STM32_RESET_PERIPH_I3C3		0x8D0
 #define STM32_RESET_PERIPH_I3C4		0x8D4
+
+/** @endcond */
 
 #endif /* ZEPHYR_INCLUDE_DT_BINDINGS_RESET_STM32MP2_RESET_H_ */

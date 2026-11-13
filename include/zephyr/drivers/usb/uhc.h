@@ -18,6 +18,7 @@
 #include <zephyr/drivers/usb/usb_buf.h>
 #include <zephyr/usb/usb_ch9.h>
 #include <zephyr/sys/dlist.h>
+#include <zephyr/sys/ref.h>
 
 /**
  * @brief USB host controller (UHC) driver API
@@ -96,6 +97,14 @@ struct usb_device {
 	struct usb_host_ep ep_out[16];
 	/** Pointers to device IN endpoints */
 	struct usb_host_ep ep_in[16];
+	/** Pointer to the hub to which this device is connected */
+	struct usb_device *hub;
+	/** Device's hub Think Time */
+	uint16_t tt;
+	/** Device's hub port */
+	uint8_t hub_port;
+	/** Device's level (root device = 1) */
+	uint8_t level;
 };
 
 /**
@@ -120,8 +129,10 @@ enum uhc_control_stage {
 struct uhc_transfer {
 	/** dlist node */
 	sys_dnode_t node;
+	/** Reference count */
+	struct sys_ref ref;
 	/** Control transfer setup packet */
-	uint8_t setup_pkt[8];
+	__aligned(USB_BUF_ALIGN) uint8_t setup_pkt[USB_BUF_ROUND_UP(8)];
 	/** Transfer data buffer */
 	struct net_buf *buf;
 	/** Endpoint to which request is associated */
@@ -206,7 +217,6 @@ struct uhc_event {
 };
 
 /**
- * @typedef uhc_event_cb_t
  * @brief Callback to submit UHC event to higher layer.
  *
  * At the higher level, the event is to be inserted into a message queue.
@@ -294,7 +304,7 @@ static inline bool uhc_is_enabled(const struct device *dev)
 /**
  * @cond INTERNAL_HIDDEN
  */
-struct uhc_api {
+__subsystem struct uhc_driver_api {
 	int (*lock)(const struct device *dev);
 	int (*unlock)(const struct device *dev);
 
@@ -330,7 +340,7 @@ struct uhc_api {
  */
 static inline int uhc_bus_reset(const struct device *dev)
 {
-	const struct uhc_api *api = dev->api;
+	const struct uhc_driver_api *api = DEVICE_API_GET(uhc, dev);
 	int ret;
 
 	api->lock(dev);
@@ -352,7 +362,7 @@ static inline int uhc_bus_reset(const struct device *dev)
  */
 static inline int uhc_sof_enable(const struct device *dev)
 {
-	const struct uhc_api *api = dev->api;
+	const struct uhc_driver_api *api = DEVICE_API_GET(uhc, dev);
 	int ret;
 
 	api->lock(dev);
@@ -375,7 +385,7 @@ static inline int uhc_sof_enable(const struct device *dev)
  */
 static inline int uhc_bus_suspend(const struct device *dev)
 {
-	const struct uhc_api *api = dev->api;
+	const struct uhc_driver_api *api = DEVICE_API_GET(uhc, dev);
 	int ret;
 
 	api->lock(dev);
@@ -398,7 +408,7 @@ static inline int uhc_bus_suspend(const struct device *dev)
  */
 static inline int uhc_bus_resume(const struct device *dev)
 {
-	const struct uhc_api *api = dev->api;
+	const struct uhc_driver_api *api = DEVICE_API_GET(uhc, dev);
 	int ret;
 
 	api->lock(dev);
@@ -449,6 +459,25 @@ struct uhc_transfer *uhc_xfer_alloc_with_buf(const struct device *dev,
 					     void *const cb,
 					     void *const cb_priv,
 					     size_t size);
+
+/**
+ * @brief Increment the UHC transfer reference
+ *
+ * @param[in] xfer A valid pointer on a UHC transfer
+ */
+void uhc_xfer_ref(struct uhc_transfer *const xfer);
+
+/**
+ * @brief Decrement the UHC transfer reference
+ *
+ * Decrement the reference and release once the last one is dropped.
+ * It is safe to be called from any context.
+ *
+ * @param[in] xfer A valid pointer on a UHC transfer
+ *
+ * @return true if the transfer was released, false otherwise.
+ */
+bool uhc_xfer_unref(struct uhc_transfer *const xfer);
 
 /**
  * @brief Free UHC transfer and any buffers

@@ -22,8 +22,10 @@ supported:
   - hwinfo
   - i2c
   - netif:eth
+  - ptp_clock
   - pwm
   - spi
   - usb_device
+  - usbd
   - watchdog
 vendor: nxp

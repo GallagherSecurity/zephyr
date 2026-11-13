@@ -36,12 +36,44 @@
 			compatible = "fixed-clock";
 			#clock-cells = <0>;
 		};
+
+		usb_clk: usb_clk {
+			compatible = "fixed-clock";
+			#clock-cells = <0>;
+			clock-frequency = <48000000>;
+		};
 	};
 
 	soc {
 		sram: memory@100000 {
 			compatible = "mmio-sram";
 			reg = <0x00100000 DT_SIZE_K(128)>;
+		};
+
+		udphsa: usbd@200000 {
+			compatible = "microchip,udphs-g1-udc";
+			reg = <0x00200000 0x100000
+			       0xe0814000 0x400>;
+			interrupt-parent = <&gic>;
+			interrupts = <GIC_SPI 104 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
+			clocks = <&pmc PMC_TYPE_PERIPHERAL 104>, <&usb_clk>;
+			clock-names = "pclk", "hclk";
+			maximum-speed = "high-speed";
+			num-bidir-endpoints = <16>;
+			status = "disabled";
+		};
+
+		udphsb: usbd@300000 {
+			compatible = "microchip,udphs-g1-udc";
+			reg = <0x00300000 0x100000
+			       0xe0818000 0x400>;
+			interrupt-parent = <&gic>;
+			interrupts = <GIC_SPI 105 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
+			clocks = <&pmc PMC_TYPE_PERIPHERAL 105>, <&usb_clk>;
+			clock-names = "pclk", "hclk";
+			maximum-speed = "high-speed";
+			num-bidir-endpoints = <16>;
+			status = "disabled";
 		};
 
 		pinctrl: pinctrl@e0014000 {
@@ -170,7 +202,7 @@
 			interrupt-names = "int0", "int1";
 			clocks = <&pmc PMC_TYPE_GCK 61>;
 			clock-names = "gck";
-			bosch,mram-cfg = <0x3400 15 15 8 8 0 15 15>;
+			bosch,mram-cfg = <0x3400 15 15 16 0 0 15 15>;
 			status = "disabled";
 		};
 
@@ -184,7 +216,7 @@
 			interrupt-names = "int0", "int1";
 			clocks = <&pmc PMC_TYPE_GCK 62>;
 			clock-names = "gck";
-			bosch,mram-cfg = <0x7800 15 15 8 8 0 15 15>;
+			bosch,mram-cfg = <0x7800 15 15 16 0 0 15 15>;
 			status = "disabled";
 		};
 
@@ -198,7 +230,7 @@
 			interrupt-names = "int0", "int1";
 			clocks = <&pmc PMC_TYPE_GCK 63>;
 			clock-names = "gck";
-			bosch,mram-cfg = <0xbc00 15 15 8 8 0 15 15>;
+			bosch,mram-cfg = <0xbc00 15 15 16 0 0 15 15>;
 			status = "disabled";
 		};
 
@@ -212,7 +244,7 @@
 			interrupt-names = "int0", "int1";
 			clocks = <&pmc PMC_TYPE_GCK 64>;
 			clock-names = "gck";
-			bosch,mram-cfg = <0x0 15 15 8 8 0 15 15>;
+			bosch,mram-cfg = <0x0 15 15 16 0 0 15 15>;
 			status = "disabled";
 		};
 
@@ -226,7 +258,7 @@
 			interrupt-names = "int0", "int1";
 			clocks = <&pmc PMC_TYPE_GCK 65>;
 			clock-names = "gck";
-			bosch,mram-cfg = <0x4400 15 15 8 8 0 15 15>;
+			bosch,mram-cfg = <0x4400 15 15 16 0 0 15 15>;
 			status = "disabled";
 		};
 
@@ -240,7 +272,7 @@
 			interrupt-names = "int0", "int1";
 			clocks = <&pmc PMC_TYPE_GCK 66>;
 			clock-names = "gck";
-			bosch,mram-cfg = <0x8800 15 15 8 8 0 15 15>;
+			bosch,mram-cfg = <0x8800 15 15 16 0 0 15 15>;
 			status = "disabled";
 		};
 
@@ -604,7 +636,8 @@
 		ethernet@e2800000 {
 			compatible = "microchip,sam-ethernet-controller";
 			reg = <0xe2800000 0x4000>;
-			clocks = <&pmc PMC_TYPE_GCK 51>;
+			clocks = <&pmc PMC_TYPE_GCK 51>, <&pmc PMC_TYPE_CORE PMC_MCK>;
+			clock-names = "gmac_clk", "mck";
 
 			gmac0: ethernet {
 				compatible = "atmel,sam-gmac";
@@ -631,7 +664,8 @@
 		ethernet@e2804000 {
 			compatible = "microchip,sam-ethernet-controller";
 			reg = <0xe2804000 0x4000>;
-			clocks = <&pmc PMC_TYPE_GCK 52>;
+			clocks = <&pmc PMC_TYPE_GCK 52>, <&pmc PMC_TYPE_CORE PMC_MCK>;
+			clock-names = "gmac_clk", "mck";
 
 			gmac1: ethernet {
 				compatible = "atmel,sam-gmac";
@@ -824,6 +858,21 @@
 				#address-cells = <1>;
 				#size-cells = <0>;
 				clocks = <&pmc PMC_TYPE_PERIPHERAL 49>;
+				status = "disabled";
+			};
+
+			spi11: spi@400 {
+				compatible = "microchip,flexcom-g1-spi";
+				reg = <0x400 0x200>;
+				interrupt-parent = <&gic>;
+				interrupts = <GIC_SPI 49 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
+				dmas = <&dma0 0 28>,
+				       <&dma0 1 27>;
+				dma-names = "tx", "rx";
+				clocks = <&pmc PMC_TYPE_PERIPHERAL 49>;
+				clock-names = "pclk";
+				#address-cells = <1>;
+				#size-cells = <0>;
 				status = "disabled";
 			};
 

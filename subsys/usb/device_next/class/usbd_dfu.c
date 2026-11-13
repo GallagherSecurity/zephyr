@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "usbd_msg.h"
+#include <usbd_msg.h>
 
 #include <zephyr/init.h>
 #include <zephyr/usb/usbd.h>
@@ -55,7 +55,7 @@ static const struct usb_dfu_descriptor dfu_desc = {
 
 /* Common class data for both run-time and DFU instances. */
 struct usbd_dfu_data {
-	struct usb_desc_header **const runtime_mode_descs;
+	struct usb_desc_header *const *const runtime_mode_descs;
 	struct usb_desc_header **const dfu_mode_descs;
 	enum usb_dfu_state state;
 	enum usb_dfu_state next;
@@ -71,7 +71,7 @@ struct usbd_dfu_data {
 static __noinit struct usb_if_descriptor runtime_if0_desc;
 
 /* Run-Time mode descriptors. No endpoints, identical for high and full speed. */
-static struct usb_desc_header *runtime_mode_descs[] = {
+static struct usb_desc_header *const runtime_mode_descs[] = {
 	(struct usb_desc_header *) &runtime_if0_desc,
 	(struct usb_desc_header *) &dfu_desc,
 	NULL,
@@ -316,7 +316,7 @@ static int dfu_dnload_sync_next(struct usbd_class_data *const c_data,
 
 	switch (setup->bRequest) {
 	case USB_DFU_REQ_GETSTATUS:
-		/* Chack if image backend can change DFU_DNLOAD_SYNC -> DFU_DNLOAD_IDLE */
+		/* Check if image backend can change DFU_DNLOAD_SYNC -> DFU_DNLOAD_IDLE */
 		if (usbd_dfu_image_next(c_data, DFU_DNLOAD_IDLE)) {
 			data->next = DFU_DNLOAD_IDLE;
 		} else {
@@ -516,63 +516,82 @@ static int dfu_set_next_state(struct usbd_class_data *const c_data,
 
 /* Run-Time mode instance implementation, for instance "dfu_runtime" */
 
-static int handle_get_status(struct usbd_class_data *const c_data,
-			     const struct usb_setup_packet *const setup,
-			     struct net_buf *const buf)
+static struct net_buf *handle_get_status(struct usbd_class_data *const c_data,
+					 const struct usb_setup_packet *const setup)
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
-	size_t len = MIN(setup->wLength, net_buf_tailroom(buf));
+	struct net_buf *buf;
 	const size_t getstatus_len = 6;
 
-	if (len != getstatus_len) {
-		return -ENOTSUP;
+	if (setup->wLength != getstatus_len) {
+		return NULL;
+	}
+
+	buf = usbd_ep_ctrl_data_in_alloc(usbd_class_get_ctx(c_data), getstatus_len);
+	if (buf == NULL) {
+		return NULL;
 	}
 
 	/*
 	 * Add GET_STATUS response consisting of
 	 * bStatus, bwPollTimeout, bStatus, iString (no strings defined)
+	 *
+	 * The bState is the state that the device enters immediately after this
+	 * response instead the one it is leaving, per DFU 1.1 Table 6-2.
+	 *
+	 * The distinction here is what tells to the host wait: an image backend
+	 * that reply a waiting condition due to a slow operation from its next_cb
+	 * puts the device into DFU_DNBUSY. Without this signaling the host
+	 * interpret as DFU_DNLOAD_SYNC instead send the next block straight
+	 * into a device that is still busy without perform a poll.
 	 */
 	net_buf_add_u8(buf, data->status);
 	net_buf_add_le16(buf, CONFIG_USBD_DFU_POLLTIMEOUT);
 	net_buf_add_u8(buf, 0);
-	net_buf_add_u8(buf, data->state);
+	net_buf_add_u8(buf, data->next);
 	net_buf_add_u8(buf, 0);
 
-	return 0;
+	return buf;
 }
 
-static int handle_get_state(struct usbd_class_data *const c_data,
-			    const struct usb_setup_packet *const setup,
-			    struct net_buf *const buf)
+static struct net_buf *handle_get_state(struct usbd_class_data *const c_data,
+					const struct usb_setup_packet *const setup)
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
-	size_t len = MIN(setup->wLength, net_buf_tailroom(buf));
+	struct net_buf *buf;
 	const size_t getstate_len = 1;
 
-	if (len != getstate_len) {
-		return -ENOTSUP;
+	if (setup->wLength != getstate_len) {
+		return NULL;
+	}
+
+	buf = usbd_ep_ctrl_data_in_alloc(usbd_class_get_ctx(c_data), getstate_len);
+
+	if (buf == NULL) {
+		return NULL;
 	}
 
 	net_buf_add_u8(buf, data->state);
 
-	return 0;
+	return buf;
 }
 
-static int runtime_mode_control_to_host(struct usbd_class_data *const c_data,
-					const struct usb_setup_packet *const setup,
-					struct net_buf *const buf)
+static struct net_buf *runtime_mode_control_to_host(struct usbd_class_data *const c_data,
+						    const struct usb_setup_packet *const setup)
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
+	struct net_buf *buf = NULL;
+	int ret;
 
-	errno = dfu_set_next_state(c_data, setup);
+	ret = dfu_set_next_state(c_data, setup);
 
-	if (errno == 0) {
+	if (ret == 0) {
 		switch (setup->bRequest) {
 		case USB_DFU_REQ_GETSTATUS:
-			errno = handle_get_status(c_data, setup, buf);
+			buf = handle_get_status(c_data, setup);
 			break;
 		case USB_DFU_REQ_GETSTATE:
-			errno = handle_get_state(c_data, setup, buf);
+			buf = handle_get_state(c_data, setup);
 			break;
 		default:
 			break;
@@ -581,7 +600,7 @@ static int runtime_mode_control_to_host(struct usbd_class_data *const c_data,
 
 	data->state = data->next;
 
-	return 0;
+	return buf;
 }
 
 static int runtime_mode_control_to_dev(struct usbd_class_data *const c_data,
@@ -589,10 +608,15 @@ static int runtime_mode_control_to_dev(struct usbd_class_data *const c_data,
 				       const struct net_buf *const buf)
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
+	int ret;
 
-	errno = dfu_set_next_state(c_data, setup);
+	if (setup->wLength) {
+		return -ENOTSUP;
+	}
 
-	if (errno == 0) {
+	ret = dfu_set_next_state(c_data, setup);
+
+	if (ret == 0) {
 		if (setup->bRequest == USB_DFU_REQ_DETACH) {
 			k_work_reschedule(&data->dwork, K_MSEC(100));
 		}
@@ -600,11 +624,11 @@ static int runtime_mode_control_to_dev(struct usbd_class_data *const c_data,
 
 	data->state = data->next;
 
-	return 0;
+	return ret;
 }
 
-static void *runtime_mode_get_desc(struct usbd_class_data *const c_data,
-				   const enum usbd_speed speed)
+static const void *runtime_mode_get_desc(struct usbd_class_data *const c_data,
+					 const enum usbd_speed speed)
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
 
@@ -626,7 +650,7 @@ static int runtime_mode_init(struct usbd_class_data *const c_data)
 	return 0;
 }
 
-struct usbd_class_api runtime_mode_api = {
+static const struct usbd_class_api runtime_mode_api = {
 	.control_to_host = runtime_mode_control_to_host,
 	.control_to_dev = runtime_mode_control_to_dev,
 	.get_desc = runtime_mode_get_desc,
@@ -637,14 +661,24 @@ USBD_DEFINE_CLASS(dfu_runtime, &runtime_mode_api, &dfu_data, NULL);
 
 /* DFU mode instance implementation, for instance "dfu_dfu" */
 
-static int handle_upload(struct usbd_class_data *const c_data,
-			 const struct usb_setup_packet *const setup,
-			 struct net_buf *const buf)
+static struct net_buf *handle_upload(struct usbd_class_data *const c_data,
+				     const struct usb_setup_packet *const setup)
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
-	uint16_t size = MIN(setup->wLength, net_buf_tailroom(buf));
+	uint16_t size;
 	struct usbd_dfu_image *const image = data->image;
+	struct net_buf *buf;
 	int ret;
+
+	/* read_cb() requires buffer size CONFIG_USBD_DFU_TRANSFER_SIZE */
+	size = CONFIG_USBD_DFU_TRANSFER_SIZE;
+	buf = usbd_ep_ctrl_data_in_alloc(usbd_class_get_ctx(c_data), size);
+	if (buf == NULL) {
+		return NULL;
+	}
+
+	/* Do not return more than requested */
+	size = MIN(setup->wLength, size);
 
 	ret = image->read_cb(image->priv, setup->wValue, size, buf->data);
 	if (ret >= 0) {
@@ -654,10 +688,10 @@ static int handle_upload(struct usbd_class_data *const c_data,
 		}
 	} else {
 		dfu_error(c_data, DFU_ERROR, ERR_UNKNOWN);
-		return -ENOTSUP;
+		net_buf_drop(&buf);
 	}
 
-	return 0;
+	return buf;
 }
 
 static int handle_download(struct usbd_class_data *const c_data,
@@ -666,36 +700,43 @@ static int handle_download(struct usbd_class_data *const c_data,
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
 	struct usbd_dfu_image *const image = data->image;
-	uint16_t size = MIN(setup->wLength, buf->len);
+	const uint8_t *buf_data = NULL;
+	uint16_t size = 0;
 	int ret;
 
-	ret = image->write_cb(image->priv, setup->wValue, size, buf->data);
+	if (buf != NULL) {
+		size = MIN(setup->wLength, buf->len);
+		buf_data = buf->data;
+	}
+
+	ret = image->write_cb(image->priv, setup->wValue, size, buf_data);
 	if (ret < 0) {
-		errno = -ENOTSUP;
 		dfu_error(c_data, DFU_ERROR, ERR_UNKNOWN);
+		return -ENOTSUP;
 	}
 
 	return 0;
 }
 
-static int dfu_mode_control_to_host(struct usbd_class_data *const c_data,
-				    const struct usb_setup_packet *const setup,
-				    struct net_buf *const buf)
+static struct net_buf *dfu_mode_control_to_host(struct usbd_class_data *const c_data,
+						const struct usb_setup_packet *const setup)
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
+	struct net_buf *buf = NULL;
+	int ret;
 
-	errno = dfu_set_next_state(c_data, setup);
+	ret = dfu_set_next_state(c_data, setup);
 
-	if (errno == 0) {
+	if (ret == 0) {
 		switch (setup->bRequest) {
 		case USB_DFU_REQ_GETSTATUS:
-			errno = handle_get_status(c_data, setup, buf);
+			buf = handle_get_status(c_data, setup);
 			break;
 		case USB_DFU_REQ_GETSTATE:
-			errno = handle_get_state(c_data, setup, buf);
+			buf = handle_get_state(c_data, setup);
 			break;
 		case USB_DFU_REQ_UPLOAD:
-			errno = handle_upload(c_data, setup, buf);
+			buf = handle_upload(c_data, setup);
 			break;
 		default:
 			break;
@@ -704,7 +745,7 @@ static int dfu_mode_control_to_host(struct usbd_class_data *const c_data,
 
 	data->state = data->next;
 
-	return 0;
+	return buf;
 }
 
 static int dfu_mode_control_to_dev(struct usbd_class_data *const c_data,
@@ -712,18 +753,28 @@ static int dfu_mode_control_to_dev(struct usbd_class_data *const c_data,
 				   const struct net_buf *const buf)
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
+	int ret;
 
-	errno = dfu_set_next_state(c_data, setup);
-
-	if (errno == 0) {
+	if (setup->wLength && (buf == NULL)) {
 		if (setup->bRequest == USB_DFU_REQ_DNLOAD) {
-			handle_download(c_data, setup, buf);
+			/* Data OUT can be received */
+			return 0;
+		}
+
+		return -ENOTSUP;
+	}
+
+	ret = dfu_set_next_state(c_data, setup);
+
+	if (ret == 0) {
+		if (setup->bRequest == USB_DFU_REQ_DNLOAD) {
+			ret = handle_download(c_data, setup, buf);
 		}
 	}
 
 	data->state = data->next;
 
-	return 0;
+	return ret;
 }
 
 static void dfu_mode_update(struct usbd_class_data *const c_data,
@@ -745,8 +796,8 @@ static void dfu_mode_update(struct usbd_class_data *const c_data,
 	}
 }
 
-static void *dfu_mode_get_desc(struct usbd_class_data *const c_data,
-			       const enum usbd_speed speed)
+static const void *dfu_mode_get_desc(struct usbd_class_data *const c_data,
+				     const enum usbd_speed speed)
 {
 	struct usbd_dfu_data *data = usbd_class_get_private(c_data);
 
@@ -771,17 +822,19 @@ static int dfu_mode_init(struct usbd_class_data *const c_data)
 			data->image = image;
 		}
 
-		if (usbd_add_descriptor(uds_ctx, image->sd_nd)) {
-			LOG_ERR("Failed to add string descriptor");
-		} else {
-			image->if_desc->iInterface = usbd_str_desc_get_idx(image->sd_nd);
+		if (image->if_desc->iInterface == 0) {
+			if (usbd_add_descriptor(uds_ctx, image->sd_nd)) {
+				LOG_ERR("Failed to add string descriptor");
+			} else {
+				image->if_desc->iInterface = usbd_str_desc_get_idx(image->sd_nd);
+			}
 		}
 	}
 
 	return data->image == NULL ? -EINVAL : 0;
 }
 
-struct usbd_class_api dfu_api = {
+static const struct usbd_class_api dfu_api = {
 	.control_to_host = dfu_mode_control_to_host,
 	.control_to_dev = dfu_mode_control_to_dev,
 	.update = dfu_mode_update,

@@ -87,14 +87,16 @@ struct dns_msg_t {
 
 enum dns_rr_type {
 	DNS_RR_TYPE_INVALID = 0,
-	DNS_RR_TYPE_A	= 1,		/* IPv4  */
-	DNS_RR_TYPE_CNAME = 5,		/* CNAME */
-	DNS_RR_TYPE_PTR = 12,		/* PTR   */
-	DNS_RR_TYPE_TXT = 16,		/* TXT   */
-	DNS_RR_TYPE_AAAA = 28,		/* IPv6  */
-	DNS_RR_TYPE_SRV = 33,		/* SRV   */
-	DNS_RR_TYPE_HTTPS = 65,		/* HTTPS */
-	DNS_RR_TYPE_ANY = 0xff,		/* ANY (all records)   */
+	DNS_RR_TYPE_A	= 1,			/* IPv4  */
+	DNS_RR_TYPE_CNAME = 5,			/* CNAME */
+	DNS_RR_TYPE_PTR = 12,			/* PTR   */
+	DNS_RR_TYPE_TXT = 16,			/* TXT   */
+	DNS_RR_TYPE_AAAA = 28,			/* IPv6  */
+	DNS_RR_TYPE_SRV = 33,			/* SRV   */
+	DNS_RR_TYPE_HTTPS = 65,			/* HTTPS */
+	DNS_RR_TYPE_ANY = 0xff,			/* ANY (all records)   */
+	DNS_RR_TYPE_PRIVATE_START = 65280,	/* Private use start */
+	DNS_RR_TYPE_PRIVATE_END = 65534,	/* Private use end */
 };
 
 enum dns_response_type {
@@ -104,7 +106,8 @@ enum dns_response_type {
 	DNS_RESPONSE_TXT,
 	DNS_RESPONSE_SRV,
 	DNS_RESPONSE_CNAME_WITH_IP,
-	DNS_RESPONSE_CNAME_NO_IP
+	DNS_RESPONSE_CNAME_NO_IP,
+	DNS_RESPONSE_PRIVATE,
 };
 
 enum dns_class {
@@ -348,7 +351,9 @@ static inline int dns_unpack_srv_port(const uint8_t *srv)
  * @param domain_name Something like www.example.com
  * @retval 0 on success
  * @retval -ENOMEM if there is no enough space to store the resultant QNAME
- * @retval -EINVAL if an invalid parameter was passed as an argument
+ * @retval -EINVAL if an invalid parameter was passed as an argument, or if
+ *         the name has an empty label other than the root, a label longer
+ *         than 63 octets or packs to more than 255 octets
  */
 int dns_msg_pack_qname(uint16_t *len, uint8_t *buf, uint16_t size,
 		       const char *domain_name);

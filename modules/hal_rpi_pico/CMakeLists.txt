@@ -74,6 +74,7 @@ if(CONFIG_HAS_RPI_PICO)
     ${common_dir}/boot_picoboot_headers/include
     ${common_dir}/pico_base_headers/include
     ${common_dir}/pico_binary_info/include
+    ${common_dir}/pico_util/include/
     ${rp2_common_dir}/boot_bootrom_headers/include
     ${rp2_common_dir}/hardware_base/include
     ${rp2_common_dir}/hardware_boot_lock/include
@@ -138,6 +139,11 @@ if(CONFIG_HAS_RPI_PICO)
   zephyr_include_directories_ifdef(CONFIG_PICOSDK_USE_RTC
           ${rp2_common_dir}/hardware_rtc/include)
 
+  zephyr_library_sources_ifdef(CONFIG_PICOSDK_USE_POWMAN
+          ${rp2_common_dir}/hardware_powman/powman.c)
+  zephyr_include_directories_ifdef(CONFIG_PICOSDK_USE_POWMAN
+          ${rp2_common_dir}/hardware_powman/include)
+
   zephyr_library_sources_ifdef(CONFIG_PICOSDK_USE_PIO
           ${rp2_common_dir}/hardware_pio/pio.c)
   zephyr_include_directories_ifdef(CONFIG_PICOSDK_USE_PIO
@@ -176,7 +182,7 @@ if(CONFIG_HAS_RPI_PICO)
           ${rp2_common_dir}/pico_time_adapter/include
           ${rp2_common_dir}/pico_unique_id/include
   )
-  zephyr_linker_sources_ifdef(CONFIG_PICOSDK_USE_RAND DATA_SECTIONS uninit_data.ld)
+  zephyr_linker_sources_ifdef(CONFIG_PICOSDK_USE_RAND NOINIT uninit_data.ld)
 
   zephyr_include_directories_ifdef(CONFIG_RISCV
           ${common_dir}/pico_sync/include

@@ -6,6 +6,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/portability/cmsis_types.h>
+#include <zephyr/sys/check.h>
 #include <string.h>
 
 #define ACTIVE     1
@@ -13,8 +14,8 @@
 
 static void zephyr_timer_wrapper(struct k_timer *timer);
 
-K_MEM_SLAB_DEFINE(cmsis_rtos_timer_cb_slab, sizeof(struct cmsis_rtos_timer_cb),
-		  CONFIG_CMSIS_V2_TIMER_MAX_COUNT, 4);
+K_MEM_SLAB_DEFINE_TYPE(cmsis_rtos_timer_cb_slab, struct cmsis_rtos_timer_cb,
+		       CONFIG_CMSIS_V2_TIMER_MAX_COUNT);
 
 static const osTimerAttr_t init_timer_attrs = {
 	.name = "ZephyrTimer",
@@ -52,7 +53,9 @@ osTimerId_t osTimerNew(osTimerFunc_t func, osTimerType_t type, void *argument,
 	}
 
 	if (attr->cb_mem != NULL) {
-		__ASSERT(attr->cb_size == sizeof(struct cmsis_rtos_timer_cb), "Invalid cb_size\n");
+		CHECKIF(attr->cb_size < sizeof(struct cmsis_rtos_timer_cb)) {
+			return NULL;
+		}
 		timer = (struct cmsis_rtos_timer_cb *)attr->cb_mem;
 	} else if (k_mem_slab_alloc(&cmsis_rtos_timer_cb_slab, (void **)&timer, K_MSEC(100)) != 0) {
 		return NULL;

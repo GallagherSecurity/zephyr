@@ -4,13 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "skeleton.dtsi"
+#include <freq.h>
+#include <skeleton.dtsi>
 
 #include <zephyr/dt-bindings/i2c/i2c.h>
 #include <zephyr/dt-bindings/gpio/gpio.h>
 
 / {
 	cpus {
+		timebase-frequency = <DT_FREQ_M(144)>;
 		#address-cells = <1>;
 		#size-cells = <0>;
 

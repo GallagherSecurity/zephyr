@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <zephyr/logging/log.h>
+#include <zephyr/kernel.h>
 
 #include <siwx91x_nwp.h>
 #include "siwx91x_wifi.h"
@@ -14,7 +15,7 @@
 #include "sl_net_default_values.h"
 #include "sl_net.h"
 
-LOG_MODULE_DECLARE(siwx91x_wifi);
+LOG_MODULE_DECLARE(siwx91x_wifi, CONFIG_WIFI_LOG_LEVEL);
 
 enum {
 	STATE_IDLE = 0x00,
@@ -125,6 +126,24 @@ unsigned int siwx91x_on_join(sl_wifi_event_t event, unsigned int status,
 
 	wifi_mgmt_raise_connect_result_event(sidev->iface, WIFI_STATUS_CONN_SUCCESS);
 	sidev->state = WIFI_STATE_COMPLETED;
+	k_work_submit(&sidev->on_join_work);
+
+	return 0;
+}
+
+/*
+ * siwx91x_on_join runs on the WiseConnect event-engine thread. Sync NWP
+ * commands from that context (multicast filter via net_if_dormant_off,
+ * DHCP, power-save) block the engine so BLE RX buffers cannot be freed and
+ * the shared pool exhausts. Defer that work to the system workqueue.
+ */
+void siwx91x_on_join_work(struct k_work *work)
+{
+	struct siwx91x_dev *sidev = CONTAINER_OF(work, struct siwx91x_dev, on_join_work);
+
+	if (sidev->state != WIFI_STATE_COMPLETED) {
+		return;
+	}
 
 	if (IS_ENABLED(CONFIG_WIFI_SILABS_SIWX91X_NET_STACK_NATIVE)) {
 		net_if_dormant_off(sidev->iface);
@@ -134,11 +153,9 @@ unsigned int siwx91x_on_join(sl_wifi_event_t event, unsigned int status,
 	siwx91x_on_join_ipv6(sidev);
 
 	siwx91x_apply_power_save(sidev);
-
-	return 0;
 }
 
-int siwx91x_disconnect(const struct device *dev)
+int siwx91x_disconnect(const struct device *dev, struct net_if *iface)
 {
 	sl_wifi_interface_t interface = sl_wifi_get_default_interface();
 	struct siwx91x_dev *sidev = dev->data;
@@ -151,18 +168,19 @@ int siwx91x_disconnect(const struct device *dev)
 
 	ret = sl_wifi_disconnect(interface);
 	if (ret) {
-		wifi_mgmt_raise_disconnect_result_event(sidev->iface, ret);
+		wifi_mgmt_raise_disconnect_result_event(iface, ret);
 		return -EIO;
 	}
 
 	if (IS_ENABLED(CONFIG_WIFI_SILABS_SIWX91X_NET_STACK_NATIVE)) {
-		net_if_dormant_on(sidev->iface);
+		net_if_dormant_on(iface);
 	}
 
 	return 0;
 }
 
 static int siwx91x_disconnect_if_required(const struct device *dev,
+					  struct net_if *iface,
 					  struct wifi_connect_req_params *new_params)
 {
 	struct wifi_iface_status prev_params = { };
@@ -171,13 +189,13 @@ static int siwx91x_disconnect_if_required(const struct device *dev,
 	sl_net_credential_type_t psk_type;
 	int ret;
 
-	ret = siwx91x_status(dev, &prev_params);
+	ret = siwx91x_status(dev, iface, &prev_params);
 	if (ret < 0) {
 		return ret;
 	}
 
 	if (siwx91x_param_changed(&prev_params, new_params)) {
-		return siwx91x_disconnect(dev);
+		return siwx91x_disconnect(dev, iface);
 	}
 
 	if (new_params->security != WIFI_SECURITY_TYPE_NONE) {
@@ -190,7 +208,7 @@ static int siwx91x_disconnect_if_required(const struct device *dev,
 
 		if (new_params->psk_length != prev_psk_length ||
 		    memcmp(new_params->psk, prev_psk, prev_psk_length) != 0) {
-			return siwx91x_disconnect(dev);
+			return siwx91x_disconnect(dev, iface);
 		}
 	}
 
@@ -198,9 +216,12 @@ static int siwx91x_disconnect_if_required(const struct device *dev,
 	return -EALREADY;
 }
 
-int siwx91x_connect(const struct device *dev, struct wifi_connect_req_params *params)
+int siwx91x_connect(const struct device *dev,
+		    struct net_if *iface,
+		    struct wifi_connect_req_params *params)
 {
 	sl_wifi_interface_t interface = sl_wifi_get_default_interface();
+	sl_wifi_mfp_mode_t mfp;
 	sl_wifi_client_configuration_t wifi_config = {
 		.bss_type = SL_WIFI_BSS_TYPE_INFRASTRUCTURE,
 		.encryption = SL_WIFI_DEFAULT_ENCRYPTION,
@@ -210,9 +231,9 @@ int siwx91x_connect(const struct device *dev, struct wifi_connect_req_params *pa
 	int ret;
 
 	if (sidev->state == WIFI_STATE_COMPLETED) {
-		ret = siwx91x_disconnect_if_required(dev, params);
+		ret = siwx91x_disconnect_if_required(dev, iface, params);
 		if (ret < 0) {
-			wifi_mgmt_raise_connect_result_event(sidev->iface, WIFI_STATUS_CONN_FAIL);
+			wifi_mgmt_raise_connect_result_event(iface, WIFI_STATUS_CONN_FAIL);
 			return ret;
 		}
 	}
@@ -232,6 +253,8 @@ int siwx91x_connect(const struct device *dev, struct wifi_connect_req_params *pa
 		 */
 		wifi_config.security = SL_WIFI_WPA2;
 		break;
+	case WIFI_SECURITY_TYPE_SAE:
+	case WIFI_SECURITY_TYPE_SAE_H2E:
 	case WIFI_SECURITY_TYPE_SAE_AUTO:
 		/* Use WPA3 security as the device supports only HNP and H2E
 		 * methods for SAE
@@ -270,17 +293,47 @@ int siwx91x_connect(const struct device *dev, struct wifi_connect_req_params *pa
 
 	if (ret) {
 		LOG_ERR("Failed to set credentials: 0x%x", ret);
-		wifi_mgmt_raise_connect_result_event(sidev->iface, WIFI_STATUS_CONN_FAIL);
+		wifi_mgmt_raise_connect_result_event(iface, WIFI_STATUS_CONN_FAIL);
 		return -EINVAL;
 	}
 
-	/* The Zephyr mfp values match the values expected by
-	 * Wiseconnect's mfp, even though the enum type differs.
-	 */
-	ret = sl_wifi_set_mfp(interface, (sl_wifi_mfp_mode_t)params->mfp);
+	switch (params->mfp) {
+	case WIFI_MFP_DISABLE:
+		mfp = SL_WIFI_MFP_DISABLED;
+		break;
+	case WIFI_MFP_OPTIONAL:
+		mfp = SL_WIFI_MFP_CAPABLE;
+		break;
+	case WIFI_MFP_REQUIRED:
+		mfp = SL_WIFI_MFP_REQUIRED;
+		break;
+	case WIFI_MFP_UNKNOWN:
+		switch (params->security) {
+		case WIFI_SECURITY_TYPE_PSK:
+		case WIFI_SECURITY_TYPE_PSK_SHA256:
+		case WIFI_SECURITY_TYPE_WPA_AUTO_PERSONAL:
+			mfp = SL_WIFI_MFP_CAPABLE;
+			break;
+		case WIFI_SECURITY_TYPE_SAE:
+		case WIFI_SECURITY_TYPE_SAE_H2E:
+		case WIFI_SECURITY_TYPE_SAE_AUTO:
+			mfp = SL_WIFI_MFP_REQUIRED;
+			break;
+		default:
+			mfp = SL_WIFI_MFP_DISABLED;
+			break;
+		}
+		break;
+	default:
+		LOG_ERR("Invalid MFP mode %d", params->mfp);
+		wifi_mgmt_raise_connect_result_event(iface, WIFI_STATUS_CONN_FAIL);
+		return -EINVAL;
+	}
+
+	ret = sl_wifi_set_mfp(interface, mfp);
 	if (ret != SL_STATUS_OK) {
 		LOG_ERR("Failed to set MFP: 0x%x", ret);
-		wifi_mgmt_raise_connect_result_event(sidev->iface, WIFI_STATUS_CONN_FAIL);
+		wifi_mgmt_raise_connect_result_event(iface, WIFI_STATUS_CONN_FAIL);
 		return -EINVAL;
 	}
 
@@ -295,7 +348,7 @@ int siwx91x_connect(const struct device *dev, struct wifi_connect_req_params *pa
 
 	ret = sl_wifi_connect(interface, &wifi_config, 0);
 	if (ret != SL_STATUS_IN_PROGRESS) {
-		wifi_mgmt_raise_connect_result_event(sidev->iface, WIFI_STATUS_CONN_FAIL);
+		wifi_mgmt_raise_connect_result_event(iface, WIFI_STATUS_CONN_FAIL);
 		return -EIO;
 	}
 

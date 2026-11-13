@@ -46,10 +46,10 @@ struct lfs_file_data {
 #define LFS_FILEP(fp) (&((struct lfs_file_data *)(fp->filep))->file)
 
 /* Global memory pool for open files and dirs */
-K_MEM_SLAB_DEFINE_STATIC(file_data_pool, sizeof(struct lfs_file_data),
-			 CONFIG_FS_LITTLEFS_NUM_FILES, 4);
-K_MEM_SLAB_DEFINE_STATIC(lfs_dir_pool, sizeof(struct lfs_dir),
-			 CONFIG_FS_LITTLEFS_NUM_DIRS, 4);
+K_MEM_SLAB_DEFINE_STATIC_TYPE(file_data_pool, struct lfs_file_data,
+			      CONFIG_FS_LITTLEFS_NUM_FILES);
+K_MEM_SLAB_DEFINE_STATIC_TYPE(lfs_dir_pool, struct lfs_dir,
+			      CONFIG_FS_LITTLEFS_NUM_DIRS);
 
 /* Inferred overhead, in bytes, for each k_heap_aligned allocation for
  * the filecache heap.  This relates to the CHUNK_UNIT parameter in
@@ -952,6 +952,19 @@ static int littlefs_mount(struct fs_mount_t *mountp)
 {
 	int ret = 0;
 	struct fs_littlefs *fs = mountp->fs_data;
+
+	/* littlefs requires a pre-allocated fs_littlefs; it does not
+	 * allocate one from a NULL fs_data the way ext2 does.
+	 */
+	if (fs == NULL) {
+		LOG_ERR("fs_data is required for littlefs");
+		return -EINVAL;
+	}
+
+	if (fs->backend != NULL) {
+		LOG_ERR("littlefs instance is already mounted");
+		return -EBUSY;
+	}
 
 	/* Create and take mutex. */
 	k_mutex_init(&fs->mutex);

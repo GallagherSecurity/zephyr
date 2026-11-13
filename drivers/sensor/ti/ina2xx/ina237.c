@@ -17,6 +17,9 @@ LOG_MODULE_DECLARE(INA2XX, CONFIG_SENSOR_LOG_LEVEL);
 /** @brief INA237 calibration scaling value (scaled by 10^-5) */
 #define INA237_CAL_SCALING 8192ULL
 
+/** @brief Timeout (ms) waiting for CNVRF (conversion ready) in triggered mode */
+#define INA237_CNVRF_TIMEOUT_MS 5000
+
 /** @brief INA228 calibration scaling value (scaled by 10^-5) */
 #define INA228_CAL_SCALING (INA237_CAL_SCALING << 4)
 
@@ -226,10 +229,36 @@ static int ina237_trigg_one_shot_request(const struct device *dev, enum sensor_c
  */
 static int ina237_sample_fetch(const struct device *dev, enum sensor_channel chan)
 {
+	const struct ina237_config *config = dev->config;
+	const struct ina2xx_config *common = &config->common;
 	int ret;
 
 	if (ina237_is_triggered_mode_set(dev)) {
 		ret = ina237_trigg_one_shot_request(dev, chan);
+		if (ret < 0) {
+			return ret;
+		}
+
+		/* Poll DIAG_ALRT until CNVRF (conversion ready) is set or 5 s timeout */
+		uint16_t reg_alert;
+		int64_t deadline = k_uptime_get() + INA237_CNVRF_TIMEOUT_MS;
+
+		do {
+			ret = ina2xx_reg_read_16(&common->bus, INA237_REG_ALERT, &reg_alert);
+			if (ret < 0) {
+				return ret;
+			}
+			if (reg_alert & INA237_ALERT_CNVRF) {
+				break;
+			}
+			if (k_uptime_get() >= deadline) {
+				LOG_ERR("INA237: conversion ready timeout");
+				return -ETIMEDOUT;
+			}
+			k_msleep(1);
+		} while (true);
+
+		ret = ina2xx_sample_fetch(dev, chan);
 	} else {
 		ret = ina2xx_sample_fetch(dev, chan);
 	}
@@ -360,9 +389,9 @@ static DEVICE_API(sensor, ina228_driver_api) = {
 	(DT_INST_ENUM_IDX(inst, temp_conversion_time_us) << 3) |   \
 	(DT_INST_ENUM_IDX(inst, avg_count))
 
-#define INA237_DT_CAL(inst)                               \
-	CAL_PRECISION_MULTIPLIER(inst) * INA237_CAL_SCALING * \
-	DT_INST_PROP(inst, current_lsb_microamps) *           \
+#define INA2XX_DT_CAL(inst, scaling)             \
+	CAL_PRECISION_MULTIPLIER(inst) * (scaling) * \
+	DT_INST_PROP(inst, current_lsb_microamps) *  \
 	DT_INST_PROP(inst, rshunt_micro_ohms) / 10000000ULL
 
 #define INA237_DRIVER_INIT(inst)                                               \
@@ -373,7 +402,7 @@ static DEVICE_API(sensor, ina228_driver_api) = {
 			.current_lsb = DT_INST_PROP(inst, current_lsb_microamps),          \
 			.config = INA237_DT_CONFIG(inst),                                  \
 			.adc_config = INA237_DT_ADC_CONFIG(inst),                          \
-			.cal = INA237_DT_CAL(inst),                                        \
+			.cal = INA2XX_DT_CAL(inst, INA237_CAL_SCALING),                    \
 			.id_reg = &ina237_mfr_id,                                          \
 			.config_reg = &ina237_config,                                      \
 			.adc_config_reg = &ina237_adc_config,                              \
@@ -394,7 +423,7 @@ static DEVICE_API(sensor, ina228_driver_api) = {
 			.bus = I2C_DT_SPEC_INST_GET(inst),                                 \
 			.current_lsb = DT_INST_PROP(inst, current_lsb_microamps),          \
 			.adc_config = INA237_DT_ADC_CONFIG(inst),                          \
-			.cal = (INA237_DT_CAL(inst) * 16),                                 \
+			.cal = INA2XX_DT_CAL(inst, INA228_CAL_SCALING),                    \
 			.id_reg = &ina237_mfr_id,                                          \
 			.config_reg = &ina237_config,                                      \
 			.adc_config_reg = &ina237_adc_config,                              \

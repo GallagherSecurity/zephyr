@@ -173,15 +173,19 @@ static void cap_initiator_test_unicast_stop_before(void *f)
 static void cap_initiator_test_unicast_stop_after(void *f)
 {
 	struct cap_initiator_test_unicast_stop_fixture *fixture = f;
+	int err;
 
-	bt_cap_initiator_unregister_cb(&mock_cap_initiator_cb);
+	err = bt_cap_initiator_unregister_cb(&mock_cap_initiator_cb);
+	zassert_true(err == 0 || err == -EINVAL, "Unexpected error: %d", err);
 
-	for (size_t i = 0; i < ARRAY_SIZE(fixture->conns); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(fixture->conns); i++) {
 		mock_bt_conn_disconnected(&fixture->conns[i], BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 	}
 
 	/* In the case of a test failing, we cancel the procedure so that subsequent won't fail */
-	bt_cap_initiator_unicast_audio_cancel();
+	err = bt_cap_initiator_unicast_audio_cancel();
+	/* May fail if no CAP procedure is in progress */
+	zassert_true(err == 0 || err == -EALREADY, "Unexpected error: %d", err);
 
 	if (fixture->unicast_group != NULL) {
 		const struct bt_cap_unicast_audio_stop_param param = {
@@ -191,8 +195,15 @@ static void cap_initiator_test_unicast_stop_after(void *f)
 			.release = true,
 		};
 
-		(void)bt_cap_initiator_unicast_audio_stop(&param);
-		(void)bt_cap_unicast_group_delete(fixture->unicast_group);
+		err = bt_cap_initiator_unicast_audio_stop(&param);
+		if (err != 0) {
+			printk("Failed to stop unicast audio (err %d)\n", err);
+		}
+
+		err = bt_cap_unicast_group_delete(fixture->unicast_group);
+		if (err != 0) {
+			printk("Failed to delete unicast group (err %d)\n", err);
+		}
 	}
 }
 
@@ -212,7 +223,7 @@ static ZTEST_F(cap_initiator_test_unicast_stop,
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		test_unicast_set_state(&fixture->cap_streams[i], get_conn_from_index(fixture, i),
-				       get_ep_from_index(fixture, i), &fixture->preset,
+				       get_ep_from_index(fixture, i), &fixture->preset.codec_cfg,
 				       BT_BAP_EP_STATE_CODEC_CONFIGURED);
 	}
 
@@ -238,7 +249,7 @@ static ZTEST_F(cap_initiator_test_unicast_stop,
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		test_unicast_set_state(&fixture->cap_streams[i], get_conn_from_index(fixture, i),
-				       get_ep_from_index(fixture, i), &fixture->preset,
+				       get_ep_from_index(fixture, i), &fixture->preset.codec_cfg,
 				       BT_BAP_EP_STATE_QOS_CONFIGURED);
 	}
 
@@ -263,7 +274,7 @@ static ZTEST_F(cap_initiator_test_unicast_stop, test_initiator_unicast_stop_disa
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		test_unicast_set_state(&fixture->cap_streams[i], get_conn_from_index(fixture, i),
-				       get_ep_from_index(fixture, i), &fixture->preset,
+				       get_ep_from_index(fixture, i), &fixture->preset.codec_cfg,
 				       BT_BAP_EP_STATE_ENABLING);
 	}
 
@@ -272,6 +283,16 @@ static ZTEST_F(cap_initiator_test_unicast_stop, test_initiator_unicast_stop_disa
 
 	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_complete_cb", 1,
 			   mock_cap_initiator_unicast_stop_complete_cb_fake.call_count);
+
+	/* The streams were streaming or enabling, so both the Disable and the Receiver Stop Ready
+	 * subprocedures were performed, but the streams were not released
+	 */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_disabled", 1,
+			   mock_cap_initiator_unicast_stop_disabled_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_stopped", 1,
+			   mock_cap_initiator_unicast_stop_stopped_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_released", 0,
+			   mock_cap_initiator_unicast_stop_released_cb_fake.call_count);
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		const struct bt_bap_stream *bap_stream = &fixture->cap_streams[i].bap_stream;
@@ -288,7 +309,7 @@ static ZTEST_F(cap_initiator_test_unicast_stop, test_initiator_unicast_stop_disa
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		test_unicast_set_state(&fixture->cap_streams[i], get_conn_from_index(fixture, i),
-				       get_ep_from_index(fixture, i), &fixture->preset,
+				       get_ep_from_index(fixture, i), &fixture->preset.codec_cfg,
 				       BT_BAP_EP_STATE_STREAMING);
 	}
 
@@ -297,6 +318,16 @@ static ZTEST_F(cap_initiator_test_unicast_stop, test_initiator_unicast_stop_disa
 
 	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_complete_cb", 1,
 			   mock_cap_initiator_unicast_stop_complete_cb_fake.call_count);
+
+	/* The streams were streaming or enabling, so both the Disable and the Receiver Stop Ready
+	 * subprocedures were performed, but the streams were not released
+	 */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_disabled", 1,
+			   mock_cap_initiator_unicast_stop_disabled_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_stopped", 1,
+			   mock_cap_initiator_unicast_stop_stopped_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_released", 0,
+			   mock_cap_initiator_unicast_stop_released_cb_fake.call_count);
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		const struct bt_bap_stream *bap_stream = &fixture->cap_streams[i].bap_stream;
@@ -314,7 +345,7 @@ static ZTEST_F(cap_initiator_test_unicast_stop,
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		test_unicast_set_state(&fixture->cap_streams[i], get_conn_from_index(fixture, i),
-				       get_ep_from_index(fixture, i), &fixture->preset,
+				       get_ep_from_index(fixture, i), &fixture->preset.codec_cfg,
 				       BT_BAP_EP_STATE_CODEC_CONFIGURED);
 	}
 
@@ -325,6 +356,16 @@ static ZTEST_F(cap_initiator_test_unicast_stop,
 
 	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_complete_cb", 1,
 			   mock_cap_initiator_unicast_stop_complete_cb_fake.call_count);
+
+	/* The streams were not streaming or enabling, so only the Release subprocedure was
+	 * performed
+	 */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_disabled", 0,
+			   mock_cap_initiator_unicast_stop_disabled_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_stopped", 0,
+			   mock_cap_initiator_unicast_stop_stopped_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_released", 1,
+			   mock_cap_initiator_unicast_stop_released_cb_fake.call_count);
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		const struct bt_bap_stream *bap_stream = &fixture->cap_streams[i].bap_stream;
@@ -341,7 +382,7 @@ static ZTEST_F(cap_initiator_test_unicast_stop,
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		test_unicast_set_state(&fixture->cap_streams[i], get_conn_from_index(fixture, i),
-				       get_ep_from_index(fixture, i), &fixture->preset,
+				       get_ep_from_index(fixture, i), &fixture->preset.codec_cfg,
 				       BT_BAP_EP_STATE_QOS_CONFIGURED);
 	}
 
@@ -352,6 +393,16 @@ static ZTEST_F(cap_initiator_test_unicast_stop,
 
 	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_complete_cb", 1,
 			   mock_cap_initiator_unicast_stop_complete_cb_fake.call_count);
+
+	/* The streams were not streaming or enabling, so only the Release subprocedure was
+	 * performed
+	 */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_disabled", 0,
+			   mock_cap_initiator_unicast_stop_disabled_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_stopped", 0,
+			   mock_cap_initiator_unicast_stop_stopped_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_released", 1,
+			   mock_cap_initiator_unicast_stop_released_cb_fake.call_count);
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		const struct bt_bap_stream *bap_stream = &fixture->cap_streams[i].bap_stream;
@@ -367,7 +418,7 @@ static ZTEST_F(cap_initiator_test_unicast_stop, test_initiator_unicast_stop_rele
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		test_unicast_set_state(&fixture->cap_streams[i], get_conn_from_index(fixture, i),
-				       get_ep_from_index(fixture, i), &fixture->preset,
+				       get_ep_from_index(fixture, i), &fixture->preset.codec_cfg,
 				       BT_BAP_EP_STATE_ENABLING);
 	}
 
@@ -378,6 +429,16 @@ static ZTEST_F(cap_initiator_test_unicast_stop, test_initiator_unicast_stop_rele
 
 	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_complete_cb", 1,
 			   mock_cap_initiator_unicast_stop_complete_cb_fake.call_count);
+
+	/* The streams were streaming or enabling and were requested to be released, so all
+	 * subprocedures were performed
+	 */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_disabled", 1,
+			   mock_cap_initiator_unicast_stop_disabled_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_stopped", 1,
+			   mock_cap_initiator_unicast_stop_stopped_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_released", 1,
+			   mock_cap_initiator_unicast_stop_released_cb_fake.call_count);
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		const struct bt_bap_stream *bap_stream = &fixture->cap_streams[i].bap_stream;
@@ -393,7 +454,7 @@ static ZTEST_F(cap_initiator_test_unicast_stop, test_initiator_unicast_stop_rele
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		test_unicast_set_state(&fixture->cap_streams[i], get_conn_from_index(fixture, i),
-				       get_ep_from_index(fixture, i), &fixture->preset,
+				       get_ep_from_index(fixture, i), &fixture->preset.codec_cfg,
 				       BT_BAP_EP_STATE_STREAMING);
 	}
 
@@ -404,6 +465,16 @@ static ZTEST_F(cap_initiator_test_unicast_stop, test_initiator_unicast_stop_rele
 
 	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_complete_cb", 1,
 			   mock_cap_initiator_unicast_stop_complete_cb_fake.call_count);
+
+	/* The streams were streaming or enabling and were requested to be released, so all
+	 * subprocedures were performed
+	 */
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_disabled", 1,
+			   mock_cap_initiator_unicast_stop_disabled_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_stopped", 1,
+			   mock_cap_initiator_unicast_stop_stopped_cb_fake.call_count);
+	zexpect_call_count("bt_cap_initiator_cb.unicast_stop_released", 1,
+			   mock_cap_initiator_unicast_stop_released_cb_fake.call_count);
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		const struct bt_bap_stream *bap_stream = &fixture->cap_streams[i].bap_stream;
 
@@ -445,7 +516,7 @@ static ZTEST_F(cap_initiator_test_unicast_stop, test_initiator_unicast_stop_inva
 
 	ARRAY_FOR_EACH(fixture->cap_streams, i) {
 		test_unicast_set_state(&fixture->cap_streams[i], get_conn_from_index(fixture, i),
-				       get_ep_from_index(fixture, i), &fixture->preset,
+				       get_ep_from_index(fixture, i), &fixture->preset.codec_cfg,
 				       BT_BAP_EP_STATE_STREAMING);
 	}
 

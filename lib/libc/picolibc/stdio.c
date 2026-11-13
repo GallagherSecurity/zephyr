@@ -11,8 +11,24 @@ static LIBC_DATA int (*_stdout_hook)(int);
 int z_impl_zephyr_fputc(int a, FILE *out)
 {
 	(*_stdout_hook)(a);
+	ARG_UNUSED(out);
 	return 0;
 }
+
+#ifdef CONFIG_POSIX_DEVICE_IO
+int z_impl_zephyr_write_stdout(const void *buffer, int nbytes)
+{
+	const char *buf = buffer;
+
+	for (int i = 0; i < nbytes; i++) {
+		if (*(buf + i) == '\n') {
+			(*_stdout_hook)('\r');
+		}
+		(*_stdout_hook)(*(buf + i));
+	}
+	return nbytes;
+}
+#endif
 
 #ifdef CONFIG_USERSPACE
 static inline int z_vrfy_zephyr_fputc(int c, FILE *stream)
@@ -41,7 +57,7 @@ FILE *const stdin = &__stdin;
 FILE *const stdout = &__stdout;
 STDIO_ALIAS(stderr);
 
-void __stdout_hook_install(int (*hook)(int))
+void __stdout_hook_install(int (*hook)(int c))
 {
 	_stdout_hook = hook;
 	__stdout.flags |= _FDEV_SETUP_WRITE;

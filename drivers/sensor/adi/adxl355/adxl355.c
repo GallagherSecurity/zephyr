@@ -24,7 +24,7 @@ LOG_MODULE_REGISTER(ADXL355, CONFIG_SENSOR_LOG_LEVEL);
 static int adxl355_bus_is_ready_i2c(const union adxl355_bus *bus)
 {
 	if (!i2c_is_ready_dt(&bus->i2c)) {
-		LOG_ERR("I2C bus not ready");
+		LOG_ERR_DEVICE_NOT_READY(bus->i2c.bus);
 		return -ENODEV;
 	}
 
@@ -47,7 +47,7 @@ static int adxl355_reg_access_i2c(const struct device *dev, bool read, uint8_t r
 static int adxl355_bus_is_ready_spi(const union adxl355_bus *bus)
 {
 	if (!spi_is_ready_dt(&bus->spi)) {
-		LOG_ERR("SPI bus not ready");
+		LOG_ERR_DEVICE_NOT_READY(bus->spi.bus);
 		return -ENODEV;
 	}
 
@@ -623,6 +623,7 @@ static int adxl355_read_sample(const struct device *dev)
 	sample->y = combine_bytes_to_int20(buf[3], buf[4], buf[5]);
 	sample->z = combine_bytes_to_int20(buf[6], buf[7], buf[8]);
 	sample->range = data->range;
+	sample->is_fifo = 0;
 	return 0;
 }
 
@@ -908,6 +909,7 @@ static int adxl355_attr_set(const struct device *dev, enum sensor_channel chan,
 {
 	/* Changes to the configurations setting must be made in Standby Mode */
 	int ret = 0;
+	int err;
 
 	if (val == NULL) {
 		LOG_ERR("Null pointer passed for sensor value");
@@ -940,7 +942,8 @@ static int adxl355_attr_set(const struct device *dev, enum sensor_channel chan,
 			break;
 		default:
 			LOG_ERR("Channel %u not supported for configuration attribute", chan);
-			return -ENOTSUP;
+			ret = -ENOTSUP;
+			break;
 		}
 		break;
 	case SENSOR_ATTR_OFFSET:
@@ -952,7 +955,8 @@ static int adxl355_attr_set(const struct device *dev, enum sensor_channel chan,
 			break;
 		default:
 			LOG_ERR("Channel %u not supported for offset attribute", chan);
-			return -ENOTSUP;
+			ret = -ENOTSUP;
+			break;
 		}
 		break;
 	case SENSOR_ATTR_ADXL355_FIFO_WATERMARK:
@@ -990,18 +994,22 @@ static int adxl355_attr_set(const struct device *dev, enum sensor_channel chan,
 		break;
 	default:
 		LOG_ERR("Attribute not supported");
-		return -ENOTSUP;
+		ret = -ENOTSUP;
+		break;
 	}
 	if (ret != 0) {
 		LOG_ERR("Failed to set attribute");
-		return ret;
 	}
-	ret = adxl355_set_op_mode(dev, ADXL355_MEASURE);
-	if (ret != 0) {
-		LOG_ERR("Failed to set measurement mode after attribute set");
-		return ret;
+
+	err = adxl355_set_op_mode(dev, ADXL355_MEASURE);
+	if (err != 0) {
+		LOG_ERR("Failed to restore measurement mode: %d", err);
+		if (ret == 0) {
+			ret = err;
+		}
 	}
-	return 0;
+
+	return ret;
 }
 
 /**
@@ -1064,7 +1072,27 @@ static int adxl355_reset_device(const struct device *dev)
 		return ret;
 	}
 
-	return 0;
+	/*
+	 * The device does not respond until it has reloaded its NVM: reads return
+	 * 0xFF, which has NVM_BUSY set, and writes are ignored. Wait for it before
+	 * any register is programmed.
+	 */
+	for (int i = 0; i < ADXL355_RESET_POLL_ATTEMPTS; i++) {
+		uint8_t status;
+
+		k_msleep(1);
+		ret = adxl355_reg_read(dev, ADXL355_STATUS, &status, 1);
+		if (ret != 0) {
+			LOG_ERR("Failed to read status after reset");
+			return ret;
+		}
+		if ((status & ADXL355_STATUS_NVM_BUSY_MSK) == 0) {
+			return 0;
+		}
+	}
+
+	LOG_ERR("Device still busy after reset");
+	return -ETIMEDOUT;
 }
 
 static DEVICE_API(sensor, adxl355_api_funcs) = {
@@ -1459,7 +1487,6 @@ static int adxl355_pm_action(const struct device *dev, enum pm_device_action act
 						(ADXL355_CFG_IRQ(inst)), ()) }
 
 #define ADXL355_DEFINE(inst)                                                                       \
-	BUILD_ASSERT(DT_INST_PROP(inst, fifo_watermark) <= 96, "FIFO watermark must be <= 96");    \
 	BUILD_ASSERT(DT_INST_PROP(inst, fifo_watermark) % 3 == 0,                                  \
 		     "FIFO watermark must be multiple of 3");                                      \
 	IF_ENABLED(CONFIG_ADXL355_STREAM,						\

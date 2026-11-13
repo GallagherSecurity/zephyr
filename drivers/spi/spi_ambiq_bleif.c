@@ -14,7 +14,7 @@
 LOG_MODULE_REGISTER(spi_ambiq_bleif);
 
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/spi/rtio.h>
+#include "spi_rtio.h"
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
@@ -72,8 +72,8 @@ static int spi_config(const struct device *dev, const struct spi_config *config)
 		return -ENOTSUP;
 	}
 
-	if (config->operation & SPI_OP_MODE_SLAVE) {
-		LOG_ERR("Slave mode not supported");
+	if (config->operation & SPI_OP_MODE_PERIPHERAL) {
+		LOG_ERR("Peripheral mode not supported");
 		return -ENOTSUP;
 	}
 	if (config->operation & SPI_MODE_LOOP) {

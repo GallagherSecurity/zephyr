@@ -21,6 +21,9 @@
 #include <stm32_backup_domain.h>
 #include <stm32_hsem.h>
 
+/* Power supply / regulator configuration node */
+#define PWRC_NODE DT_INST(0, st_stm32h7_pwr)
+
 /* Macros to fill up prescaler values */
 #if defined(CONFIG_SOC_SERIES_STM32H7RSX)
 #define hsi_divider(v) CONCAT(LL_RCC_HSI_DIV_, v)
@@ -35,6 +38,10 @@
 #define apb3_prescaler(v) CONCAT(LL_RCC_APB3_DIV_, v)
 #define apb4_prescaler(v) CONCAT(LL_RCC_APB4_DIV_, v)
 #define apb5_prescaler(v) CONCAT(LL_RCC_APB5_DIV_, v)
+
+/* VCOH frequency range */
+#define VCOH_MIN_FREQ DT_PROP_BY_IDX(STM32_CLOCK_CONTROL_NODE, st_vcoh_frequency_range, 0)
+#define VCOH_MAX_FREQ DT_PROP_BY_IDX(STM32_CLOCK_CONTROL_NODE, st_vcoh_frequency_range, 1)
 
 /* PLLx fractional ratio is 2^13 */
 #define PLL_FRACN_DIVISOR 8192
@@ -190,6 +197,11 @@
 #define STM32H7_BUS_CLK_REG	DT_REG_ADDR(DT_NODELABEL(rcc)) + 0x60
 #endif
 
+#if IS_ENABLED(STM32_PLL_P_ENABLED)
+BUILD_ASSERT(((STM32_PLL_P_DIVISOR == 1) || (STM32_PLL_P_DIVISOR % 2) == 0),
+	     "STM32H7/H7RS PLL1 DIVP divisor factor must be 1 or even");
+#endif /* STM32_PLL_P_ENABLED */
+
 static uint32_t get_bus_clock(uint32_t clock, uint32_t prescaler)
 {
 	return clock / prescaler;
@@ -280,16 +292,37 @@ static uint32_t get_sysclk_frequency(void)
 
 static int32_t prepare_regulator_voltage_scale(void)
 {
-	/* Make sure to put the CPU in highest Voltage scale during clock configuration */
-	/* Highest voltage is SCALE0 */
+	/* Put the CPU in the highest voltage scale supported by the board */
 #if defined(CONFIG_SOC_SERIES_STM32H7RSX)
+	/* VOS0 is always safe to use on STM32H7RS */
 	LL_PWR_SetRegulVoltageScaling(LL_PWR_REGU_VOLTAGE_SCALE0);
 	while (LL_PWR_IsActiveFlag_VOSRDY() == 0) {
+	}
+#elif defined(SYSCFG_PWRCR_ODEN)
+	/*
+	 * On STM32H74x/H75x lines, VOS0 is the overdrive scale entered by
+	 * setting SYSCFG_PWRCR.ODEN, and is only valid when Vcore is generated
+	 * by the LDO (H7 Data Sheets; stm32h7xx_hal_pwr.h). Other supply modes
+	 * (e.g. SMPS-direct, LDO off) are limited to VOS1.
+	 */
+	if (DT_ENUM_HAS_VALUE(PWRC_NODE, power_supply, ldo) ||
+	    DT_ENUM_HAS_VALUE(PWRC_NODE, power_supply, smps_ldo) ||
+	    DT_ENUM_HAS_VALUE(PWRC_NODE, power_supply, smps_ext_ldo)) {
+		/* Enable the SYSCFG clock so the ODEN write takes effect. */
+		LL_APB4_GRP1_EnableClock(LL_APB4_GRP1_PERIPH_SYSCFG);
+		__HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
+	} else {
+		__HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+	}
+
+	while (LL_PWR_IsActiveFlag_VOS() == 0) {
+	}
 #else
+	/* On other STM32H7 lines VOS0 does not use ODEN and is always safe */
 	__HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
 	while (LL_PWR_IsActiveFlag_VOS() == 0) {
-#endif
 	}
+#endif
 
 	return 0;
 }
@@ -315,36 +348,47 @@ static int32_t optimize_regulator_voltage_scale(uint32_t sysclk_freq)
 	return 0;
 }
 
-__unused
-static int get_vco_input_range(uint32_t m_div, uint32_t *range)
+__maybe_unused
+static int get_vco_parameters(uint32_t ref_ck, uint32_t target_vco_ck,
+			      uint32_t *inrange, uint32_t *vcosel)
 {
-	uint32_t vco_freq;
+	/*
+	 * Some constraints are consistent across all lines of STM32H7 SoCs:
+	 * - In VCOL mode: 1 MHz <= ref_ck <= 2 MHz, 150 MHz <= vco_ck <= 420 MHz
+	 * - In VCOH mode: 2 MHz <= ref_ck <= 16 MHz
+	 *
+	 * Constraints on vco_ck when operating in VCOH mode vary depending on the
+	 * product line and are taken from DT. Refer to figure "PLL block diagram"
+	 * or section "PLL description" of RM0399, RM0433, RM0455, RM0468 and RM0477
+	 * for more details.
+	 */
+	const bool vcol_input_ok = IN_RANGE(ref_ck, MHZ(1), MHZ(2));
+	const bool vcol_output_ok = IN_RANGE(target_vco_ck, MHZ(150), MHZ(420));
 
-	vco_freq = PLLSRC_FREQ / m_div;
+	const bool vcoh_input_ok = IN_RANGE(ref_ck, MHZ(2), MHZ(16));
+	const bool vcoh_output_ok = IN_RANGE(target_vco_ck, VCOH_MIN_FREQ, VCOH_MAX_FREQ);
 
-	if (MHZ(1) <= vco_freq && vco_freq <= MHZ(2)) {
-		*range = LL_RCC_PLLINPUTRANGE_1_2;
-	} else if (MHZ(2) < vco_freq && vco_freq <= MHZ(4)) {
-		*range = LL_RCC_PLLINPUTRANGE_2_4;
-	} else if (MHZ(4) < vco_freq && vco_freq <= MHZ(8)) {
-		*range = LL_RCC_PLLINPUTRANGE_4_8;
-	} else if (MHZ(8) < vco_freq && vco_freq <= MHZ(16)) {
-		*range = LL_RCC_PLLINPUTRANGE_8_16;
+	if (vcol_input_ok && vcol_output_ok) {
+		/* Prefer VCOL if possible (lower power consumption) */
+		*vcosel = LL_RCC_PLLVCORANGE_MEDIUM;
+		*inrange = LL_RCC_PLLINPUTRANGE_1_2;
+	} else if (vcoh_input_ok && vcoh_output_ok) {
+		/* Otherwise, use VCOH if the configuration is achievable */
+		*vcosel = LL_RCC_PLLVCORANGE_WIDE;
+
+		if (IN_RANGE(ref_ck, MHZ(2), MHZ(4))) {
+			*inrange = LL_RCC_PLLINPUTRANGE_2_4;
+		} else if (IN_RANGE(ref_ck, MHZ(4), MHZ(8))) {
+			*inrange = LL_RCC_PLLINPUTRANGE_4_8;
+		} else { /* 8 MHz < ref_ck <= 16 MHz */
+			*inrange = LL_RCC_PLLINPUTRANGE_8_16;
+		}
 	} else {
+		/* Illegal clock configuration for this hardware */
 		return -ERANGE;
 	}
 
 	return 0;
-}
-
-__unused
-static uint32_t get_vco_output_range(uint32_t vco_input_range)
-{
-	if (vco_input_range == LL_RCC_PLLINPUTRANGE_1_2) {
-		return LL_RCC_PLLVCORANGE_MEDIUM;
-	}
-
-	return LL_RCC_PLLVCORANGE_WIDE;
 }
 
 #endif /* ! CONFIG_CPU_CORTEX_M4 */
@@ -392,16 +436,17 @@ int enabled_clock(uint32_t src_clk)
 	return -ENOTSUP;
 }
 
+static int stm32_clock_control_configure(const struct device *dev,
+					 clock_control_subsys_t sub_system, void *data);
+
 static int stm32_clock_control_on(const struct device *dev, clock_control_subsys_t sub_system)
 {
 	struct stm32_pclken *pclken = (struct stm32_pclken *)(sub_system);
 	volatile int temp;
 
-	ARG_UNUSED(dev);
-
 	if (!IN_RANGE(pclken->bus, STM32_PERIPH_BUS_MIN, STM32_PERIPH_BUS_MAX)) {
-		/* Attempt to toggle a wrong periph clock bit */
-		return -ENOTSUP;
+		/* Source selection entry: apply it instead of toggling a gate */
+		return stm32_clock_control_configure(dev, sub_system, NULL);
 	}
 
 	z_stm32_hsem_lock(CFG_HW_RCC_SEMID, HSEM_LOCK_DEFAULT_RETRY);
@@ -719,9 +764,9 @@ static int stm32_clock_control_get_subsys_rate(const struct device *clock,
 		}
 #else /* CONFIG_SOC_SERIES_STM32H7RSX */
 		if (IS_ENABLED(STM32_TIMER_PRESCALER)) {
-			*rate = STM32_D2PPRE2 <= 4 ? ahb_clock : apb1_clock * 4;
+			*rate = STM32_D2PPRE2 <= 4 ? ahb_clock : apb2_clock * 4;
 		} else {
-			*rate = STM32_D2PPRE2 <= 2 ? ahb_clock : apb1_clock * 2;
+			*rate = STM32_D2PPRE2 <= 2 ? ahb_clock : apb2_clock * 2;
 		}
 #endif /* CONFIG_SOC_SERIES_STM32H7RSX */
 		break;
@@ -874,7 +919,8 @@ static void stm32_clock_switch_to_hsi(void)
 __unused
 static int set_up_plls(void)
 {
-#if defined(STM32_PLL_ENABLED) || defined(STM32_PLL2_ENABLED) || defined(STM32_PLL3_ENABLED)
+#if !defined(CONFIG_CPU_CORTEX_M4) &&                                                              \
+	(defined(STM32_PLL_ENABLED) || defined(STM32_PLL2_ENABLED) || defined(STM32_PLL3_ENABLED))
 	int r;
 	uint32_t vco_input_range;
 	uint32_t vco_output_range;
@@ -892,7 +938,7 @@ static int set_up_plls(void)
 		LL_RCC_SetAHBPrescaler(LL_RCC_SYSCLK_DIV_1);
 	}
 
-#if defined(CONFIG_STM32_MEMMAP) && defined(CONFIG_BOOTLOADER_MCUBOOT)
+#if defined(CONFIG_FLASH_STM32_NOR_MEMMAP) && defined(CONFIG_BOOTLOADER_MCUBOOT)
 	/*
 	 * Don't disable PLL during application initialization
 	 * that runs in memmap mode when (Q/O)SPI uses PLL
@@ -945,12 +991,16 @@ static int set_up_plls(void)
 	}
 
 #if defined(STM32_PLL_ENABLED)
-	r = get_vco_input_range(STM32_PLL_M_DIVISOR, &vco_input_range);
+	const uint32_t vco1_ck = PLLX_VCO_FREQ(
+		PLLSRC_FREQ, UINT64_C(STM32_PLL_M_DIVISOR),
+		STM32_PLL_N_MULTIPLIER, STM32_PLL_FRACN_VALUE);
+
+	r = get_vco_parameters(
+		PLLSRC_FREQ / STM32_PLL_M_DIVISOR, vco1_ck,
+		&vco_input_range, &vco_output_range);
 	if (r < 0) {
 		return r;
 	}
-
-	vco_output_range = get_vco_output_range(vco_input_range);
 
 	LL_RCC_PLL1_SetM(STM32_PLL_M_DIVISOR);
 
@@ -993,12 +1043,16 @@ static int set_up_plls(void)
 #endif /* STM32_PLL_ENABLED */
 
 #if defined(STM32_PLL2_ENABLED)
-	r = get_vco_input_range(STM32_PLL2_M_DIVISOR, &vco_input_range);
+	const uint32_t vco2_ck = PLLX_VCO_FREQ(
+		PLLSRC_FREQ, UINT64_C(STM32_PLL2_M_DIVISOR),
+		STM32_PLL2_N_MULTIPLIER, STM32_PLL2_FRACN_VALUE);
+
+	r = get_vco_parameters(
+		PLLSRC_FREQ / STM32_PLL2_M_DIVISOR, vco2_ck,
+		&vco_input_range, &vco_output_range);
 	if (r < 0) {
 		return r;
 	}
-
-	vco_output_range = get_vco_output_range(vco_input_range);
 
 	LL_RCC_PLL2_SetM(STM32_PLL2_M_DIVISOR);
 
@@ -1047,12 +1101,16 @@ static int set_up_plls(void)
 #endif /* STM32_PLL2_ENABLED */
 
 #if defined(STM32_PLL3_ENABLED)
-	r = get_vco_input_range(STM32_PLL3_M_DIVISOR, &vco_input_range);
+	const uint32_t vco3_ck = PLLX_VCO_FREQ(
+		PLLSRC_FREQ, UINT64_C(STM32_PLL3_M_DIVISOR),
+		STM32_PLL3_N_MULTIPLIER, STM32_PLL3_FRACN_VALUE);
+
+	r = get_vco_parameters(
+		PLLSRC_FREQ / STM32_PLL3_M_DIVISOR, vco3_ck,
+		&vco_input_range, &vco_output_range);
 	if (r < 0) {
 		return r;
 	}
-
-	vco_output_range = get_vco_output_range(vco_input_range);
 
 	LL_RCC_PLL3_SetM(STM32_PLL3_M_DIVISOR);
 
@@ -1099,7 +1157,8 @@ static int set_up_plls(void)
 	/* Init PLL source to None */
 	LL_RCC_PLL_SetSource(LL_RCC_PLLSOURCE_NONE);
 
-#endif /* STM32_PLL_ENABLED || STM32_PLL2_ENABLED || STM32_PLL3_ENABLED */
+#endif /* !CONFIG_CPU_CORTEX_M4 && (STM32_PLL_ENABLED || STM32_PLL2_ENABLED || STM32_PLL3_ENABLED)
+	*/
 
 	return 0;
 }

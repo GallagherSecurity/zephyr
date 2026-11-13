@@ -4,18 +4,24 @@
  */
 #include <zephyr/init.h>
 #include <zephyr/device.h>
-#include "fsl_power.h"
-#include "fsl_clock.h"
+#include <fsl_power.h>
+#include <fsl_clock.h>
+#if defined(CONFIG_SECOND_CORE_MCUX)
+#include <fsl_mu.h>
+#endif
 #include <soc.h>
 #include <fsl_glikey.h>
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(pmc_tmpsns))
-#include "fsl_romapi_otp.h"
-#endif
+#include <power/power_cross_domain.h>
+#include <sram_banks.h>
 
 /*!< System oscillator settling time in us */
 #define SYSOSC_SETTLING_US 220U
 /*!< xtal frequency in Hz */
 #define XTAL_SYS_CLK_HZ    24000000U
+
+#if defined(CONFIG_SECOND_CORE_MCUX)
+#define IMXRT7XX_CPU1_BOOT_FLAG 0x1U
+#endif
 
 #if CONFIG_SOC_MIMXRT798S_CM33_CPU0
 #define SYSCON_BASE DT_REG_ADDR(DT_NODELABEL(syscon0))
@@ -32,7 +38,6 @@
 #define SET_UP_FLEXCOMM_CLOCK(x)                                                                   \
 	do {                                                                                       \
 		CLOCK_AttachClk(kFCCLK0_to_FLEXCOMM##x);                                           \
-		RESET_ClearPeripheralReset(kFC##x##_RST_SHIFT_RSTn);                               \
 		CLOCK_EnableClock(kCLOCK_LPFlexComm##x);                                           \
 	} while (0)
 
@@ -153,10 +158,18 @@ void board_early_init_hook(void)
 	/* Enable clock for Hifi4 access RAM arbiter1 (for SRAM start from 0x2058000000) */
 	CLOCK_EnableClock(kCLOCK_Hifi4AccessRamArbiter1);
 
-#if CONFIG_FLASH_MCUX_XSPI_XIP
+	/*
+	 * xspi_setup_clock() raises XSPI0 to the octal flash's high root clock and,
+	 * because the clock changes, re-inits the controller via flash_init(), which
+	 * busy-waits on the DDR DLL slave-lock (DLLSR.SLVA_LOCK). The W25Q512NW
+	 * revision is a no-DQS quad-SDR part the boot ROM/FCB already brought up at
+	 * its own (lower) clock: it needs no bump and never satisfies that DDR lock,
+	 * so running this would hang before the console. Keep the ROM's XSPI0 config.
+	 */
+#if CONFIG_FLASH_MCUX_XSPI_XIP && !defined(CONFIG_BOARD_REVISION_W25Q512NW)
 	/* Call function xspi_setup_clock() to set user configured clock for XSPI. */
 	xspi_setup_clock(XSPI0, 3U, 1U); /* Main PLL PDF1 DIV1. */
-#endif                                      /* CONFIG_FLASH_MCUX_XSPI_XIP */
+#endif /* CONFIG_FLASH_MCUX_XSPI_XIP && !CONFIG_BOARD_REVISION_W25Q512NW */
 
 #elif CONFIG_SOC_MIMXRT798S_CM33_CPU1
 	/* Power up OSC in case it's not enabled. */
@@ -180,40 +193,51 @@ void board_early_init_hook(void)
 	CLOCK_AttachClk(kSENSE_BASE_to_SENSE_MAIN);
 
 	CLOCK_EnableClock(kCLOCK_SenseAccessRamArbiter0);
+
+	/*
+	 * Claim the resources this core runs from, in this core's own run-vote banks.
+	 *
+	 * Every one of them has a control field in both SLEEPCONs or in both PMCs, and
+	 * the PMC aggregates the two cores by selecting each core's run or sleep bank
+	 * according to that core's state and then ANDing the two power-down votes (RM
+	 * 27.3.2.2). A keep vote from either side is therefore enough, and the core that
+	 * uses a resource is the core that has to cast it: CPU0's low-power modes vote
+	 * the whole Sense side down, as RM 12.5.2 Table 167 requires of a core that does
+	 * not use a common resource, and rely on these bits to hold this core up.
+	 *
+	 * XTAL and FRO2 are claimed above, where they are configured. What is left is the
+	 * rest of the clock tree this core executes from -- the private and the shared
+	 * part of sense_main_clk, the RAM arbiter 0 clock just enabled, and the VDDN_COM
+	 * main clock its path to the VDD2 peripherals runs through -- plus the VDDN_COM
+	 * rail itself. VDD2_COM needs no vote: CPU0 cannot drop it in a mode it returns
+	 * from, and the modes that do drop it power this core off with it.
+	 */
+	POWER_DisablePD(kPDRUNCFG_SHUT_SENSEP_MAINCLK);
+	POWER_DisablePD(kPDRUNCFG_SHUT_SENSES_MAINCLK);
+	POWER_DisablePD(kPDRUNCFG_SHUT_RAM0_CLK);
+	POWER_DisablePD(kPDRUNCFG_SHUT_COMNN_MAINCLK);
+	POWER_DisablePD(kPDRUNCFG_DSR_VDDN_COM);
+
+	/*
+	 * And the SRAM partitions this image is linked into, text included -- this core
+	 * executes from RAM. CPU0 powered them up before releasing this core, but it
+	 * hands that vote back once the boot flag goes out, so from then on these bits
+	 * are what keeps them.
+	 */
+	PMC1->PDRUNCFG2 &= ~POWER_SRAM_KEEPALIVE;
+	PMC1->PDRUNCFG3 &= ~POWER_SRAM_KEEPALIVE;
+
+	POWER_ApplyPD();
 #endif /* CONFIG_SOC_MIMXRT798S_CM33_CPU0 */
 
 	BOARD_InitAHBSC();
 
-#if defined(CONFIG_SECOND_CORE_MCUX)
-	POWER_DisablePD(kPDRUNCFG_SHUT_SENSEP_MAINCLK);
-	POWER_ApplyPD();
-#endif
-
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(edma0))
-	CLOCK_EnableClock(kCLOCK_Dma0);
-	RESET_ClearPeripheralReset(kDMA0_RST_SHIFT_RSTn);
 	edma_enable_all_request(0);
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(edma1))
-	CLOCK_EnableClock(kCLOCK_Dma1);
-	RESET_ClearPeripheralReset(kDMA1_RST_SHIFT_RSTn);
 	edma_enable_all_request(1);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(iocon))
-	RESET_ClearPeripheralReset(kIOPCTL0_RST_SHIFT_RSTn);
-	CLOCK_EnableClock(kCLOCK_Iopctl0);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(iocon1))
-	RESET_ClearPeripheralReset(kIOPCTL1_RST_SHIFT_RSTn);
-	CLOCK_EnableClock(kCLOCK_Iopctl1);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(iocon2))
-	RESET_ClearPeripheralReset(kIOPCTL2_RST_SHIFT_RSTn);
-	CLOCK_EnableClock(kCLOCK_Iopctl2);
 #endif
 
 #ifdef CONFIG_BOARD_MIMXRT700_EVK_MIMXRT798S_CM33_CPU0
@@ -281,21 +305,28 @@ void board_early_init_hook(void)
 	CLOCK_AttachClk(kFRO1_DIV1_to_LPSPI14);
 	CLOCK_SetClkDiv(kCLOCK_DivLpspi14Clk, 3U);
 	CLOCK_EnableClock(kCLOCK_LPSpi14);
-	RESET_ClearPeripheralReset(kLPSPI14_RST_SHIFT_RSTn);
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(lpi2c15))
-	CLOCK_AttachClk(kSENSE_BASE_to_LPI2C15);
-	CLOCK_SetClkDiv(kCLOCK_DivLpi2c15Clk, 2U);
+	/*
+	 * LPI2C15 is shared between the two cores, and its functional clock mux
+	 * CLKCTL3->LPI2C15FCLKSEL is a single field with no per-core copy, unlike
+	 * the clock gate below. Both cores therefore pick FRO1: its rate is fixed,
+	 * so neither has to read the Sense base clock selection that only CPU1 can
+	 * program, and both derive the same baud divider. Divide by 6 to keep
+	 * LPI2C_FCLK at the 32 MHz it is limited to at 0.7 V nominal. FRO1 lives in
+	 * VDD2_COM, so move this bus to FRO2 should the Sense domain ever have to
+	 * reach the PMIC with VDD2 off.
+	 */
+	CLOCK_AttachClk(kFRO1_DIV1_to_LPI2C15);
+	CLOCK_SetClkDiv(kCLOCK_DivLpi2c15Clk, 6U);
 	CLOCK_EnableClock(kCLOCK_LPI2c15);
-	RESET_ClearPeripheralReset(kLPI2C15_RST_SHIFT_RSTn);
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(lpspi16))
 	CLOCK_AttachClk(kFRO0_DIV1_to_LPSPI16);
 	CLOCK_SetClkDiv(kCLOCK_DivLpspi16Clk, 1U);
 	CLOCK_EnableClock(kCLOCK_LPSpi16);
-	RESET_ClearPeripheralReset(kLPSPI16_RST_SHIFT_RSTn);
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(flexcomm17))
@@ -321,61 +352,6 @@ void board_early_init_hook(void)
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(flexio))
 	CLOCK_AttachClk(kFRO0_DIV1_to_FLEXIO);
 	CLOCK_SetClkDiv(kCLOCK_DivFlexioClk, 1U);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio0))
-	CLOCK_EnableClock(kCLOCK_Gpio0);
-	RESET_ClearPeripheralReset(kGPIO0_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio1))
-	CLOCK_EnableClock(kCLOCK_Gpio1);
-	RESET_ClearPeripheralReset(kGPIO1_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio2))
-	CLOCK_EnableClock(kCLOCK_Gpio2);
-	RESET_ClearPeripheralReset(kGPIO2_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio3))
-	CLOCK_EnableClock(kCLOCK_Gpio3);
-	RESET_ClearPeripheralReset(kGPIO3_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio4))
-	CLOCK_EnableClock(kCLOCK_Gpio4);
-	RESET_ClearPeripheralReset(kGPIO4_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio5))
-	CLOCK_EnableClock(kCLOCK_Gpio5);
-	RESET_ClearPeripheralReset(kGPIO5_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio6))
-	CLOCK_EnableClock(kCLOCK_Gpio6);
-	RESET_ClearPeripheralReset(kGPIO6_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio7))
-	CLOCK_EnableClock(kCLOCK_Gpio7);
-	RESET_ClearPeripheralReset(kGPIO7_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio8))
-	CLOCK_EnableClock(kCLOCK_Gpio8);
-	RESET_ClearPeripheralReset(kGPIO8_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio9))
-	CLOCK_EnableClock(kCLOCK_Gpio9);
-	RESET_ClearPeripheralReset(kGPIO9_RST_SHIFT_RSTn);
-#endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(gpio10))
-	CLOCK_EnableClock(kCLOCK_Gpio10);
-	RESET_ClearPeripheralReset(kGPIO10_RST_SHIFT_RSTn);
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(ctimer0))
@@ -422,7 +398,26 @@ void board_early_init_hook(void)
 	CLOCK_SetClkDiv(kCLOCK_DivOstimerClk, 1U);
 #endif
 
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(usb0)) && CONFIG_UDC_NXP_EHCI
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(irtc_wake))
+	/*
+	 * The current irtc_wake counter driver does not yet integrate
+	 * clock control functionality, so it is temporarily integrated
+	 * in board.c for now; it should be moved into the driver in the
+	 * future.
+	 */
+	clock_osc32k_config_t osc32k_cfg = {
+		.bypass = false,
+		.monitorEnable = false,
+		.lowPowerMode = true,
+		.cap = kCLOCK_Osc32kCapPf16,
+	};
+
+	CLOCK_EnableOsc32K(&osc32k_cfg);
+	CLOCK_EnableClock(kCLOCK_Rtc);
+#endif
+
+#if ((DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(usb0)) && CONFIG_UDC_NXP_EHCI) || \
+	(DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(usbh0)) && (CONFIG_UHC_NXP_EHCI)))
 	/* Power on COM VDDN domain for USB */
 	POWER_DisablePD(kPDRUNCFG_DSR_VDDN_COM);
 
@@ -439,14 +434,8 @@ void board_early_init_hook(void)
 	SYSCON4->USBPHY0_CLK_ACTIVE |= SYSCON4_USBPHY0_CLK_ACTIVE_IPG_CLK_ACTIVE_MASK;
 	CLOCK_AttachClk(k32KHZ_WAKE_to_USB);
 	CLOCK_AttachClk(kOSC_CLK_to_USB_24MHZ);
-	CLOCK_EnableClock(kCLOCK_Usb0);
-	CLOCK_EnableClock(kCLOCK_UsbphyRef);
 	RESET_PeripheralReset(kUSB0_RST_SHIFT_RSTn);
 	RESET_PeripheralReset(kUSBPHY0_RST_SHIFT_RSTn);
-	CLOCK_EnableUsbhs0PhyPllClock(kCLOCK_Usbphy480M,
-				DT_PROP_BY_PHANDLE(DT_NODELABEL(usb0), clocks, clock_frequency));
-	CLOCK_EnableUsbhs0Clock(kCLOCK_Usb480M,
-				DT_PROP_BY_PHANDLE(DT_NODELABEL(usb0), clocks, clock_frequency));
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(usdhc0)) && CONFIG_IMX_USDHC
@@ -462,7 +451,22 @@ void board_early_init_hook(void)
 	CLOCK_InitAudioPfd(kCLOCK_Pfd0, 24U); /* Target 400MHZ. */
 	CLOCK_AttachClk(kAUDIO_PLL_PFD0_to_SDIO0);
 	CLOCK_SetClkDiv(kCLOCK_DivSdio0Clk, 1);
-	RESET_ClearPeripheralReset(kUSDHC0_RST_SHIFT_RSTn);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(usdhc1)) && CONFIG_IMX_USDHC
+	/* Make sure USDHC1 ram buffer has power up */
+	POWER_DisablePD(kPDRUNCFG_APD_SDHC1_SRAM);
+	POWER_DisablePD(kPDRUNCFG_PPD_SDHC1_SRAM);
+	POWER_DisablePD(kPDRUNCFG_PD_LPOSC);
+	POWER_ApplyPD();
+
+	/* USDHC1 */
+	/* usdhc depend on 32K clock also */
+	CLOCK_AttachClk(kLPOSC_DIV32_to_32K_WAKE);
+	CLOCK_InitAudioPfd(kCLOCK_Pfd0, 24U); /* Target 400MHZ. */
+	CLOCK_AttachClk(kAUDIO_PLL_PFD0_to_SDIO1);
+	CLOCK_SetClkDiv(kCLOCK_DivSdio1Clk, 1);
+	RESET_ClearPeripheralReset(kUSDHC1_RST_SHIFT_RSTn);
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(wwdt0))
@@ -478,12 +482,21 @@ void board_early_init_hook(void)
 	ITRC->OUT_SEL[4][0] = 0xAAAAAA0A;
 #endif
 
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(sai0)) || \
+		DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(micfil))
+	CLOCK_AttachClk(kAUDIO_PLL_PFD3_to_AUDIO_VDD2);
+#endif
+
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(sai0))
 	/* SAI clock 368.64 / 15 = 24.576MHz */
-	CLOCK_AttachClk(kAUDIO_PLL_PFD3_to_AUDIO_VDD2);
 	CLOCK_AttachClk(kAUDIO_VDD2_to_SAI012);
 	CLOCK_SetClkDiv(kCLOCK_DivSai012Clk, 15U);
-	RESET_ClearPeripheralReset(kSAI0_RST_SHIFT_RSTn);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(micfil))
+	CLOCK_SetClkDiv(kCLOCK_DivMicfil0Clk, 15U);
+	CLOCK_AttachClk(kAUDIO_PLL_PFD3_to_MICFIL0);
+	RESET_ClearPeripheralReset(kPDM_RST_SHIFT_RSTn);
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(sc_timer))
@@ -515,11 +528,6 @@ void board_early_init_hook(void)
 		kCLOCK_DivLcdifClk,
 		(CLOCK_GetMainPfdFreq(kCLOCK_Pfd2) /
 		  DT_PROP(DT_CHILD(DT_NODELABEL(lcdif), display_timings), clock_frequency)));
-
-	CLOCK_EnableClock(kCLOCK_Lcdif);
-
-	/* Clear LCDIF reset. */
-	RESET_ClearPeripheralReset(kLCDIF_RST_SHIFT_RSTn);
 #endif
 
 #if DT_NODE_HAS_COMPAT_STATUS(DT_NODELABEL(lcdif), nxp_mipi_dbi_dcnano_lcdif, okay)
@@ -539,11 +547,6 @@ void board_early_init_hook(void)
 						DT_PROP(DT_NODELABEL(lcdif), clock_frequency));
 	CLOCK_SetClkDiv(kCLOCK_DivMediaMainClk, 1U);
 	CLOCK_AttachClk(kMAIN_PLL_PFD2_to_MEDIA_MAIN);
-
-	CLOCK_EnableClock(kCLOCK_Lcdif);
-
-	/* Clear LCDIF reset. */
-	RESET_ClearPeripheralReset(kLCDIF_RST_SHIFT_RSTn);
 #endif
 
 #if (DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(i3c2)) || \
@@ -552,15 +555,9 @@ void board_early_init_hook(void)
 	CLOCK_SetClkDiv(kCLOCK_DivI3c23Clk, 4U);
 #endif
 
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(acmp))
-	CLOCK_EnableClock(kCLOCK_Acmp0);
-	RESET_ClearPeripheralReset(kACMP0_RST_SHIFT_RSTn);
-#endif
-
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(pmc_tmpsns))
 	POWER_DisablePD(kPDRUNCFG_PD_PMC_TEMPSNS);
 	POWER_ApplyPD();
-	otp_init(SystemCoreClock);
 #endif
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(co5300_zc143ac72mipi), okay)
@@ -568,9 +565,6 @@ void board_early_init_hook(void)
 	POWER_DisablePD(kPDRUNCFG_APD_LCDIF);
 	POWER_DisablePD(kPDRUNCFG_PPD_LCDIF);
 	POWER_ApplyPD();
-
-	CLOCK_EnableClock(kCLOCK_Lcdif);
-	RESET_ClearPeripheralReset(kLCDIF_RST_SHIFT_RSTn);
 
 
 	CLOCK_InitMainPfd(kCLOCK_Pfd2, 17);
@@ -605,17 +599,28 @@ void board_early_init_hook(void)
 	POWER_DisablePD(kPDRUNCFG_PPD_XSPI2);
 	POWER_ApplyPD();
 #endif
-
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(sema420))
-	RESET_ReleasePeripheralReset(kSEMA420_RST_SHIFT_RSTn);
+#ifdef CONFIG_NXP_NEUTRON
+	POWER_DisablePD(kPDRUNCFG_APD_NPU);
+	POWER_DisablePD(kPDRUNCFG_PPD_NPU);
+	POWER_ApplyPD();
 #endif
 
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(sema423))
-	RESET_ReleasePeripheralReset(kSEMA423_RST_SHIFT_RSTn);
+#if DT_HAS_COMPAT_STATUS_OKAY(nxp_jpegdec)
+	CLOCK_EnableClock(kCLOCK_JpgDecoder);
+	RESET_ClearPeripheralReset(kJPEGDEC_RST_SHIFT_RSTn);
+
+	POWER_DisablePD(kPDRUNCFG_PPD_JPEGDEC);
+	POWER_DisablePD(kPDRUNCFG_APD_JPEGDEC);
+	POWER_ApplyPD();
 #endif
 
-#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(sema424))
-	RESET_ReleasePeripheralReset(kSEMA424_RST_SHIFT_RSTn);
+#if DT_HAS_COMPAT_STATUS_OKAY(nxp_pngdec)
+	CLOCK_EnableClock(kCLOCK_PngDecoder);
+	RESET_ClearPeripheralReset(kPNGDEC_RST_SHIFT_RSTn);
+
+	POWER_DisablePD(kPDRUNCFG_APD_PNGDEC);
+	POWER_DisablePD(kPDRUNCFG_PPD_PNGDEC);
+	POWER_ApplyPD();
 #endif
 }
 
@@ -705,16 +710,42 @@ static void edma_enable_all_request(uint8_t instance)
  *
  * Kick the secondary core out of reset and wait for it to indicate boot. The
  * core image was already copied to RAM in soc_early_init_hook()
- *
- * @return 0
  */
-static int second_core_boot(void)
+static void second_core_boot(void)
 {
 	/* Get the boot address for the second core */
-	uint32_t boot_address = (uint32_t)(DT_REG_ADDR(DT_NODELABEL(sram_code)));
+	uint32_t boot_address = (uint32_t)(DT_REG_ADDR(DT_CHOSEN(zephyr_code_cpu1_partition)));
 
-	PMC0->PDRUNCFG2 &= ~0x3FFC0000;
-	PMC0->PDRUNCFG3 &= ~0x3FFC0000;
+	/*
+	 * Power up the SRAM partitions CPU1 needs before releasing it: the RAM it
+	 * boots from and the RAM it links against. Both come from CPU0's chosen
+	 * nodes rather than node labels, so the mask follows whatever memory CPU1
+	 * is pointed at instead of hard-coding this board's current choice, and it
+	 * replaces a hand-maintained constant.
+	 *
+	 * These are votes on CPU1's behalf, needed only because CPU1 cannot cast its
+	 * own before it runs. They are handed back below.
+	 */
+	uint32_t cpu1_sram_pu =
+		POWER_SRAM_MASK_FOR_NODE(DT_CHOSEN(zephyr_code_cpu1_partition)) |
+		POWER_SRAM_MASK_FOR_NODE(DT_CHOSEN(zephyr_sram_cpu1_partition));
+
+	PMC0->PDRUNCFG2 &= ~cpu1_sram_pu;
+	PMC0->PDRUNCFG3 &= ~cpu1_sram_pu;
+
+	/* Power up sense_main_clk, the bus clock of CPU1 and its private peripherals */
+	POWER_DisablePD(kPDRUNCFG_SHUT_SENSEP_MAINCLK);
+	POWER_ApplyPD();
+
+	/*
+	 * CPU1 clocks XSPI2 from COMMON_BASE, which the branch above points at
+	 * FRO1_DIV1. FRO1 has no field in SLEEPCON1, so CPU1 cannot hold it up over
+	 * a CPU0 low-power window and CPU0 has no way to detect the dependency:
+	 * COMNBASECLKSEL says what feeds COMMON_BASE, not who consumes it, and the
+	 * Sense-side selects are in CLKCTL1, which this build cannot address. Say it
+	 * here, where both cores' clock trees are set up.
+	 */
+	power_cross_domain_request(PWR_RES_FRO1);
 
 	/* RT700 specific CPU1 boot sequence */
 	/* Glikey write enable, GLIKEY4 */
@@ -735,8 +766,46 @@ static int second_core_boot(void)
 	/* Release cpu wait*/
 	SYSCON3->CPU_STATUS &= ~SYSCON3_CPU_STATUS_CPU_WAIT_MASK;
 
+	/* Wait CPU1 booted */
+	RESET_ClearPeripheralReset(kMU1_RST_SHIFT_RSTn);
+	MU_Init(MU1_MUA);
+
+	while (MU_GetFlags(MU1_MUA) != IMXRT7XX_CPU1_BOOT_FLAG) {
+	}
+
+	/*
+	 * CPU1 is up, so hand the proxy votes back. CPU1's board_early_init_hook()
+	 * runs before its PRE_KERNEL_2 boot flag goes out, so by the time the wait
+	 * above returns CPU1 has claimed all of this in PMC1/SLEEPCON1 itself.
+	 *
+	 * Keeping them would leave CPU0's run bank voting keep for resources CPU0 does
+	 * not use, and a keep vote from either core wins the aggregation (RM 27.3.2.2).
+	 * That costs nothing today -- CPU1 is running and voting the same way -- but it
+	 * would override CPU1's own decision the moment CPU1 gains a low-power state of
+	 * its own, which is exactly the case RM 12.5.2 Table 167 forbids. The bits CPU1
+	 * is holding up stay up; only CPU0's redundant vote goes away.
+	 */
+	PMC0->PDRUNCFG2 |= cpu1_sram_pu & ~POWER_SRAM_KEEPALIVE;
+	PMC0->PDRUNCFG3 |= cpu1_sram_pu & ~POWER_SRAM_KEEPALIVE;
+	POWER_EnablePD(kPDRUNCFG_SHUT_SENSEP_MAINCLK);
+	POWER_ApplyPD();
+}
+
+void board_late_init_hook(void)
+{
+	second_core_boot();
+}
+#endif
+
+#if defined(CONFIG_SECOND_CORE_MCUX) && defined(CONFIG_SOC_MIMXRT798S_CM33_CPU1)
+static int second_core_notify_boot(void)
+{
+	RESET_ClearPeripheralReset(kMU1_RST_SHIFT_RSTn);
+	MU_Init(MU1_MUB);
+	MU_SetFlags(MU1_MUB, IMXRT7XX_CPU1_BOOT_FLAG);
+
 	return 0;
 }
 
-SYS_INIT(second_core_boot, PRE_KERNEL_2, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
+SYS_INIT(second_core_notify_boot, PRE_KERNEL_2, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
 #endif

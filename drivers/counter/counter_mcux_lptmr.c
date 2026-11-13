@@ -16,6 +16,8 @@
 #endif /* CONFIG_GIC */
 #include <fsl_lptmr.h>
 #include <zephyr/spinlock.h>
+#include <zephyr/drivers/wuc.h>
+#include <zephyr/pm/device.h>
 
 /*
  * Skip the instance reserved as the system timer via zephyr,system-timer.
@@ -46,6 +48,8 @@ struct mcux_lptmr_config {
 	lptmr_pin_polarity_t polarity;
 	unsigned int irqn;
 	void (*irq_config_func)(const struct device *dev);
+	struct wuc_dt_spec wuc;
+	bool wakeup_source;
 };
 
 static ALWAYS_INLINE void irq_set_pending(unsigned int irq)
@@ -70,7 +74,9 @@ struct mcux_lptmr_data {
 #if defined(CONFIG_COUNTER_MCUX_LPTMR_ALARM)
 	counter_alarm_callback_t alarm_callback;
 	void *alarm_user_data;
+	uint32_t guard_period;
 	bool alarm_active;
+	bool alarm_sw_pending;
 	struct k_spinlock lock;
 #else
 	counter_top_callback_t top_callback;
@@ -110,19 +116,55 @@ static int mcux_lptmr_get_value(const struct device *dev, uint32_t *ticks)
 }
 
 #if defined(CONFIG_COUNTER_MCUX_LPTMR_ALARM)
+/* True when the LPTMR is a wakeup source routed to a wakeup controller. */
+static ALWAYS_INLINE bool mcux_lptmr_is_wakeup_source(const struct device *dev)
+{
+	const struct mcux_lptmr_config *config = dev->config;
+
+	return config->wakeup_source && IS_ENABLED(CONFIG_WUC) && (config->wuc.dev != NULL);
+}
+
 static int mcux_lptmr_set_alarm(const struct device *dev, uint8_t chan_id,
 				const struct counter_alarm_cfg *alarm_cfg)
 {
-	ARG_UNUSED(chan_id);
-
 	const struct mcux_lptmr_config *config = dev->config;
 	struct mcux_lptmr_data *data = dev->data;
+	uint32_t now;
+	uint32_t ticks;
+	bool absolute;
+	bool late;
+	bool irq_on_late;
+	bool sw_pending;
+	int ret = 0;
 
 	/* Counter API: Alarm callback cannot be NULL. */
-	if ((alarm_cfg == NULL) || (alarm_cfg->callback == NULL) ||
+	if ((chan_id >= config->info.channels) || (alarm_cfg == NULL) ||
+		(alarm_cfg->callback == NULL) ||
 		(alarm_cfg->ticks > config->info.max_top_value)) {
 		return -EINVAL;
 	}
+
+	absolute = (alarm_cfg->flags & COUNTER_ALARM_CFG_ABSOLUTE) != 0U;
+	irq_on_late =
+		(alarm_cfg->flags & COUNTER_ALARM_CFG_EXPIRE_WHEN_LATE) != 0U;
+	now = LPTMR_GetCurrentTimerCount(config->base);
+	ticks = alarm_cfg->ticks;
+	late = false;
+
+	if (absolute) {
+		uint32_t back = (now >= ticks) ?
+			(now - ticks) : (config->info.max_top_value - ticks + now + 1U);
+
+		if ((data->guard_period != 0U) && (back < data->guard_period)) {
+			late = true;
+			ret = -ETIME;
+		} else {
+			ticks = (ticks >= now) ?
+				(ticks - now) : (config->info.max_top_value - now + ticks + 1U);
+		}
+	}
+
+	sw_pending = late || (ticks == 0U);
 
 	k_spinlock_key_t key = k_spin_lock(&data->lock);
 
@@ -131,11 +173,38 @@ static int mcux_lptmr_set_alarm(const struct device *dev, uint8_t chan_id,
 		return -EBUSY;
 	}
 
+	if (late && !irq_on_late) {
+		k_spin_unlock(&data->lock, key);
+		return ret;
+	}
+
+	/*
+	 * Arm the wakeup controller so the alarm can wake the SoC. Without
+	 * CONFIG_PM_DEVICE there is no run-time flag, so the devicetree
+	 * wakeup-source property is the only control.
+	 */
+	if (mcux_lptmr_is_wakeup_source(dev) &&
+	    (!IS_ENABLED(CONFIG_PM_DEVICE) || pm_device_wakeup_is_enabled(dev))) {
+		int err = wuc_enable_wakeup_source_dt(&config->wuc);
+
+		if (err != 0) {
+			k_spin_unlock(&data->lock, key);
+			return err;
+		}
+	}
+
 	data->alarm_callback = alarm_cfg->callback;
 	data->alarm_user_data = alarm_cfg->user_data;
 	data->alarm_active = true;
+	data->alarm_sw_pending = sw_pending;
 
 	k_spin_unlock(&data->lock, key);
+
+	if (late) {
+		LPTMR_EnableInterrupts(config->base, kLPTMR_TimerInterruptEnable);
+		irq_set_pending(config->irqn);
+		return ret;
+	}
 
 	/* Handle timer state: stop if running, clear flags if stopped */
 	if (config->base->CSR & LPTMR_CSR_TEN_MASK) {
@@ -143,7 +212,7 @@ static int mcux_lptmr_set_alarm(const struct device *dev, uint8_t chan_id,
 		LPTMR_StopTimer(config->base);
 	}
 
-	if (alarm_cfg->ticks == 0U) {
+	if (ticks == 0U) {
 		/*
 		 * Trigger the alarm callback immediately by setting the IRQ pending.
 		 * The ISR checks alarm_active/callback and does not require HW flags.
@@ -155,7 +224,7 @@ static int mcux_lptmr_set_alarm(const struct device *dev, uint8_t chan_id,
 	}
 
 	/* Normal case: set period and start timer */
-	LPTMR_SetTimerPeriod(config->base, alarm_cfg->ticks);
+	LPTMR_SetTimerPeriod(config->base, ticks);
 	/* RM recommendation: clear status flag after setting period
 	 * when timer is disabled.
 	 */
@@ -168,11 +237,14 @@ static int mcux_lptmr_set_alarm(const struct device *dev, uint8_t chan_id,
 
 static int mcux_lptmr_cancel_alarm(const struct device *dev, uint8_t chan_id)
 {
-	ARG_UNUSED(chan_id);
-
 	const struct mcux_lptmr_config *config = dev->config;
 	struct mcux_lptmr_data *data = dev->data;
 	k_spinlock_key_t key;
+	int err = 0;
+
+	if (chan_id >= config->info.channels) {
+		return -EINVAL;
+	}
 
 	key = k_spin_lock(&data->lock);
 	if (!data->alarm_active) {
@@ -184,12 +256,51 @@ static int mcux_lptmr_cancel_alarm(const struct device *dev, uint8_t chan_id)
 
 	data->alarm_callback = NULL;
 	data->alarm_user_data = NULL;
+	data->alarm_sw_pending = false;
 	data->alarm_active = false;
+
+	if (mcux_lptmr_is_wakeup_source(dev)) {
+		err = wuc_disable_wakeup_source_dt(&config->wuc);
+	}
 
 	k_spin_unlock(&data->lock, key);
 
 	LPTMR_StopTimer(config->base);
+	/*
+	 * LPTMR only has one register (CMR) for both period and alarm.
+	 * if cancel doesn't affect the period, no need restoration.
+	 */
+	LPTMR_SetTimerPeriod(config->base, config->info.max_top_value);
+	LPTMR_ClearStatusFlags(config->base, kLPTMR_TimerCompareFlag);
 
+	return err;
+}
+
+static uint32_t mcux_lptmr_get_guard_period(const struct device *dev, uint32_t flags)
+{
+	struct mcux_lptmr_data *data = dev->data;
+
+	if (flags & COUNTER_GUARD_PERIOD_LATE_TO_SET) {
+		return data->guard_period;
+	}
+
+	return 0U;
+}
+
+static int mcux_lptmr_set_guard_period(const struct device *dev, uint32_t ticks, uint32_t flags)
+{
+	const struct mcux_lptmr_config *config = dev->config;
+	struct mcux_lptmr_data *data = dev->data;
+
+	if (!(flags & COUNTER_GUARD_PERIOD_LATE_TO_SET)) {
+		return -ENOSYS;
+	}
+
+	if (ticks >= config->info.max_top_value) {
+		return -EINVAL;
+	}
+
+	data->guard_period = ticks;
 	return 0;
 }
 
@@ -247,6 +358,23 @@ static int mcux_lptmr_set_top_value(const struct device *dev,
 
 	return 0;
 }
+
+static uint32_t mcux_lptmr_get_guard_period(const struct device *dev, uint32_t flags)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(flags);
+
+	return 0U;
+}
+
+static int mcux_lptmr_set_guard_period(const struct device *dev, uint32_t ticks, uint32_t flags)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(ticks);
+	ARG_UNUSED(flags);
+
+	return -ENOSYS;
+}
 #endif /* CONFIG_COUNTER_MCUX_LPTMR_ALARM */
 
 static uint32_t mcux_lptmr_get_pending_int(const struct device *dev)
@@ -298,21 +426,39 @@ static void mcux_lptmr_isr(const struct device *dev)
 
 	if ((callback != NULL) && (data->alarm_active)) {
 		void *user_data = data->alarm_user_data;
+		bool sw_pending = data->alarm_sw_pending;
 
 		LPTMR_DisableInterrupts(config->base, kLPTMR_TimerInterruptEnable);
 
 		data->alarm_callback = NULL;
 		data->alarm_user_data = NULL;
+		data->alarm_sw_pending = false;
 		data->alarm_active = false;
+
+		if (mcux_lptmr_is_wakeup_source(dev)) {
+			(void)wuc_disable_wakeup_source_dt(&config->wuc);
+		}
 
 		k_spin_unlock(&data->lock, key);
 
-		uint32_t current_count = LPTMR_GetCurrentTimerCount(config->base);
+		uint32_t current_count = sw_pending ? 0U :
+			LPTMR_GetCurrentTimerCount(config->base);
 
-		LPTMR_StopTimer(config->base);
-		LPTMR_SetTimerPeriod(config->base, config->info.max_top_value);
-
+		/* Defer stop/restore until after callback: stop would reset the
+		 * counter and break counter_get_value() consistency with the ticks
+		 * arg; also skip when callback re-armed (set_alarm reconfigured timer).
+		 */
 		callback(dev, 0, current_count, user_data);
+
+		key = k_spin_lock(&data->lock);
+		/* Check re-arm and stop/restore atomically under the lock so a
+		 * concurrent set_alarm() cannot have its config clobbered.
+		 */
+		if (!data->alarm_active) {
+			LPTMR_StopTimer(config->base);
+			LPTMR_SetTimerPeriod(config->base, config->info.max_top_value);
+		}
+		k_spin_unlock(&data->lock, key);
 
 		return;
 	}
@@ -323,6 +469,41 @@ static void mcux_lptmr_isr(const struct device *dev)
 		data->top_callback(dev, data->top_user_data);
 	}
 #endif
+}
+
+static int mcux_lptmr_reset(const struct device *dev)
+{
+	const struct mcux_lptmr_config *config = dev->config;
+#if defined(CONFIG_COUNTER_MCUX_LPTMR_ALARM)
+	struct mcux_lptmr_data *data = dev->data;
+	k_spinlock_key_t key = k_spin_lock(&data->lock);
+#endif
+
+	/* If stopped, the internal counter is already reset. */
+	if (config->base->CSR & LPTMR_CSR_TEN_MASK) {
+		LPTMR_StopTimer(config->base);
+		LPTMR_StartTimer(config->base);
+	}
+
+#if defined(CONFIG_COUNTER_MCUX_LPTMR_ALARM)
+	k_spin_unlock(&data->lock, key);
+#endif
+
+	return 0;
+}
+
+static int mcux_lptmr_pm_action(const struct device *dev, enum pm_device_action action)
+{
+	ARG_UNUSED(dev);
+
+	/* No device power state to manage; needed only to register a pm_device. */
+	switch (action) {
+	case PM_DEVICE_ACTION_RESUME:
+	case PM_DEVICE_ACTION_SUSPEND:
+		return 0;
+	default:
+		return -ENOTSUP;
+	}
 }
 
 static int mcux_lptmr_init(const struct device *dev)
@@ -348,7 +529,7 @@ static int mcux_lptmr_init(const struct device *dev)
 
 	config->irq_config_func(dev);
 
-	return 0;
+	return pm_device_driver_init(dev, mcux_lptmr_pm_action);
 }
 
 static DEVICE_API(counter, mcux_lptmr_driver_api) = {
@@ -360,7 +541,10 @@ static DEVICE_API(counter, mcux_lptmr_driver_api) = {
 	.set_top_value = mcux_lptmr_set_top_value,
 	.get_pending_int = mcux_lptmr_get_pending_int,
 	.get_top_value = mcux_lptmr_get_top_value,
+	.get_guard_period = mcux_lptmr_get_guard_period,
+	.set_guard_period = mcux_lptmr_set_guard_period,
 	.get_freq = mcux_lptmr_get_freq,
+	.reset = mcux_lptmr_reset,
 };
 
 /*
@@ -432,9 +616,14 @@ static DEVICE_API(counter, mcux_lptmr_driver_api) = {
 			MCUX_LPTMR_PRESCALE_GLITCH_VAL(n),			\
 		.irqn = DT_INST_IRQN(n),					\
 		.irq_config_func = mcux_lptmr_irq_config_##n,			\
+		.wuc = COND_CODE_1(CONFIG_WUC,					\
+			(WUC_DT_SPEC_GET_OR(DT_DRV_INST(n), {0})), ({0})),	\
+		.wakeup_source = DT_INST_PROP_OR(n, wakeup_source, 0),		\
 	};									\
 										\
-	DEVICE_DT_INST_DEFINE(n, &mcux_lptmr_init, NULL,			\
+	PM_DEVICE_DT_INST_DEFINE(n, mcux_lptmr_pm_action);			\
+										\
+	DEVICE_DT_INST_DEFINE(n, &mcux_lptmr_init, PM_DEVICE_DT_INST_GET(n),	\
 		&mcux_lptmr_data_##n,						\
 		&mcux_lptmr_config_##n,						\
 		POST_KERNEL, CONFIG_COUNTER_INIT_PRIORITY,			\

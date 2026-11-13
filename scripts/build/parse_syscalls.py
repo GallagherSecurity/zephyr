@@ -29,14 +29,13 @@ import json
 import os
 import re
 import sys
-from pathlib import PurePath
 
 regex_flags = re.MULTILINE | re.VERBOSE
 
 syscall_regex = re.compile(
     r'''
 (?:__syscall|__syscall_always_inline)\s+   # __syscall attribute, must be first
-([^(]+)                                    # type and name of system call (split later)
+([^(]+?)\s*                                # type and name of system call (split later)
 [(]                                        # Function opening parenthesis
 ([^)]*)                                    # Arg list (split later)
 [)]                                        # Closing parenthesis
@@ -46,12 +45,28 @@ syscall_regex = re.compile(
 
 struct_tags = ["__subsystem", "__net_socket"]
 
+# Every regex below needs one of these markers to match. Most scanned files
+# contain none of them, and a substring test is far cheaper than the regexes.
+scan_markers = ("__syscall", "DEVICE_API_EXTENDS", *struct_tags)
+
 tagged_struct_decl_template = r'''
 %s\s+                           # tag, must be first
 struct\s+                       # struct keyword is next
 ([^{]+)                         # name of subsystem
 [{]                             # Open curly bracket
 '''
+
+api_extends_regex = re.compile(
+    r'''
+^\s*DEVICE_API_EXTENDS\s*       # macro name
+\(\s*                           # opening paren
+(\w+)\s*,\s*                    # child class
+(\w+)\s*,\s*                    # parent class
+\w+\s*                          # member name (not captured)
+\)                              # closing paren
+''',
+    regex_flags,
+)
 
 
 def tagged_struct_update(target_list, tag, contents):
@@ -60,12 +75,29 @@ def tagged_struct_update(target_list, tag, contents):
     target_list.extend(items)
 
 
+def api_extends_update(extends_map, contents):
+    if "DEVICE_API_EXTENDS" not in contents:
+        return
+
+    for mo in api_extends_regex.finditer(contents):
+        child, parent = mo.groups()
+        extends_map[child + "_driver_api"] = parent + "_driver_api"
+
+
+def merge_extends_into_tagged(tagged_list, extends_map):
+    """Replace plain string entries with {name, extends} objects where applicable."""
+    for i, item in enumerate(tagged_list):
+        if isinstance(item, str) and item in extends_map:
+            tagged_list[i] = {"name": item, "extends": extends_map[item]}
+
+
 def analyze_headers(include_dir, scan_dir, file_list):
     syscall_ret = []
     tagged_ret = {}
 
     for tag in struct_tags:
         tagged_ret[tag] = []
+    extends_map = {}
 
     syscall_files = dict()
 
@@ -108,7 +140,7 @@ def analyze_headers(include_dir, scan_dir, file_list):
                 ):
                     continue
 
-                path = PurePath(os.path.normpath(path)).as_posix()
+                path = os.path.normpath(path).replace(os.sep, "/")
 
                 if path not in syscall_files:
                     if include_dir and base_path in include_dir:
@@ -121,9 +153,12 @@ def analyze_headers(include_dir, scan_dir, file_list):
         with open(one_file, encoding="utf-8") as fp:
             try:
                 contents = fp.read()
-            except Exception:
-                sys.stderr.write(f"Error decoding {one_file} (included in {path})\n")
+            except UnicodeDecodeError:
+                sys.stderr.write(f"Error decoding {one_file}\n")
                 raise
+
+        if not any(marker in contents for marker in scan_markers):
+            continue
 
         fn = os.path.basename(one_file)
 
@@ -137,11 +172,14 @@ def analyze_headers(include_dir, scan_dir, file_list):
                 syscall_result.append((groups, fn, to_emit))
             for tag in struct_tags:
                 tagged_struct_update(tagged_ret[tag], tag, contents)
+            api_extends_update(extends_map, contents)
         except Exception as e:
             sys.stderr.write(f"While parsing {fn}\n")
             raise e
 
         syscall_ret.extend(syscall_result)
+
+    merge_extends_into_tagged(tagged_ret["__subsystem"], extends_map)
 
     return syscall_ret, tagged_ret
 

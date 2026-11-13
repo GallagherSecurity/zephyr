@@ -8,7 +8,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/spi/rtio.h>
+#include "spi_rtio.h"
 #include <zephyr/sys/sys_io.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
@@ -102,7 +102,7 @@ LOG_MODULE_REGISTER(mss_qspi, CONFIG_SPI_LOG_LEVEL);
 #define MSS_QSPI_FRAMESUP_LO_BYTES_MSK	(0xFFFF << 0)
 
 /*
- * Private data structure for an SPI slave
+ * Private data structure for an SPI peripheral
  */
 struct mss_qspi_config {
 	mm_reg_t base;
@@ -479,8 +479,8 @@ static int mss_qspi_configure(const struct device *dev,
 {
 	const struct mss_qspi_config *cfg = dev->config;
 
-	if (spi_cfg->operation & SPI_OP_MODE_SLAVE) {
-		LOG_ERR("Slave mode is not supported\n\r");
+	if (spi_cfg->operation & SPI_OP_MODE_PERIPHERAL) {
+		LOG_ERR("Peripheral mode is not supported\n\r");
 		return -ENOTSUP;
 	}
 

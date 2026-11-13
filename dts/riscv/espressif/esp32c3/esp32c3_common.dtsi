@@ -35,7 +35,7 @@
 			device_type = "cpu";
 			compatible = "espressif,riscv", "riscv";
 			riscv,isa-base = "rv32i";
-			riscv,isa-extensions = "i", "m", "c", "zicsr";
+			riscv,isa-extensions = "i", "m", "c", "zicsr", "zifencei";
 			reg = <0>;
 			cpu-power-states = <&light_sleep &deep_sleep>;
 			clock-source = <ESP32_CPU_CLK_SRC_PLL>;
@@ -48,7 +48,7 @@
 				compatible = "zephyr,power-state";
 				power-state-name = "standby";
 				min-residency-us = <1000>;
-				exit-latency-us = <50>;
+				exit-latency-us = <0>;
 			};
 
 			deep_sleep: deep_sleep {
@@ -151,12 +151,15 @@
 
 			#address-cells = <1>;
 			#size-cells = <1>;
+			ranges;
 
 			flash0: flash@0 {
 				compatible = "soc-nv-flash";
 				erase-block-size = <4096>;
 				write-block-size = <4>;
-				/* Flash size is specified in SOC/SIP dtsi */
+				#address-cells = <1>;
+				#size-cells = <1>;
+				/* reg and ranges are specified in SOC/SIP dtsi */
 			};
 		};
 
@@ -356,6 +359,16 @@
 			reg = <0x6003a000 0x1000>;
 			clocks = <&clock ESP32_AES_MODULE>;
 			status = "okay";
+		};
+
+		rmt: rmt@60016000 {
+			compatible = "espressif,esp32-rmt";
+			#pulse-io-cells = <1>;
+			reg = <0x60016000 0x1000>;
+			interrupts = <RMT_INTR_SOURCE IRQ_DEFAULT_PRIORITY 0>;
+			interrupt-parent = <&intc>;
+			clocks = <&clock ESP32_RMT_MODULE>;
+			status = "disabled";
 		};
 	};
 };

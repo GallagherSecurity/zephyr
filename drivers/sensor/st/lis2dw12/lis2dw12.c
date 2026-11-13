@@ -69,7 +69,12 @@ static int lis2dw12_set_odr(const struct device *dev, uint16_t odr)
 
 	/* check if power off */
 	if (odr == 0U) {
-		return lis2dw12_data_rate_set(ctx, LIS2DW12_XL_ODR_OFF);
+		int ret = lis2dw12_data_rate_set(ctx, LIS2DW12_XL_ODR_OFF);
+
+		if (ret == 0) {
+			lis2dw12->odr = 0;
+		}
+		return ret;
 	}
 
 	val =  LIS2DW12_ODR_TO_REG(odr);
@@ -211,6 +216,9 @@ static int lis2dw12_config(const struct device *dev, enum sensor_channel chan,
 #define THRESHOLD_MG_TO_WK_THS_REG(thr_mg, lsb_mg) \
 	((thr_mg + (lsb_mg / 2)) / lsb_mg)
 
+/* Maximum value of the 6-bit WK_THS field */
+#define WK_THS_MAX	63U
+
 static int lis2dw12_attr_set_thresh(const struct device *dev,
 					enum sensor_channel chan,
 					enum sensor_attribute attr,
@@ -250,6 +258,12 @@ static int lis2dw12_attr_set_thresh(const struct device *dev,
 	 */
 	lsb_mg = MG_TO_WK_THS_LSB(FS_RANGE_TO_MG(range));
 	reg = THRESHOLD_MG_TO_WK_THS_REG(thr_mg, lsb_mg);
+
+	/* rounding can push a threshold just below full scale to 64, which the HAL masks to 0 */
+	if (reg > WK_THS_MAX) {
+		LOG_WRN("Threshold %u mg clamped to %u mg", thr_mg, WK_THS_MAX * (uint32_t)lsb_mg);
+		reg = WK_THS_MAX;
+	}
 
 	LOG_DBG("Threshold %d mg -> fs: %u mg -> reg = %d LSBs",
 			thr_mg, FS_RANGE_TO_MG(range), reg);
@@ -488,7 +502,7 @@ static int lis2dw12_power_up(const struct device *dev)
 	}
 
 	/* reset device */
-	ret = lis2dw12_reset_set(ctx, PROPERTY_ENABLE);
+	ret = lis2dw12_reset_set(ctx);
 	if (ret < 0) {
 		return ret;
 	}
@@ -621,7 +635,7 @@ static int lis2dw12_init(const struct device *dev)
 
 	ret = lis2dw12_bus_check(dev);
 	if (ret < 0) {
-		LOG_ERR("Bus not ready for device %s", dev->name);
+		LOG_ERR_DEVICE_NOT_READY(dev);
 		return ret;
 	}
 	return pm_device_driver_init(dev, lis2dw12_pm_control);
@@ -709,7 +723,7 @@ static int lis2dw12_init(const struct device *dev)
 			(LIS2DW12_CFG_IRQ(inst)), ())
 
 #define LIS2DW12_SPI_OPERATION (SPI_WORD_SET(8) |			\
-				SPI_OP_MODE_MASTER |			\
+				SPI_OP_MODE_CONTROLLER |		\
 				SPI_MODE_CPOL |				\
 				SPI_MODE_CPHA)				\
 

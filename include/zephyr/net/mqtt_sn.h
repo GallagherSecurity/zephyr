@@ -25,6 +25,7 @@
 #include <stddef.h>
 
 #include <zephyr/net_buf.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/types.h>
 
 #include <sys/types.h>
@@ -193,15 +194,15 @@ struct mqtt_sn_transport {
 	 * @return ENOERR on connection+transmission success, Negative values
 	 *		signal errors.
 	 */
-	int (*sendto)(struct mqtt_sn_client *client, void *buf, size_t sz, const void *dest_addr,
-		      size_t addrlen);
+	int (*sendto)(struct mqtt_sn_transport *transport, void *buf, size_t sz,
+		      const void *dest_addr, size_t addrlen);
 
 	/**
 	 * @brief Will be called by the library when it wants to receive a message.
 	 *
 	 * Implementations should follow recvfrom conventions.
 	 */
-	ssize_t (*recvfrom)(struct mqtt_sn_client *client, void *rx_buf, size_t rx_len,
+	ssize_t (*recvfrom)(struct mqtt_sn_transport *transport, void *rx_buf, size_t rx_len,
 			    void *src_addr, size_t *addrlen);
 
 	/**
@@ -214,7 +215,7 @@ struct mqtt_sn_transport {
 	 * @return Positive number if data is available, or zero if there is none.
 	 * Negative values signal errors.
 	 */
-	int (*poll)(struct mqtt_sn_client *client);
+	int (*poll)(struct mqtt_sn_transport *transport);
 };
 
 #ifdef CONFIG_MQTT_SN_TRANSPORT_UDP
@@ -228,8 +229,15 @@ struct mqtt_sn_transport_udp {
 	/** Socket FD */
 	int sock;
 
-	/** Address of broadcasts */
-	struct net_sockaddr bcaddr;
+	/** Broadcast address storage */
+	union {
+		/** Address of broadcasts */
+		struct net_sockaddr_storage bcaddr_storage;
+/** @cond INTERNAL_HIDDEN */
+		/* Use the bcaddr_storage instead of this one. */
+		struct net_sockaddr bcaddr;
+/** @endcond */
+	};
 	net_socklen_t bcaddrlen;
 };
 
@@ -258,6 +266,26 @@ struct mqtt_sn_will_update {
 
 	/** Timestamp of the last update attempt */
 	int64_t last_attempt;
+};
+
+/**
+ * Structure for storing pending CONNECT state.
+ */
+struct mqtt_sn_connect_retry {
+	/** State of the pending CONNECT (enum mqtt_sn_connect_state). */
+	atomic_t state;
+
+	/** Number of retries for failed CONNECT attempts */
+	uint8_t retries;
+
+	/** Timestamp of the last CONNECT attempt */
+	int64_t last_attempt;
+
+	/** Will flag from the pending mqtt_sn_connect() call, resent on retry */
+	bool will;
+
+	/** Clean session flag from the pending mqtt_sn_connect() call, resent on retry */
+	bool clean_session;
 };
 
 /**
@@ -308,7 +336,7 @@ struct mqtt_sn_client {
 	sys_slist_t topic;
 
 	/** List of found gateways */
-	sys_slist_t gateway;
+	sys_slist_t gateways;
 
 	/** Current state of the MQTT-SN client */
 	int state;
@@ -327,6 +355,9 @@ struct mqtt_sn_client {
 
 	/** Radius of the next GWINFO transmission */
 	uint8_t radius_gwinfo;
+
+	/** State for a pending CONNECT retry */
+	struct mqtt_sn_connect_retry connect;
 
 	/** State for will topic updates */
 	struct mqtt_sn_will_update will_topic_update;
@@ -366,7 +397,7 @@ int mqtt_sn_client_init(struct mqtt_sn_client *client, const struct mqtt_sn_data
 void mqtt_sn_client_deinit(struct mqtt_sn_client *client);
 
 /**
- * @brief Manually add a Gateway, bypasing the normal search process.
+ * @brief Manually add a Gateway, bypassing the normal search process.
  *
  * This function manually creates a gateway that is stored internal to the library.
  *
@@ -391,11 +422,15 @@ int mqtt_sn_search(struct mqtt_sn_client *client, uint8_t radius);
 /**
  * @brief Connect the client.
  *
+ * A failed send is retried. The outcome is only visible via
+ * @ref MQTT_SN_EVT_CONNECTED or @ref MQTT_SN_EVT_DISCONNECTED.
+ *
  * @param client            The MQTT-SN client to connect.
  * @param will              Flag indicating if a Will message should be sent.
  * @param clean_session     Flag indicating if a clean session should be started.
  *
- * @return 0 or a negative error code (errno.h) indicating reason of failure.
+ * @return 0 on success, -EINVAL on invalid arguments, or -EALREADY if a
+ * CONNECT is already in progress.
  */
 int mqtt_sn_connect(struct mqtt_sn_client *client, bool will, bool clean_session);
 

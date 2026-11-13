@@ -15,6 +15,7 @@ LOG_MODULE_REGISTER(sample, LOG_LEVEL_INF);
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/pm/device_runtime.h>
 #include <zephyr/sys/byteorder.h>
 
 #ifdef CONFIG_ARCH_POSIX
@@ -204,6 +205,36 @@ static inline void fill_buffer_l_8(enum corner corner, uint8_t grey, uint8_t *bu
 	}
 }
 
+static inline void fill_buffer_l_4(enum corner corner, uint8_t grey, uint8_t *buf,
+				   size_t buf_size, enum display_pixel_format fmt)
+{
+	uint8_t nibble;
+
+	switch (corner) {
+	case TOP_LEFT:
+		nibble = 0x0u;
+		break;
+	case TOP_RIGHT:
+		nibble = 0xEu;
+		break;
+	case BOTTOM_RIGHT:
+		nibble = 0x8u;
+		break;
+	case BOTTOM_LEFT:
+		nibble = grey & 0x0Fu;
+		break;
+	default:
+		nibble = 0;
+		break;
+	}
+
+	uint8_t byte_val = (nibble << 4) | nibble;
+
+	for (size_t idx = 0; idx < buf_size; idx += 1) {
+		buf[idx] = byte_val;
+	}
+}
+
 static void fill_buffer_al_88(enum corner corner, uint8_t grey, uint8_t *buf,
 			      size_t buf_size, enum display_pixel_format fmt)
 {
@@ -273,6 +304,12 @@ int sample_display_draw(void)
 		goto end;
 	}
 
+	/* Hold a runtime PM reference so the display stays active for the
+	 * duration of the sample. No-op when runtime PM is not enabled on
+	 * the device.
+	 */
+	(void)pm_device_runtime_get(display_dev);
+
 	LOG_INF("Display sample for %s", display_dev->name);
 	display_get_capabilities(display_dev, &capabilities);
 
@@ -309,7 +346,9 @@ int sample_display_draw(void)
 		rect_w = capabilities.x_resolution;
 	}
 
-	rect_w = ROUND_UP(rect_w, CONFIG_SAMPLE_PITCH_ALIGN);
+	rect_w = ROUND_UP(rect_w, CONFIG_SAMPLE_WIDTH_ALIGN);
+	rect_h = ROUND_UP(rect_h, CONFIG_SAMPLE_HEIGHT_ALIGN);
+	h_step = ROUND_UP(h_step, CONFIG_SAMPLE_HEIGHT_ALIGN);
 
 	buf_size = rect_w * rect_h;
 
@@ -342,6 +381,10 @@ int sample_display_draw(void)
 	case PIXEL_FORMAT_L_8:
 		bg_color = 0xFFu;
 		fill_buffer_fnc = fill_buffer_l_8;
+		break;
+	case PIXEL_FORMAT_L_4:
+		bg_color = 0xFFu;
+		fill_buffer_fnc = fill_buffer_l_4;
 		break;
 	case PIXEL_FORMAT_AL_88:
 		bg_color = 0x00u;
@@ -378,7 +421,7 @@ int sample_display_draw(void)
 	(void)memset(buf, bg_color, buf_size);
 
 	buf_desc.buf_size = buf_size;
-	buf_desc.pitch = ROUND_UP(capabilities.x_resolution, CONFIG_SAMPLE_PITCH_ALIGN);
+	buf_desc.pitch = ROUND_UP(capabilities.x_resolution, CONFIG_SAMPLE_WIDTH_ALIGN);
 	buf_desc.width = capabilities.x_resolution;
 	buf_desc.height = h_step;
 
@@ -399,14 +442,14 @@ int sample_display_draw(void)
 		if ((capabilities.y_resolution - idx) < h_step) {
 			buf_desc.height = (capabilities.y_resolution - idx);
 		}
+		/* Fails on setups requiring alignment but where the display size is not aligned */
 		ret = display_write(display_dev, 0, idx, &buf_desc, buf);
 		if (ret < 0) {
-			LOG_ERR("Failed to write to display (error %d)", ret);
-			goto end;
+			LOG_WRN("Failed to write to display (error %d)", ret);
 		}
 	}
 
-	buf_desc.pitch = ROUND_UP(rect_w, CONFIG_SAMPLE_PITCH_ALIGN);
+	buf_desc.pitch = rect_w;
 	buf_desc.width = rect_w;
 	buf_desc.height = rect_h;
 

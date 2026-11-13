@@ -7,6 +7,7 @@ from pathlib import Path
 
 from west.commands import WestCommand
 
+from build_helpers import forward_logging_to_west
 from zcmake import run_cmake
 
 EXPORT_DESCRIPTION = '''\
@@ -37,11 +38,13 @@ class ZephyrExport(WestCommand):
         return parser
 
     def do_run(self, args, unknown_args):
+        # Forward debug output from the zcmake module logger so it is
+        # visible under "west -v" / "west -vv".
+        forward_logging_to_west(self, 'zcmake')
         # The 'share' subdirectory of the top level zephyr repository.
         share = Path(__file__).parents[2] / 'share'
 
         self.run_cmake_export(share / 'zephyr-package' / 'cmake')
-        self.run_cmake_export(share / 'zephyrunittest-package' / 'cmake')
 
     def run_cmake_export(self, path):
         # Run a package installation script.

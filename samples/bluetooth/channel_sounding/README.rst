@@ -46,11 +46,43 @@ Building and Running
 These samples can be found under :zephyr_file:`samples/bluetooth/channel_sounding` in
 the Zephyr tree.
 
-See :zephyr:code-sample-category:`bluetooth` samples for details.
-
-These sample use two applications, so two devices need to be setup.
+Each sample uses two applications, so two devices need to be set up.
 Flash one device with the initiator application, and another device with the
-reflector application.
+reflector application. Replace ``<board>`` with your target board in the commands below.
+
+Connected CS — initiator:
+
+.. zephyr-app-commands::
+   :zephyr-app: samples/bluetooth/channel_sounding/connected_cs/initiator
+   :board: <board>
+   :goals: build flash
+   :compact:
+
+Connected CS — reflector:
+
+.. zephyr-app-commands::
+   :zephyr-app: samples/bluetooth/channel_sounding/connected_cs/reflector
+   :board: <board>
+   :goals: build flash
+   :compact:
+
+CS Test — initiator:
+
+.. zephyr-app-commands::
+   :zephyr-app: samples/bluetooth/channel_sounding/cs_test/initiator
+   :board: <board>
+   :goals: build flash
+   :compact:
+
+CS Test — reflector:
+
+.. zephyr-app-commands::
+   :zephyr-app: samples/bluetooth/channel_sounding/cs_test/reflector
+   :board: <board>
+   :goals: build flash
+   :compact:
+
+See :zephyr:code-sample-category:`bluetooth` samples for details.
 
 The devices should perform distance estimations repeatedly every few seconds if they are close enough.
 
@@ -62,7 +94,7 @@ Reflector:
 
         *** Using Zephyr OS v3.7.99-585fbd2e318c ***
         Starting Channel Sounding Demo
-        Connected to EC:E7:DB:66:14:86 (random) (err 0x00)
+        Connected to R:EC:E7:DB:66:14:86 (err 0x00)
         MTU exchange success (247)
         Discovery: attr 0x20006a2c
         UUID 87654321-4567-2389-1254-f67f9fedcba8
@@ -80,7 +112,7 @@ Initiator:
         *** Using Zephyr OS v3.7.99-585fbd2e318c ***
         Starting Channel Sounding Demo
         Found device with name CS Sample, connecting...
-        Connected to C7:78:79:CD:16:B9 (random) (err 0x00)
+        Connected to R:C7:78:79:CD:16:B9 (err 0x00)
         MTU exchange success (247)
         CS capability exchange completed.
         CS config creation complete. ID: 0
@@ -99,7 +131,7 @@ Reflector:
 
         *** Using Zephyr OS v3.7.99-585fbd2e318c ***
         Starting Channel Sounding Demo
-        Connected to C7:78:79:CD:16:B9 (random) (err 0x00)
+        Connected to R:C7:78:79:CD:16:B9 (err 0x00)
         MTU exchange success (247)
         Discovery: attr 0x20006544
         UUID 87654321-4567-2389-1254-f67f9fedcba8
@@ -115,7 +147,7 @@ Initiator:
         *** Using Zephyr OS v3.7.99-585fbd2e318c ***
         Starting Channel Sounding Demo
         Found device with name CS Test Sample, connecting...
-        Connected to EC:E7:DB:66:14:86 (random) (err 0x00)
+        Connected to R:EC:E7:DB:66:14:86 (err 0x00)
         MTU exchange success (247)
         Estimated distance to reflector:
         - Round-Trip Timing method: 0.374741 meters (derived from 4 samples)

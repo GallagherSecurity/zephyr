@@ -15,11 +15,13 @@ supported:
   - backup_sram
   - can
   - counter
+  - crc
   - dac
   - dma
   - gpio
   - i2c
   - netif:eth
+  - ptp_clock
   - pwm
   - rtc
   - spi

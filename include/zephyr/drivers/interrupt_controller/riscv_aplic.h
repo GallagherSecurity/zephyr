@@ -56,6 +56,8 @@
 #define APLIC_GENMSI         0x3000
 /** @brief Target registers base offset */
 #define APLIC_TARGET_BASE    0x3004
+/** @brief Interrupt Domain Control (IDC) region base offset */
+#define APLIC_IDC_BASE       0x4000
 /** @} */
 
 /**
@@ -159,6 +161,66 @@
 /** @} */
 
 /**
+ * @name APLIC IDC Register Offsets
+ * Register offsets for registers within the IDC structure when DM enabled.
+ * One IDC per Hart.
+ * @{
+ */
+/** @brief WARL register to specify interrupt delivery (0=disabled, 1=enabled) */
+#define APLIC_IDC_IDELIVERY_OFFSET  0x0
+/** @brief WARL register for testing (1=interrupt asserted by force) */
+#define APLIC_IDC_IFORCE_OFFSET     0x4
+/** @brief WLRL register indicating the minimum priority for an interrupt to be signaled */
+#define APLIC_IDC_ITHRESHOLD_OFFSET 0x8
+/** @brief Read-only register indicating the current highest-priority interrupt pending */
+#define APLIC_IDC_TOPI_OFFSET       0x18
+/** @brief Read-only register identical to TOPI, with the affect of clearing the pending bit */
+#define APLIC_IDC_CLAIMI_OFFSET     0x1C
+/** @brief Per AIA spec, each IDC structure is 32 bytes */
+#define APLIC_IDC_STRUCT_SIZE       0x20
+/** @} */
+
+/**
+ * @name APLIC idelivery Register Fields
+ * Bit definitions for the APLIC ithreshold configuration register.
+ * @{
+ */
+/** @brief idelivery enable bit in idelivery register within IDC */
+#define APLIC_IDC_IDELIVERY_ENABLE BIT(0)
+/** @} */
+
+/**
+ * @name APLIC iforce Register Fields
+ * Bit definitions for the APLIC idelivery configuration register.
+ * @{
+ */
+/** @brief iforce default value (1=set interrupt pending. Spurious if TOPI is 0) */
+#define APLIC_IDC_IFORCE_SET 1
+/** @} */
+
+/**
+ * @name APLIC ithreshold Register Fields
+ * Bit definitions for the APLIC idelivery configuration register.
+ * @{
+ */
+/** @brief ithreshold default value (0=all enabled sources can signal) */
+#define APLIC_IDC_ITHRESHOLD 0
+/** @} */
+
+/**
+ * @name APLIC TOPI / CLAIMI Register Fields
+ * Bit definitions for the APLIC idelivery configuration register.
+ * @{
+ */
+/** @brief Lower 8 bits of TOPI/CLAIMI represent interrupt priority */
+#define APLIC_IPRIO_MASK               BIT_MASK(8)
+/** @brief Base offset into register's interrupt identity field */
+#define APLIC_INTERRUPT_IDENTITY_SHIFT 16
+/** @brief Bits 25:16 of TOPI/CLAIMI represent interrupt source number */
+#define APLIC_INTERRUPT_IDENTITY_MASK  (BIT_MASK(10) << APLIC_INTERRUPT_IDENTITY_SHIFT)
+/** @} */
+
+/**
  * @brief Calculate sourcecfg register offset for a source
  *
  * @param src Interrupt source number (1-based)
@@ -185,9 +247,12 @@ static inline uint32_t aplic_target_off(unsigned int src)
  *
  * Returns the device structure for the APLIC driver.
  *
- * @return Pointer to the APLIC device, or NULL if not available
+ * @return Pointer to the APLIC device
  */
-const struct device *riscv_aplic_get_dev(void);
+static inline const struct device *riscv_aplic_get_dev(void)
+{
+	return DEVICE_DT_GET_ANY(riscv_aplic);
+}
 
 /**
  * @brief Enable or disable the APLIC domain
@@ -196,9 +261,8 @@ const struct device *riscv_aplic_get_dev(void);
  *
  * @param dev APLIC device
  * @param enable true to enable the domain, false to disable
- * @return 0 on success, negative error code on failure
  */
-int riscv_aplic_domain_enable(const struct device *dev, bool enable);
+void riscv_aplic_domain_enable(const struct device *dev, bool enable);
 
 /**
  * @brief Configure an interrupt source mode
@@ -208,9 +272,8 @@ int riscv_aplic_domain_enable(const struct device *dev, bool enable);
  * @param dev APLIC device
  * @param src Interrupt source number
  * @param sm Source mode (APLIC_SM_* values)
- * @return 0 on success, negative error code on failure
  */
-int riscv_aplic_config_src(const struct device *dev, unsigned int src, unsigned int sm);
+void riscv_aplic_config_src(const struct device *dev, unsigned int src, unsigned int sm);
 
 /**
  * @brief Enable or disable an interrupt source
@@ -220,11 +283,10 @@ int riscv_aplic_config_src(const struct device *dev, unsigned int src, unsigned 
  * @param dev APLIC device
  * @param src Interrupt source number
  * @param enable true to enable, false to disable
- * @return 0 on success, negative error code on failure
  */
-int riscv_aplic_enable_src(const struct device *dev, unsigned int src, bool enable);
+void riscv_aplic_enable_src(const struct device *dev, unsigned int src, bool enable);
 
-#ifdef CONFIG_RISCV_APLIC_MSI
+#if defined(CONFIG_RISCV_APLIC_MSI) || defined(__DOXYGEN__)
 /**
  * @brief Configure MSI routing for an interrupt source
  *
@@ -234,9 +296,9 @@ int riscv_aplic_enable_src(const struct device *dev, unsigned int src, bool enab
  * @param src Interrupt source number
  * @param hart Target hart index
  * @param eiid External Interrupt Identity for the target IMSIC
- * @return 0 on success, negative error code on failure
  */
-int riscv_aplic_msi_route(const struct device *dev, unsigned int src, uint32_t hart, uint32_t eiid);
+void riscv_aplic_msi_route(const struct device *dev, unsigned int src, uint32_t hart,
+			   uint32_t eiid);
 
 /**
  * @brief Inject a software-triggered MSI
@@ -247,10 +309,9 @@ int riscv_aplic_msi_route(const struct device *dev, unsigned int src, uint32_t h
  * @param eiid External Interrupt Identity
  * @param hart_id Target hart index
  * @param context Context field (for DMSI mode)
- * @return 0 on success, negative error code on failure
  */
-int riscv_aplic_msi_inject_software_interrupt(const struct device *dev, uint32_t eiid,
-					      uint32_t hart_id, uint32_t context);
+void riscv_aplic_msi_inject_software_interrupt(const struct device *dev, uint32_t eiid,
+					       uint32_t hart_id, uint32_t context);
 #endif /* CONFIG_RISCV_APLIC_MSI */
 
 /**
@@ -272,11 +333,7 @@ uint32_t riscv_aplic_get_num_sources(const struct device *dev);
  */
 static inline void riscv_aplic_enable_source(unsigned int src)
 {
-	const struct device *dev = riscv_aplic_get_dev();
-
-	if (dev) {
-		riscv_aplic_enable_src(dev, src, true);
-	}
+	riscv_aplic_enable_src(riscv_aplic_get_dev(), src, true);
 }
 
 /**
@@ -288,14 +345,10 @@ static inline void riscv_aplic_enable_source(unsigned int src)
  */
 static inline void riscv_aplic_disable_source(unsigned int src)
 {
-	const struct device *dev = riscv_aplic_get_dev();
-
-	if (dev) {
-		riscv_aplic_enable_src(dev, src, false);
-	}
+	riscv_aplic_enable_src(riscv_aplic_get_dev(), src, false);
 }
 
-#ifdef CONFIG_RISCV_APLIC_MSI
+#if defined(CONFIG_RISCV_APLIC_MSI) || defined(__DOXYGEN__)
 /**
  * @brief Inject MSI using GENMSI (convenience wrapper)
  *
@@ -306,12 +359,65 @@ static inline void riscv_aplic_disable_source(unsigned int src)
  */
 static inline void riscv_aplic_msi_inject_genmsi(uint32_t hart, uint32_t eiid)
 {
-	const struct device *dev = riscv_aplic_get_dev();
-
-	if (dev) {
-		riscv_aplic_msi_inject_software_interrupt(dev, eiid, hart, 0);
-	}
+	riscv_aplic_msi_inject_software_interrupt(riscv_aplic_get_dev(), eiid, hart, 0);
 }
 #endif /* CONFIG_RISCV_APLIC_MSI */
+
+#if defined(CONFIG_RISCV_APLIC_DIRECT) || defined(__DOXYGEN__)
+/**
+ * @brief Calculate idelivery register offset for a given CPU
+ *
+ * @param cpu CPU index
+ * @return Base register offset for the CPU's idelivery register in IDC structure
+ */
+static inline uint32_t aplic_idelivery_off(unsigned int cpu)
+{
+	return APLIC_IDC_BASE + (cpu * APLIC_IDC_STRUCT_SIZE) + APLIC_IDC_IDELIVERY_OFFSET;
+}
+
+/**
+ * @brief Calculate ithreshold register offset for a given CPU
+ *
+ * @param cpu CPU index
+ * @return Base register offset for the CPU's ithreshold register in IDC structure
+ */
+static inline uint32_t aplic_ithreshold_off(unsigned int cpu)
+{
+	return APLIC_IDC_BASE + (cpu * APLIC_IDC_STRUCT_SIZE) + APLIC_IDC_ITHRESHOLD_OFFSET;
+}
+
+/**
+ * @brief Calculate iforce register offset for a given CPU
+ *
+ * @param cpu CPU index
+ * @return Base register offset for the CPU's iforce register in IDC structure
+ */
+static inline uint32_t aplic_iforce_off(unsigned int cpu)
+{
+	return APLIC_IDC_BASE + (cpu * APLIC_IDC_STRUCT_SIZE) + APLIC_IDC_IFORCE_OFFSET;
+}
+
+/**
+ * @brief Calculate topi register offset for a given CPU
+ *
+ * @param cpu CPU index
+ * @return Base register offset for the CPU's topi register in IDC structure
+ */
+static inline uint32_t aplic_topi_off(unsigned int cpu)
+{
+	return APLIC_IDC_BASE + (cpu * APLIC_IDC_STRUCT_SIZE) + APLIC_IDC_TOPI_OFFSET;
+}
+
+/**
+ * @brief Calculate claimi register offset for a given CPU
+ *
+ * @param cpu CPU index
+ * @return Base register offset for the CPU's claimi register in IDC structure
+ */
+static inline uint32_t aplic_claimi_off(unsigned int cpu)
+{
+	return APLIC_IDC_BASE + (cpu * APLIC_IDC_STRUCT_SIZE) + APLIC_IDC_CLAIMI_OFFSET;
+}
+#endif /* CONFIG_RISCV_APLIC_DIRECT */
 
 #endif

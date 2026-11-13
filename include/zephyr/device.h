@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @file
+ * @brief APIs and macros for the Zephyr device model.
+ * @ingroup device_model
+ */
+
 #ifndef ZEPHYR_INCLUDE_DEVICE_H_
 #define ZEPHYR_INCLUDE_DEVICE_H_
 
@@ -317,6 +323,18 @@ typedef int16_t device_handle_t;
 #define DEVICE_DT_GET(node_id) (&DEVICE_DT_NAME_GET(node_id))
 
 /**
+ * @brief Like @ref DEVICE_DT_GET, with a trailing comma.
+ *
+ * This is convenient for use with devicetree iteration macros like
+ * @ref DT_FOREACH_STATUS_OKAY.
+ *
+ * @param node_id A devicetree node identifier
+ *
+ * @return A pointer to the device object created for that node, followed by a comma
+ */
+#define DEVICE_DT_GET_COMMA(node_id) DEVICE_DT_GET(node_id),
+
+/**
  * @brief Get a @ref device reference for an instance of a `DT_DRV_COMPAT`
  * compatible.
  *
@@ -326,6 +344,18 @@ typedef int16_t device_handle_t;
  * @return A pointer to the device object created for that instance
  */
 #define DEVICE_DT_INST_GET(inst) DEVICE_DT_GET(DT_DRV_INST(inst))
+
+/**
+ * @brief Like @ref DEVICE_DT_INST_GET, with a trailing comma.
+ *
+ * This is convenient for use with devicetree iteration macros like
+ * @ref DT_INST_FOREACH_STATUS_OKAY.
+ *
+ * @param inst `DT_DRV_COMPAT` instance number
+ *
+ * @return A pointer to the device object created for that instance, followed by a comma
+ */
+#define DEVICE_DT_INST_GET_COMMA(inst) DEVICE_DT_INST_GET(inst),
 
 /**
  * @brief Get a @ref device reference from a devicetree compatible.
@@ -466,7 +496,7 @@ struct device_state {
 	uint8_t init_res;
 
 	/** Indicates the device initialization function has been
-	 * invoked.
+	 * invoked and succeeded.
 	 */
 	bool initialized : 1;
 };
@@ -542,12 +572,19 @@ struct device {
 	 * @kconfig{CONFIG_PM_DEVICE} is enabled).
 	 */
 	union {
+		/** Info common to all device PM variants */
 		struct pm_device_base *pm_base;
+		/** Info for a device using generic PM */
 		struct pm_device *pm;
+		/** Info for a device using synchronous PM */
 		struct pm_device_isr *pm_isr;
 	};
 #endif
 #if defined(CONFIG_DEVICE_DT_METADATA) || defined(__DOXYGEN__)
+	/**
+	 * Devicetree metadata associated with the device (only available if
+	 * @kconfig{CONFIG_DEVICE_DT_METADATA} is enabled).
+	 */
 	const struct device_dt_metadata *dt_meta;
 #endif /* CONFIG_DEVICE_DT_METADATA */
 };
@@ -891,17 +928,42 @@ __syscall bool device_is_ready(const struct device *dev);
 	LOG_ERR("%s device not ready", (dev) ? (dev)->name : "(null)")
 
 /**
+ * @brief Writes a "device not ready" warning message to the log for the logging instance.
+ *
+ * @details Writes a "device not ready" warning message to the log using the
+ * device name as reference, meant to be used in device_is_ready checks.
+ *
+ * @param _log_inst pointer to the log structure associated with the instance.
+ * @param dev pointer to a struct device.
+ */
+#define LOG_INST_WRN_DEVICE_NOT_READY(_log_inst, dev) \
+	LOG_INST_WRN(_log_inst, "%s device not ready", (dev) ? (dev)->name : "(null)")
+
+/**
+ * @brief Writes a "device not ready" error message to the log for the logging instance.
+ *
+ * @details Writes a "device not ready" error message to the log using the
+ * device name as reference, meant to be used in device_is_ready checks.
+ *
+ * @param _log_inst pointer to the log structure associated with the instance.
+ * @param dev pointer to a struct device.
+ */
+#define LOG_INST_ERR_DEVICE_NOT_READY(_log_inst, dev) \
+	LOG_INST_ERR(_log_inst, "%s device not ready", (dev) ? (dev)->name : "(null)")
+
+/**
  * @brief Initialize a device.
  *
  * A device whose initialization was deferred (by marking it as
  * ``zephyr,deferred-init`` on devicetree) needs to be initialized manually via
- * this call. De-initialized devices can also be initialized again via this
- * call.
+ * this call. De-initialized devices, and devices whose initialization
+ * failed, can be initialized again via this call.
  *
  * @param dev device to be initialized.
  *
+ * @retval 0 If successful
  * @retval -EALREADY Device is already initialized.
- * @retval -errno For other errors.
+ * @retval -errno Error returned by the device initialization function.
  */
 __syscall int device_init(const struct device *dev);
 
@@ -920,7 +982,8 @@ __syscall int device_init(const struct device *dev);
  * @param dev device to be de-initialized.
  *
  * @retval 0 If successful
- * @retval -EPERM If device has not been initialized.
+ * @retval -EPERM If device has not been initialized, or its initialization
+ *         failed.
  * @retval -ENOTSUP If device does not support de-initialization, or if the
  *         feature is not enabled (see CONFIG_DEVICE_DEINIT_SUPPORT)
  * @retval -errno For any other errors.
@@ -1354,6 +1417,12 @@ DT_FOREACH_STATUS_OKAY_NODE(Z_MAYBE_DEVICE_DECLARE_INTERNAL)
 /** @brief Expands to the full type. */
 #define Z_DEVICE_API_TYPE(_class) _CONCAT(_class, _driver_api)
 
+/** @brief Helper to get API pointer. */
+#define Z_DEVICE_API_GET(_class, _dev) ((const struct Z_DEVICE_API_TYPE(_class) *)_dev->api)
+
+/** @brief Linker symbol marking end of class section including child sections. */
+#define Z_DEVICE_API_EXT_END(_struct_type) CONCAT(_, _struct_type, _ext_end)
+
 /** @endcond */
 
 /**
@@ -1365,14 +1434,27 @@ DT_FOREACH_STATUS_OKAY_NODE(Z_MAYBE_DEVICE_DECLARE_INTERNAL)
 #define DEVICE_API(_class, _name) const STRUCT_SECTION_ITERABLE(Z_DEVICE_API_TYPE(_class), _name)
 
 /**
- * @brief Expands to the pointer of a device's API for a given class.
+ * @brief Declare that API class @p _child is an extension of device API class @p _parent.
  *
- * @param _class The device API class.
- * @param _dev The device instance pointer.
+ * This registers the parent-child relationship so that DEVICE_API_IS(_parent, dev) returns
+ * true for devices whose API is of the @p _child class. The parent API struct must be the
+ * first member of the child API struct.
  *
- * @return the pointer to the device API.
+ * @param _child Name of child (extending) API class.
+ * @param _parent Name of parent (base) API class.
+ * @param _member Name of the first member of @p _child API class struct.
+ * This member must have the same type as the @p _parent API class struct.
+ *
+ * @internal
+ * In addition to build-time validation, this macro is used as a sentinel by parse_syscalls.py
+ * to identify the API classes that are extended from others and build an API class hierarchy.
+ * @endinternal
  */
-#define DEVICE_API_GET(_class, _dev) ((const struct Z_DEVICE_API_TYPE(_class) *)_dev->api)
+#define DEVICE_API_EXTENDS(_child, _parent, _member)                                               \
+	CONTAINER_OF_VALIDATE((struct Z_DEVICE_API_TYPE(_parent) *)0,                              \
+			      struct Z_DEVICE_API_TYPE(_child), _member)                           \
+	BUILD_ASSERT(offsetof(struct Z_DEVICE_API_TYPE(_child), _member) == 0,                     \
+		     "Parent API struct must be the first member of child API struct")
 
 /**
  * @brief Macro that evaluates to a boolean that can be used to check if
@@ -1387,9 +1469,29 @@ DT_FOREACH_STATUS_OKAY_NODE(Z_MAYBE_DEVICE_DECLARE_INTERNAL)
 #define DEVICE_API_IS(_class, _dev)                                                                \
 	({                                                                                         \
 		STRUCT_SECTION_START_EXTERN(Z_DEVICE_API_TYPE(_class));                            \
-		STRUCT_SECTION_END_EXTERN(Z_DEVICE_API_TYPE(_class));                              \
-		(DEVICE_API_GET(_class, _dev) < STRUCT_SECTION_END(Z_DEVICE_API_TYPE(_class)) &&   \
-		 DEVICE_API_GET(_class, _dev) >= STRUCT_SECTION_START(Z_DEVICE_API_TYPE(_class))); \
+		extern const uint8_t Z_DEVICE_API_EXT_END(Z_DEVICE_API_TYPE(_class))[];            \
+                                                                                                   \
+		((const uint8_t *)Z_DEVICE_API_GET(_class, _dev) <                                 \
+			 Z_DEVICE_API_EXT_END(Z_DEVICE_API_TYPE(_class)) &&                        \
+		 (const uint8_t *)Z_DEVICE_API_GET(_class, _dev) >=                                \
+			 (const uint8_t *)STRUCT_SECTION_START(Z_DEVICE_API_TYPE(_class)));        \
+	})
+
+/**
+ * @brief Expands to the pointer of a device's API for a given class.
+ *
+ * @param _class The device API class.
+ * @param _dev The device instance pointer.
+ *
+ * @return the pointer to the device API.
+ */
+#define DEVICE_API_GET(_class, _dev)                                                               \
+	({                                                                                         \
+		IF_ENABLED(CONFIG_DEVICE_API_ASSERT, (                                             \
+		__ASSERT(_dev != NULL, "device is NULL");                                          \
+		__ASSERT(DEVICE_API_IS(_class, _dev), "device API is not %s", STRINGIFY(_class));  \
+		));                                                                                \
+		Z_DEVICE_API_GET(_class, _dev);                                                    \
 	})
 
 #ifdef __cplusplus

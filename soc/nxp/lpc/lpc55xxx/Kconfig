@@ -1,4 +1,4 @@
-# Copyright 2019, 2024-2025 NXP
+# Copyright 2019, 2024-2026 NXP
 # SPDX-License-Identifier: Apache-2.0
 
 config SOC_SERIES_LPC55XXX

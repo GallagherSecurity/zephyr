@@ -183,12 +183,22 @@ zephyr_udc0: &usbotg_fs {
 &i2c2 {
 	pinctrl-0 = <&i2c2_scl_pb10 &i2c2_sda_pb11>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 10 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 11 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 };
 
 &i2c3 {
 	pinctrl-0 = <&i2c3_scl_pa8 &i2c3_sda_pc9>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpioa 8 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpioc 9 GPIO_ACTIVE_HIGH>;
+	status = "okay";
+};
+
+&adc123_common {
+	st,adc-prescaler = <2>;
+	st,adc-clock-source = "SYNC";
 	status = "okay";
 };
 
@@ -196,8 +206,6 @@ zephyr_udc0: &usbotg_fs {
 	status = "okay";
 	pinctrl-0 = <&adc1_in2_pa2 &adc1_in3_pa3>;
 	pinctrl-names = "default";
-	st,adc-clock-source = "SYNC";
-	st,adc-prescaler = <2>;
 };
 
 &vref {

@@ -4,43 +4,13 @@
 # Copyright (c) 2015-2016 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-config BT_LONG_WQ
-	bool "Dedicated workqueue for long-running tasks."
-	default y if BT_GATT_CACHING
-	help
-	  Adds an API for a workqueue dedicated to long-running tasks.
-
-if BT_LONG_WQ
-config BT_LONG_WQ_STACK_SIZE
-	int "Long workqueue stack size."
-	default 4096 if NO_OPTIMIZATIONS
-	default 1400 if BT_ECC
-	default 1300 if BT_GATT_CACHING
-	default 1024
-	help
-	  The stack size used for the long workqueue. In most cases it's best to use the default
-	  values, however since the actual requirement depends on the underlying crypto backend
-	  this option can be used to finetune the stack size.
-
-config BT_LONG_WQ_PRIO
-	int "Long workqueue priority. Should be preemptible."
-	default 10
-	range 0 NUM_PREEMPT_PRIORITIES
-
-config BT_LONG_WQ_INIT_PRIO
-	int "Long workqueue init priority"
-	default 50
-	help
-	  Init priority level to setup the long workqueue.
-
-endif # BT_LONG_WQ
-
 config BT_HCI_HOST
 	# Hidden option to make the conditions more intuitive
 	bool
 	default y
 	depends on !BT_HCI_RAW
 	select UUID
+	select BT_SYSTEM_WORKQUEUE_COOP
 
 config BT_HCI_TX_STACK_SIZE
 	# NOTE: This value is derived from other symbols and should only be
@@ -73,42 +43,9 @@ config BT_HCI_TX_PRIO
 	int
 	default 7
 
-choice BT_RECV_CONTEXT
-	prompt "BT RX Thread Selection"
-	default BT_RECV_WORKQ_SYS if SOC_SERIES_NRF51
-	default BT_RECV_WORKQ_BT
-	help
-	  Selects in which context incoming low priority HCI packets are processed.
-	  The host defines some events as high priority to avoid race conditions and deadlocks.
-	  High priority events are always processed in the context of the caller of bt_recv()
-	  or bt_recv_prio(). The choice will influence RAM usage and how fast incoming HCI
-	  packets are processed.
-
-config BT_RECV_WORKQ_SYS
-	bool "Process low priority HCI packets in the system work queue"
-	help
-	  When this option is selected, the host will process incoming low priority HCI packets
-	  in the system work queue.
-	  The application needs to ensure the system workqueue stack size (SYSTEM_WORKQUEUE_STACK_SIZE)
-	  is large enough, refer to BT_RX_STACK_SIZE for the recommended minimum.
-	  Warning: Enabling this option will cause the latency of incoming Bluetooth events to be
-	  affected by other tasks using the system work queue. When this option is active, the Host
-	  will process Bluetooth events in a blocking manner. This can lead to deadlocks if the
-	  application waits for the system work queue while handling Bluetooth events. This feature
-	  is intended for advanced users to allow aggressive memory optimization for devices with
-	  very limited memory. It is strongly advised not to use this option.
-
-config BT_RECV_WORKQ_BT
-	bool "Process low priority HCI packets in the bluetooth-specific work queue"
-	help
-	  When this option is selected, the host will process incoming low priority HCI packets
-	  in the Bluetooth-specific work queue.
-	  The application needs to ensure the bluetooth-specific work queue size is large enough,
-	  refer to BT_RX_STACK_SIZE for the recommended minimum.
-endchoice
-
 config BT_RX_STACK_SIZE
-	int "Size of the receiving thread stack"
+	int "Size of the Bluetooth workqueue stack"
+	default 4096 if ARM64
 	default 768 if BT_HCI_RAW
 	default 3092 if BT_MESH_GATT_CLIENT
 	default 2800 if BT_MESH_PB_GATT
@@ -116,12 +53,13 @@ config BT_RX_STACK_SIZE
 	default 2048 if BT_AUDIO
 	default 1200
 	help
-	  Size of the receiving thread stack. This is the context from
-	  which all event callbacks to the application occur. The
-	  default value is sufficient for basic operation, but if the
-	  application needs to do advanced things in its callbacks that
-	  require extra stack space, this value can be increased to
-	  accommodate for that.
+	  Size of the stack of the Bluetooth workqueue, the thread in
+	  which the Host processes received data and runs its deferred
+	  work. Most of the callbacks that the application gets from a
+	  context internal to the stack run in this thread. The default
+	  value is sufficient for basic operation, but if the application
+	  needs extra stack space in its callbacks, this value can be
+	  increased to accommodate for that.
 
 config BT_RX_PRIO
 	# Hidden option for Co-Operative Rx thread priority
@@ -149,6 +87,7 @@ config BT_TX_PROCESSOR_THREAD_PRIO
 
 config BT_TX_PROCESSOR_STACK_SIZE
 	int "TX processor thread stack size"
+	default 4096 if ARM64
 	default 1024
 	help
 	  Size of the TX processor thread stack. How much stack is needed depends on which
@@ -201,7 +140,8 @@ config BT_BUF_EVT_DISCARDABLE_SIZE
 	default $(UINT8_MAX) if BT_CLASSIC
 	# Le Advertising Report event
 	default 43 if !BT_EXT_ADV
-	default 58 if BT_EXT_ADV
+	default 58 if BT_EXT_ADV && BT_MESH
+	default BT_BUF_EVT_RX_SIZE if BT_EXT_ADV
 	help
 	  Maximum support discardable HCI event size of buffers in the separate
 	  discardable event buffer pool. This value does not include the
@@ -224,13 +164,17 @@ config BT_BUF_EVT_DISCARDABLE_COUNT
 
 config BT_HOST_CRYPTO
 	bool "Use crypto functionality implemented in the Bluetooth host"
-	default y if !BT_CTLR_CRYPTO
+	default y
+	depends on !BT_CTLR_CRYPTO
 	select PSA_CRYPTO
 	select PSA_WANT_KEY_TYPE_AES
 	select PSA_WANT_ALG_ECB_NO_PADDING
+	imply MBEDTLS_AES_ROM_TABLES if PSA_CRYPTO_PROVIDER_MBEDTLS
 	help
 	  The option adds the AES encryption support using PSA Crypto API
 	  library if this is not provided by the controller implementation.
+	  In a combined build with BT_CTLR_CRYPTO enabled, the Controller
+	  provides these functions instead.
 
 config BT_HOST_CRYPTO_PRNG
 	bool "Use PSA crypto API library for random number generation"
@@ -376,15 +320,6 @@ config BT_CONN_FRAG_COUNT
 
 if BT_CONN
 
-config BT_CONN_TX_MAX
-	int "Maximum number of pending TX buffers with a callback [DEPRECATED]"
-	default BT_BUF_ACL_TX_COUNT
-	range BT_BUF_ACL_TX_COUNT $(UINT8_MAX)
-	help
-	  Maximum number of pending TX buffers that have an associated
-	  callback. Normally this can be left to the default value, which
-	  is equal to the number of TX buffers in the controller.
-
 config BT_CONN_PARAM_ANY
 	bool "Accept any values for connection parameters"
 	help
@@ -418,22 +353,9 @@ config BT_USER_PHY_UPDATE
 	  changes on the connection. The current PHY info is available in the
 	  connection info.
 
-config BT_AUTO_PHY_UPDATE
-	bool "Auto-initiate PHY Update Procedure [DEPRECATED]"
-	select DEPRECATED
-	help
-	  Initiate PHY Update Procedure on connection establishment. This will attempt
-	  to update the connection to use 2M PHY, however it doesn't actually guarantee
-	  that this is what will be used in the end.
-
-	  This option has been deprecated in favor of role specific options. The equivalent
-	  behavior can be accomplished by enabling BT_AUTO_PHY_PERIPHERAL_2M and
-	  BT_AUTO_PHY_CENTRAL_2M.
-
 choice BT_AUTO_PHY_PERIPHERAL
 	prompt "Auto PHY update for peripheral role"
 	depends on BT_PERIPHERAL
-	default BT_AUTO_PHY_PERIPHERAL_2M if BT_AUTO_PHY_UPDATE
 	default BT_AUTO_PHY_PERIPHERAL_NONE
 
 config BT_AUTO_PHY_PERIPHERAL_NONE
@@ -479,6 +401,12 @@ config BT_USER_DATA_LEN_UPDATE
 	  Procedure. The application can also a register callback to be notified
 	  about Data Length changes on the connection. The current Data Length
 	  info is available in the connection info.
+
+config BT_USER_CONN_PARAM_REJECTED
+	bool "User notification of connection parameter update rejection"
+	help
+	  Enable application callback when an application-initiated connection
+	  parameter update request is rejected by the peer.
 
 config BT_AUTO_DATA_LEN_UPDATE
 	bool "Auto-initiate Data Length Update procedure"
@@ -628,7 +556,7 @@ config BT_RPA_SHARING
 	  period.
 
 config BT_SIGNING
-	bool "Data signing support"
+	bool "Data signing support [DEPRECATED]"
 	select DEPRECATED
 	help
 	  This option enables data signing which is used for transferring
@@ -688,6 +616,45 @@ config BT_SMP_ALLOW_UNAUTH_OVERWRITE
 	  to replace the existing bond. When this option is disabled in order
 	  to create a new bond the old bond has to be explicitly deleted with
 	  bt_unpair.
+
+config BT_SMP_DERIVE_LTK
+	bool "Derive the LE LTK from the BR/EDR link key"
+	depends on BT_CLASSIC
+	default y
+	help
+	  Accept the Security Manager procedure over BR/EDR, which derives the
+	  LE LTK from the BR/EDR link key as part of Cross-Transport Key
+	  Derivation (Core Specification 6.3, Vol 3, Part H, Section 2.4.2.5).
+
+	  Disabling this refuses that procedure as a whole rather than only the
+	  LTK: the IRK, the identity address and the CSRK are not distributed
+	  over BR/EDR either, so RPAs from a peer bonded only over BR/EDR can
+	  no longer be resolved. That is intended, because the identity
+	  information on its own already creates an LE bond entry. The BR/EDR
+	  Security Manager fixed channel is also left out of the L2CAP
+	  information response so that a peer does not start a procedure that
+	  would then be rejected.
+
+	  Disable this on a device that must not end up with an LE bond as a
+	  side effect of pairing over BR/EDR. Keys derived while it was enabled
+	  are kept.
+
+config BT_SMP_DERIVE_LK
+	bool "Derive the BR/EDR link key from the LE LTK"
+	depends on BT_CLASSIC
+	default y
+	help
+	  Ask for a BR/EDR link key to be derived from the LE LTK during Secure
+	  Connections pairing over LE, as part of Cross-Transport Key Derivation
+	  (Core Specification 6.3, Vol 3, Part H, Section 2.4.2.4).
+
+	  Disabling this clears the LinkKey bit from the key distribution of
+	  both the Pairing Request and the Pairing Response, so that the peer
+	  does not keep a link key that this device never derives.
+
+	  Disable this on a device that must not end up with a BR/EDR bond as a
+	  side effect of pairing over LE. Keys derived while it was enabled are
+	  kept.
 
 config BT_ID_UNPAIR_MATCHING_BONDS
 	bool "Delete bond with same peer with other local identity when bonding"
@@ -750,18 +717,8 @@ config BT_SMP_USB_HCI_CTLR_WORKAROUND
 	  It opens up for a potential vulnerability as the central cannot detect
 	  if the keys are distributed over an encrypted link.
 
-config BT_FIXED_PASSKEY
-	bool "Use a fixed passkey for pairing [DEPRECATED]"
-	select DEPRECATED
-	help
-	  This option is deprecated, use BT_APP_PASSKEY instead.
-	  With this option enabled, the application will be able to call the
-	  bt_passkey_set() API to set a fixed passkey. If set, the
-	  pairing_confirm() callback will be called for all incoming pairings.
-
 config BT_APP_PASSKEY
 	bool "Allow the application to provide passkeys for pairing"
-	depends on !BT_FIXED_PASSKEY
 	help
 	  With this option enabled, the application will be able to provide passkeys for pairing
 	  using the app_passkey() callback.  If the application does not provide a passkey, a
@@ -866,9 +823,10 @@ rsource "../services/Kconfig"
 
 config BT_MAX_PAIRED
 	int "Maximum number of paired devices"
-	default 0 if !BT_SMP
-	default 1
+	range 1 250 if BT_SMP
+	default 1 if BT_SMP
 	range 0 250
+	default 0
 	help
 	  Maximum number of paired Bluetooth devices. The minimum (and
 	  default) number is 1.
@@ -932,6 +890,23 @@ config BT_EXT_SCAN_BUF_SIZE
 	  Maximum size of an advertisement report in octets. If the advertisement
 	  provided by the controller is larger than this buffer size,
 	  the remaining data will be discarded.
+
+config BT_SCAN_EXT_FILTER_POLICY
+	bool "Extended scanner filter policies"
+	depends on !HAS_BT_CTLR || BT_CTLR_EXT_SCAN_FP
+	help
+	  Enable support for the BT_LE_SCAN_OPT_EXT_FILTER_POLICY scanning option.
+
+	  The extended scanner filter policies let the Controller report directed
+	  advertisements whose target address is a resolvable private address that
+	  the Controller was unable to resolve, instead of discarding them. This
+	  allows an application to detect a peer that is directing advertisements
+	  at an identity the local device cannot resolve.
+
+	  This enables the LE Directed Advertising Report event, which is used to
+	  report these advertisements while scanning with the legacy scanning
+	  commands. It requires a Controller that supports the Extended Scanner
+	  Filter Policies.
 
 endif # BT_OBSERVER
 
@@ -1110,7 +1085,6 @@ config BT_ECC
 	select PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_EXPORT
 	select PSA_WANT_ECC_SECP_R1_256
 	imply MBEDTLS_PSA_P256M_DRIVER_ENABLED if MBEDTLS_PSA_CRYPTO_C
-	imply BT_LONG_WQ
 	help
 	  If this option is set, internal APIs will be available to perform ECDH operations through
 	  the long work queue (or system work queue). The operations are used e.g. by LE Secure

@@ -5,7 +5,6 @@
  */
 
 #include <st/l1/stm32l152.dtsi>
-#include <zephyr/dt-bindings/sensor/qdec_stm32.h>
 
 / {
 	sram0: memory@20000000 {
@@ -16,6 +15,7 @@
 		flash-controller@40023c00 {
 			flash0: flash@8000000 {
 				reg = <0x08000000 DT_SIZE_K(256)>;
+				ranges = <0 0x8000000 DT_SIZE_K(256)>;
 			};
 		};
 

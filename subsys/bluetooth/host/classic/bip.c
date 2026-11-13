@@ -12,14 +12,14 @@
 
 #include <zephyr/bluetooth/conn.h>
 
-#include "common/assert.h"
+#include <common/assert.h>
 
 #include <zephyr/bluetooth/classic/sdp.h>
 #include <zephyr/bluetooth/classic/goep.h>
 #include <zephyr/bluetooth/classic/bip.h>
 
-#include "host/hci_core.h"
-#include "host/conn_internal.h"
+#include <host/hci_core.h>
+#include <host/conn_internal.h>
 #include "l2cap_br_internal.h"
 #include "obex_internal.h"
 
@@ -105,7 +105,7 @@ static int bip_rfcomm_accept(struct bt_conn *conn, struct bt_goep_transport_rfco
 			     struct bt_goep **goep)
 {
 	struct bt_bip_rfcomm_server *bip_server = BIP_RFDCOMM_SERVER(server);
-	struct bt_bip *bip;
+	struct bt_bip *bip = NULL;
 	int err;
 
 	if (bip_server->accept == NULL) {
@@ -114,13 +114,18 @@ static int bip_rfcomm_accept(struct bt_conn *conn, struct bt_goep_transport_rfco
 
 	err = bip_server->accept(conn, bip_server, &bip);
 	if (err != 0) {
+		LOG_WRN("Incoming connection rejected");
 		return err;
 	}
-	*goep = &bip->goep;
+
+	__ASSERT(bip != NULL && bip->ops != NULL, "Invalid bip instance");
+
 	bip->role = BT_BIP_ROLE_RESPONDER;
 	bip->goep.transport_ops = &bip_rfcomm_ops;
+	BT_GOEP_INIT_V1(&bip->goep, &bip->goep_transport.v1);
 	atomic_set(&bip->_transport_state, BT_BIP_TRANSPORT_STATE_CONNECTING);
 
+	*goep = &bip->goep;
 	return 0;
 }
 
@@ -149,6 +154,7 @@ int bt_bip_rfcomm_connect(struct bt_conn *conn, struct bt_bip *bip, uint8_t chan
 
 	bip->role = BT_BIP_ROLE_INITIATOR;
 	bip->goep.transport_ops = &bip_rfcomm_ops;
+	BT_GOEP_INIT_V1(&bip->goep, &bip->goep_transport.v1);
 	atomic_set(&bip->_transport_state, BT_BIP_TRANSPORT_STATE_CONNECTING);
 
 	err = bt_goep_transport_rfcomm_connect(conn, &bip->goep, channel);
@@ -238,7 +244,7 @@ static int bip_l2cap_accept(struct bt_conn *conn, struct bt_goep_transport_l2cap
 			    struct bt_goep **goep)
 {
 	struct bt_bip_l2cap_server *bip_server = BIP_L2CAP_SERVER(server);
-	struct bt_bip *bip;
+	struct bt_bip *bip = NULL;
 	int err;
 
 	if (bip_server->accept == NULL) {
@@ -251,16 +257,14 @@ static int bip_l2cap_accept(struct bt_conn *conn, struct bt_goep_transport_l2cap
 		return err;
 	}
 
-	if (bip == NULL || bip->ops == NULL) {
-		LOG_WRN("Invalid parameter");
-		return -EINVAL;
-	}
+	__ASSERT(bip != NULL && bip->ops != NULL, "Invalid bip instance");
 
-	bip->goep.transport_ops = &bip_l2cap_ops;
-	*goep = &bip->goep;
 	bip->role = BT_BIP_ROLE_RESPONDER;
+	bip->goep.transport_ops = &bip_l2cap_ops;
+	BT_GOEP_INIT_V2(&bip->goep, &bip->goep_transport.v2);
 	atomic_set(&bip->_transport_state, BT_BIP_TRANSPORT_STATE_CONNECTING);
 
+	*goep = &bip->goep;
 	return 0;
 }
 
@@ -289,6 +293,7 @@ int bt_bip_l2cap_connect(struct bt_conn *conn, struct bt_bip *bip, uint16_t psm)
 
 	bip->role = BT_BIP_ROLE_INITIATOR;
 	bip->goep.transport_ops = &bip_l2cap_ops;
+	BT_GOEP_INIT_V2(&bip->goep, &bip->goep_transport.v2);
 	atomic_set(&bip->_transport_state, BT_BIP_TRANSPORT_STATE_CONNECTING);
 
 	err = bt_goep_transport_l2cap_connect(conn, &bip->goep, psm);
@@ -574,7 +579,7 @@ struct bip_function {
 	bool op_get;
 	uint8_t func_bit;
 	uint32_t supported_features;
-	uint32_t required_appl_param_tag_id;
+	uint32_t required_ap_tag_id;
 	struct bip_required_hdr hdr;
 	bt_bip_server_cb_t (*get_server_cb)(struct bt_bip_server *server);
 	bt_bip_client_cb_t (*get_client_cb)(struct bt_bip_client *client);
@@ -682,7 +687,7 @@ struct bip_function {
 		BT_OBEX_HEADER_ID_APP_PARAM
 #define REMOTE_DISPLAY_AP AP_REMOTE_DISPLAY
 
-#define DELETE_IMAGE_FUNC_BIT      BT_BIP_SUPP_FUNC_REMOTE_DISPLAY
+#define DELETE_IMAGE_FUNC_BIT      BT_BIP_SUPP_FUNC_DELETE_IMAGE
 #define DELETE_IMAGE_SUPPORT_FEATS IMAGE_PULL | ARCHIVED_OBJ
 #define DELETE_IMAGE_REQUIRED_HDR                                                                  \
 	BT_OBEX_HEADER_ID_CONN_ID, BT_OBEX_HEADER_ID_TYPE, BT_BIP_HEADER_ID_IMG_HANDLE
@@ -930,6 +935,19 @@ static bool has_required_hdrs(struct net_buf *buf, const struct bip_required_hdr
 	return true;
 }
 
+static bool has_required_ap_tag_id(struct net_buf *buf, uint32_t tag_mask)
+{
+	while (tag_mask != 0) {
+		uint8_t id = __builtin_ctz(tag_mask);
+
+		if (!bt_obex_has_app_param(buf, id)) {
+			return false;
+		}
+		tag_mask &= ~(1U << id);
+	}
+	return true;
+}
+
 static enum bt_obex_rsp_code bip_server_get_req_cb(struct bt_bip_server *server,
 						   struct net_buf *buf, bool is_get,
 						   bt_bip_server_cb_t *cb)
@@ -971,7 +989,9 @@ static enum bt_obex_rsp_code bip_server_get_req_cb(struct bt_bip_server *server,
 			continue;
 		}
 
-		/* Application parameter tag id is not checked. */
+		if (!has_required_ap_tag_id(buf, bip_functions[i].required_ap_tag_id)) {
+			continue;
+		}
 
 		if (bip_functions[i].get_server_cb == NULL) {
 			continue;
@@ -1334,11 +1354,12 @@ static int bt_bip_client_connect(struct bt_bip *bip, struct bt_bip_client *clien
 		return -EINVAL;
 	}
 
+	if (bip->role == BT_BIP_ROLE_RESPONDER) {
+		LOG_ERR("Invalid role responder");
+		return -EINVAL;
+	}
+
 	if (is_bip_primary_connect(type)) {
-		if (bip->role == BT_BIP_ROLE_RESPONDER) {
-			LOG_ERR("Invalid role responder");
-			return -EINVAL;
-		}
 
 		if (primary_server != NULL) {
 			LOG_ERR("primary server should be NULL");
@@ -1352,11 +1373,6 @@ static int bt_bip_client_connect(struct bt_bip *bip, struct bt_bip_client *clien
 		}
 	} else {
 		struct bt_bip *primary_bip;
-
-		if (bip->role == BT_BIP_ROLE_INITIATOR) {
-			LOG_ERR("Invalid role initiator");
-			return -EINVAL;
-		}
 
 		if (primary_server == NULL || primary_server->_bip == NULL) {
 			LOG_ERR("Invalid primary client");
@@ -1640,9 +1656,9 @@ int bt_bip_disconnect_rsp(struct bt_bip_server *server, uint8_t rsp_code, struct
 		return -EINVAL;
 	}
 
-	err = bt_obex_disconnect_rsp(&server->_server, rsp_code, NULL);
+	err = bt_obex_disconnect_rsp(&server->_server, rsp_code, buf);
 	if (err != 0) {
-		LOG_ERR("Failed to send conn rsp %d", err);
+		LOG_ERR("Failed to send disconnect rsp %d", err);
 		return err;
 	}
 
@@ -1788,7 +1804,9 @@ static int bip_client_get_req_cb(struct bt_bip_client *client, const char *type,
 			continue;
 		}
 
-		/* Application parameter tag id is not checked. */
+		if (!has_required_ap_tag_id(buf, bip_functions[i].required_ap_tag_id)) {
+			continue;
+		}
 
 		if (bip_functions[i].get_client_cb == NULL) {
 			continue;

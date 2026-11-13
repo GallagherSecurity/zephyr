@@ -12,9 +12,6 @@
 	model = "STMicroelectronics STM32H563ZI-NUCLEO board";
 	compatible = "st,stm32h563zi-nucleo";
 
-	#address-cells = <1>;
-	#size-cells = <1>;
-
 	chosen {
 		zephyr,console = &usart3;
 		zephyr,shell-uart = &usart3;
@@ -27,6 +24,7 @@
 	aliases {
 		led0 = &green_led_1;
 		led1 = &yellow_led_1;
+		rtc = &rtc;
 		sw0 = &user_button;
 		watchdog0 = &iwdg;
 		pwm-led0 = &pwm_led_1;
@@ -41,13 +39,13 @@
 
 &mac {
 	status = "okay";
-	pinctrl-0 = <&eth_rxd0_pc4
-		     &eth_rxd1_pc5
-		     &eth_ref_clk_pa1
-		     &eth_crs_dv_pa7
-		     &eth_tx_en_pg11
-		     &eth_txd0_pg13
-		     &eth_txd1_pb15>;
+	pinctrl-0 = <&eth_rmii_rxd0_pc4
+		     &eth_rmii_rxd1_pc5
+		     &eth_rmii_ref_clk_pa1
+		     &eth_rmii_crs_dv_pa7
+		     &eth_rmii_tx_en_pg11
+		     &eth_rmii_txd0_pg13
+		     &eth_rmii_txd1_pb15>;
 	pinctrl-names = "default";
 	phy-connection-type = "rmii";
 	phy-handle = <&eth_phy>;

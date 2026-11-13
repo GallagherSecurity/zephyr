@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025 Renesas Electronics Corporation
+ * Copyright (c) 2024-2026 Renesas Electronics Corporation
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -19,8 +19,8 @@
 
 	chosen {
 		zephyr,sram = &sram0;
-		zephyr,flash-controller = &flash1;
-		zephyr,flash = &flash0;
+		zephyr,flash-controller = &code_flash_ctrl;
+		zephyr,flash = &code_flash;
 		zephyr,console = &uart0;
 		zephyr,shell-uart = &uart0;
 		zephyr,entropy = &trng;
@@ -119,6 +119,8 @@
 		sw0 = &button0;
 		sw1 = &button1;
 		watchdog0 = &wdt;
+		pwm-0 = &pwm0;
+		i2c-0 = &iic1;
 	};
 };
 
@@ -276,13 +278,14 @@
 	status = "okay";
 };
 
-&flash1 {
+&data_flash {
 	partitions {
-		compatible = "fixed-partitions";
 		#address-cells = <1>;
 		#size-cells = <1>;
+		ranges;
 
 		storage_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
 			label = "storage";
 			reg = <0x0 DT_SIZE_K(8)>;
 		};
@@ -297,6 +300,11 @@
 	pinctrl-0 = <&usbfs_default>;
 	pinctrl-names = "default";
 	maximum-speed = "full-speed";
+	status = "okay";
+
+	zephyr_uhc0: uhc {
+		status = "okay";
+	};
 };
 
 mikrobus_serial: &uart7 {};
@@ -319,10 +327,12 @@ arduino_spi: &spi0 {};
 	local-mac-address = [74 90 50 b0 6d 5c];
 	status = "okay";
 	phy-handle = <&phy>;
+	pinctrl-0 = <&ether_default>;
+	pinctrl-names = "default";
 };
 
 &mdio {
-	pinctrl-0 = <&ether_default>;
+	pinctrl-0 = <&mdio_default>;
 	pinctrl-names = "default";
 	status = "okay";
 

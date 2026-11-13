@@ -7,7 +7,6 @@
 
 #include <sample_usbd.h>
 
-#include <stdlib.h>
 #include <stdio.h>
 #include <assert.h>
 #include <zephyr/kernel.h>
@@ -48,12 +47,10 @@ static int enable_usb_device_next(void)
 		return -ENODEV;
 	}
 
-	if (!usbd_can_detect_vbus(mctp_poc_usbd)) {
-		err = usbd_enable(mctp_poc_usbd);
-		if (err) {
-			LOG_ERR("Failed to enable device support");
-			return err;
-		}
+	err = usbd_enable(mctp_poc_usbd);
+	if (err) {
+		LOG_ERR("Failed to enable device support");
+		return err;
 	}
 
 	LOG_INF("USB device support enabled");
@@ -92,7 +89,6 @@ int main(void)
 		k_msleep(5);
 	}
 
-	mctp_set_alloc_ops(malloc, free, realloc);
 	mctp_ctx = mctp_init();
 	__ASSERT_NO_MSG(mctp_ctx != NULL);
 

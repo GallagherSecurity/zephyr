@@ -73,8 +73,12 @@ struct zms_ate {
 		/** data field used to store small sized data */
 		uint8_t data[8];
 		struct {
-			/** data offset within sector */
-			uint32_t offset;
+			union {
+				/** data offset within sector */
+				uint32_t offset;
+				/** full cycle count (for empty ATE) */
+				uint32_t full_cycle_cnt;
+			};
 			union {
 				/**
 				 * crc for data: The data CRC is checked only when the whole data
@@ -106,6 +110,10 @@ struct zms_ate {
 
 } __packed;
 
-#define ZMS_DATA_IN_ATE_SIZE SIZEOF_FIELD(struct zms_ate, data)
+/* ZMS_DATA_IN_ATE_SIZE is defined in the public header <zephyr/kvss/zms.h>.
+ * Make sure it stays in sync with the actual size of the in-ATE data field.
+ */
+BUILD_ASSERT(ZMS_DATA_IN_ATE_SIZE == SIZEOF_FIELD(struct zms_ate, data),
+	     "ZMS_DATA_IN_ATE_SIZE does not match the ATE data field size");
 
 #endif /* __ZMS_PRIV_H_ */

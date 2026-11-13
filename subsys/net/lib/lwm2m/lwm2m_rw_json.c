@@ -722,7 +722,7 @@ static int get_string(struct lwm2m_input_context *in, uint8_t *buf,
 
 	string_length = strlen(fd->array_object.val_string);
 
-	if (string_length > buflen) {
+	if (string_length >= buflen) {
 		LOG_WRN("Buffer too small to accommodate string");
 		return -ENOMEM;
 	}
@@ -990,6 +990,12 @@ int do_write_op_json(struct lwm2m_message *msg)
 		if (ret < 0) {
 			LOG_ERR("Relative name too long");
 			ret = -EINVAL;
+			goto end_of_operation;
+		}
+
+		/* The record path comes from the payload, check it before any write */
+		ret = lwm2m_check_path_access(msg);
+		if (ret < 0) {
 			goto end_of_operation;
 		}
 

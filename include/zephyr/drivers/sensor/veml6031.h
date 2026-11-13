@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <zephyr/drivers/sensor/veml60xx-common.h>
-
 /**
  * @file
  * @brief Header file for extended sensor API of VEML6031 sensor
@@ -15,9 +13,11 @@
 #ifndef ZEPHYR_INCLUDE_DRIVERS_SENSOR_VEML6031_H_
 #define ZEPHYR_INCLUDE_DRIVERS_SENSOR_VEML6031_H_
 
+#include <zephyr/drivers/sensor/veml60xx-common.h>
+
 /**
  * @defgroup veml6031_interface VEML6031
- * @ingroup sensor_interface_ext
+ * @ingroup sensor_interface_ext_vishay
  * @brief Vishay VEML6031 High Accuracy Ambient Light Sensor
  * @{
  */

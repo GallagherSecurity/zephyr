@@ -5,8 +5,51 @@
  * Author: Sri Surya  <srisurya@linumiz.com>
  */
 
-#ifndef AMBIQ_APOLLO2_PINCTRL_H
-#define AMBIQ_APOLLO2_PINCTRL_H
+/**
+ * @file
+ * @brief Devicetree pin control helpers for Ambiq Apollo2
+ * @ingroup pinctrl_apollo2
+ */
+
+#ifndef ZEPHYR_INCLUDE_DT_BINDINGS_PINCTRL_AMBIQ_APOLLO2_PINCTRL_H_
+#define ZEPHYR_INCLUDE_DT_BINDINGS_PINCTRL_AMBIQ_APOLLO2_PINCTRL_H_
+
+/**
+ * @addtogroup ambiq_pinctrl Ambiq pin control helpers
+ * @ingroup devicetree-pinctrl
+ */
+
+/**
+ * @defgroup pinctrl_apollo2 Ambiq Apollo2 pin control helpers
+ * @brief Macros for pin control configuration of Ambiq Apollo2
+ * @ingroup ambiq_pinctrl
+ *
+ * The macros follow the following naming convention:
+ * @c \<FUNCTION\>\_P\<PIN\>.
+ *
+ * For example, @c UART0TX_P22 corresponds to selecting the @c UART0TX function
+ * on pin @c 22.
+ *
+ * @code{.dts}
+ * #include <zephyr/dt-bindings/pinctrl/ambiq-apollo2-pinctrl.h>
+ *
+ * &pinctrl {
+ *         uart0_default: uart0_default {
+ *                 group1 {
+ *                         pinmux = <UART0TX_P22>;
+ *                 };
+ *                 group2 {
+ *                         pinmux = <UART0RX_P23>;
+ *                         input-enable;
+ *                 };
+ *         };
+ * };
+ * @endcode
+ *
+ * @{
+ */
+
+/** @cond INTERNAL_HIDDEN */
 
 #define APOLLO2_ALT_FUNC_POS  0
 #define APOLLO2_ALT_FUNC_MASK 0x7
@@ -443,4 +486,8 @@
 #define SLMISOLB_P49    APOLLO2_PINMUX(49, 6)
 #define SLSDALB_P49     APOLLO2_PINMUX(49, 7)
 
-#endif /* AMBIQ_APOLLO2_PINCTRL_H*/
+/** @endcond */
+
+/** @} */
+
+#endif /* ZEPHYR_INCLUDE_DT_BINDINGS_PINCTRL_AMBIQ_APOLLO2_PINCTRL_H_ */

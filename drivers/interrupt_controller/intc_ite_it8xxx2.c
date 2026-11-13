@@ -18,7 +18,7 @@ LOG_MODULE_REGISTER(intc_it8xxx2, LOG_LEVEL_DBG);
 #define IVECT_OFFSET_WITH_IRQ		0x10
 
 /* Interrupt number of INTC module */
-static uint8_t intc_irq;
+static ite_irq_t intc_irq;
 
 static volatile uint8_t *const reg_status[] = {
 	&ISR0, &ISR1, &ISR2, &ISR3,
@@ -102,7 +102,7 @@ void ite_intc_isr_clear(unsigned int irq)
 	uint32_t g, i;
 	volatile uint8_t *isr;
 
-	if (irq > CONFIG_NUM_IRQS) {
+	if (irq >= CONFIG_NUM_IRQS) {
 		return;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
@@ -115,8 +115,9 @@ void __soc_ram_code ite_intc_irq_enable(unsigned int irq)
 {
 	uint32_t g, i;
 	volatile uint8_t *en;
+	volatile uint8_t _ier __unused;
 
-	if (irq > CONFIG_NUM_IRQS) {
+	if (irq >= CONFIG_NUM_IRQS) {
 		return;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
@@ -126,6 +127,12 @@ void __soc_ram_code ite_intc_irq_enable(unsigned int irq)
 	/* critical section due to run a bit-wise OR operation */
 	unsigned int key = irq_lock();
 	SET_MASK(*en, BIT(i));
+	ier_setting[g] |= BIT(i);
+	/*
+	 * This load operation will guarantee the above modification of
+	 * SOC's register can be seen by any following instructions.
+	 */
+	_ier = *en;
 	irq_unlock(key);
 }
 
@@ -135,7 +142,7 @@ void __soc_ram_code ite_intc_irq_disable(unsigned int irq)
 	volatile uint8_t *en;
 	volatile uint8_t _ier __unused;
 
-	if (irq > CONFIG_NUM_IRQS) {
+	if (irq >= CONFIG_NUM_IRQS) {
 		return;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
@@ -145,6 +152,7 @@ void __soc_ram_code ite_intc_irq_disable(unsigned int irq)
 	/* critical section due to run a bit-wise OR operation */
 	unsigned int key = irq_lock();
 	CLEAR_MASK(*en, BIT(i));
+	ier_setting[g] &= ~BIT(i);
 	/*
 	 * This load operation will guarantee the above modification of
 	 * SOC's register can be seen by any following instructions.
@@ -158,19 +166,19 @@ void ite_intc_irq_polarity_set(unsigned int irq, unsigned int flags)
 	uint32_t g, i;
 	volatile uint8_t *tri;
 
-	if ((irq > CONFIG_NUM_IRQS) || ((flags&IRQ_TYPE_EDGE_BOTH) == IRQ_TYPE_EDGE_BOTH)) {
+	if ((irq >= CONFIG_NUM_IRQS) || ((flags & IRQ_TYPE_EDGE_BOTH) == IRQ_TYPE_EDGE_BOTH)) {
 		return;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
 	i = irq % MAX_REGISR_IRQ_NUM;
 	tri = reg_ipolr[g];
-	if ((flags&IRQ_TYPE_LEVEL_HIGH) || (flags&IRQ_TYPE_EDGE_RISING)) {
+	if (flags & (IRQ_TYPE_LEVEL_HIGH | IRQ_TYPE_EDGE_RISING)) {
 		CLEAR_MASK(*tri, BIT(i));
 	} else {
 		SET_MASK(*tri, BIT(i));
 	}
 	tri = reg_ielmr[g];
-	if ((flags&IRQ_TYPE_LEVEL_LOW) || (flags&IRQ_TYPE_LEVEL_HIGH)) {
+	if (flags & (IRQ_TYPE_LEVEL_LOW | IRQ_TYPE_LEVEL_HIGH)) {
 		CLEAR_MASK(*tri, BIT(i));
 	} else {
 		SET_MASK(*tri, BIT(i));
@@ -182,7 +190,7 @@ int __soc_ram_code ite_intc_irq_is_enable(unsigned int irq)
 	uint32_t g, i;
 	volatile uint8_t *en;
 
-	if (irq > CONFIG_NUM_IRQS) {
+	if (irq >= CONFIG_NUM_IRQS) {
 		return 0;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
@@ -191,7 +199,7 @@ int __soc_ram_code ite_intc_irq_is_enable(unsigned int irq)
 	return IS_MASK_SET(*en, BIT(i));
 }
 
-uint8_t __soc_ram_code ite_intc_get_irq_num(void)
+ite_irq_t __soc_ram_code ite_intc_get_irq_num(void)
 {
 	return intc_irq;
 }

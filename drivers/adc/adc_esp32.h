@@ -21,6 +21,7 @@ struct adc_esp32_conf {
 	adc_unit_t unit;
 	uint8_t channel_count;
 	const struct device *gpio_port;
+	const struct device *gpio_port1;
 #if defined(CONFIG_ADC_ESP32_DMA) && SOC_GDMA_SUPPORTED
 	const struct device *dma_dev;
 	uint8_t dma_channel;
@@ -29,9 +30,9 @@ struct adc_esp32_conf {
 
 struct adc_esp32_data {
 	adc_oneshot_hal_ctx_t hal;
-	adc_atten_t attenuation[SOC_ADC_MAX_CHANNEL_NUM];
-	uint8_t resolution[SOC_ADC_MAX_CHANNEL_NUM];
-	adc_cali_handle_t cal_handle[SOC_ADC_MAX_CHANNEL_NUM];
+	adc_atten_t attenuation[ADC_LL_MAX_CHANNEL_NUM];
+	uint8_t resolution[ADC_LL_MAX_CHANNEL_NUM];
+	adc_cali_handle_t cal_handle[ADC_LL_MAX_CHANNEL_NUM];
 	uint16_t meas_ref_internal;
 	uint16_t *buffer;
 #ifdef CONFIG_ADC_ESP32_DMA

@@ -93,7 +93,7 @@ void tc_run(const struct device *dev, const int32_t dpm_request)
 		/* Detect polarity */
 		tc->cc_polarity = (tc->cc1 > tc->cc2) ? TC_POLARITY_CC1 : TC_POLARITY_CC2;
 
-		/* Execute any asyncronous Device Policy Manager Requests */
+		/* Execute any asynchronous Device Policy Manager Requests */
 		if (dpm_request == REQUEST_TC_ERROR_RECOVERY) {
 			/* Transition to Error Recovery State */
 			tc_set_state(dev, TC_ERROR_RECOVERY_STATE);
@@ -176,8 +176,29 @@ static int tc_init(const struct device *dev)
 #endif
 
 	/* Initialize the state machine */
+#ifdef CONFIG_USBC_CSM_SUPPORTS_SINK
+	/* Check if dead battery support is enabled */
+	bool dead_battery = false;
+
+	ret = tcpc_dead_battery_enabled(tcpc, &dead_battery);
+	if (ret != 0 && ret != -ENOSYS) {
+		LOG_ERR("Couldn't get the dead battery configuration: %d", ret);
+		return ret;
+	}
+
+	if (dead_battery) {
+		/*
+		 * Transition directly to UNATTACHED.SNK state if dead battery support
+		 * is enabled to prevent source vbus drop due to TC_CC_OPEN_SUPER_STATE in
+		 * TC_DISABLED_STATE and TC_ERROR_RECOVERY_STATE states.
+		 */
+		tc_set_state(dev, TC_UNATTACHED_SNK_STATE);
+		return 0;
+	}
+#endif
 	/*
-	 * Transition to Disabled state to ensure port is in a known disabled state.
+	 * Transition to Disabled state to ensure port is in a known disabled
+	 * state.
 	 */
 	tc_set_state(dev, TC_DISABLED_STATE);
 

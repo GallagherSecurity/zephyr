@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @file
+ * @brief Public APIs for the system initialization infrastructure.
+ * @ingroup sys_init
+ */
+
 #ifndef ZEPHYR_INCLUDE_INIT_H_
 #define ZEPHYR_INCLUDE_INIT_H_
 
@@ -19,6 +25,8 @@ extern "C" {
 
 /**
  * @defgroup sys_init System Initialization
+ * @since 1.0
+ * @version 1.0.0
  * @ingroup os_services
  *
  * Zephyr offers an infrastructure to call initialization code before `main`.
@@ -137,6 +145,8 @@ struct init_entry {
  * The function will be called during system initialization according to the
  * given level and priority.
  *
+ * @note The return value of the initialization function is ignored.
+ *
  * @param init_fn Initialization function.
  * @param level Initialization level. Allowed tokens: `EARLY`, `PRE_KERNEL_1`,
  * `PRE_KERNEL_2`, `POST_KERNEL`, `APPLICATION` and `SMP` if
@@ -155,6 +165,8 @@ struct init_entry {
  *
  * @note This macro can be used for cases where the multiple init calls use the
  * same init function.
+ *
+ * @note The return value of the initialization function is ignored.
  *
  * @param name Unique name for SYS_INIT entry.
  * @param init_fn_ See SYS_INIT().

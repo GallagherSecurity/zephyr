@@ -165,7 +165,7 @@ ZTEST(os_mgmt_mpstat, test_read)
 	bool found_kernel_malloc_area = false;
 
 	struct zcbor_map_decode_key_val output_decode[] = {
-		ZCBOR_MAP_DECODE_KEY_DECODER("tasks", parse_heap_entries, &receive_response),
+		ZCBOR_MAP_DECODE_KEY_DECODER("mpools", parse_heap_entries, &receive_response),
 	};
 
 	memset(buffer, 0, sizeof(buffer));

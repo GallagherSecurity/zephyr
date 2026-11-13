@@ -28,11 +28,14 @@ class DeviceSerialConfig:
 class DeviceConfig:
     type: str
     build_dir: Path
+    current_build_dir: Path | None = None
+    app_build_dir: Path | None = None
     base_timeout: float = 60.0  # [s]
     flash_timeout: float = 60.0  # [s]
     platform: str = ''
     serial_configs: list[DeviceSerialConfig] = field(default_factory=list)
     runner: str = ''
+    base_params: list[str] = field(default_factory=list, repr=False)
     runner_params: list[str] = field(default_factory=list, repr=False)
     id: str = ''
     product: str = ''
@@ -44,16 +47,17 @@ class DeviceConfig:
     post_script: Path | None = None
     post_flash_script: Path | None = None
     fixtures: list[str] = None
-    app_build_dir: Path | None = None
     extra_test_args: str = ''
     west_flash_cmd: str = ''
+    dut_number: int = 0
 
     def __post_init__(self):
-        domains = self.build_dir / 'domains.yaml'
+        build_dir = self.current_build_dir or self.build_dir
+        domains = build_dir / 'domains.yaml'
         if domains.exists():
-            self.app_build_dir = self.build_dir / get_default_domain_name(domains)
+            self.app_build_dir = build_dir / get_default_domain_name(domains)
         else:
-            self.app_build_dir = self.build_dir
+            self.app_build_dir = build_dir
 
 
 @dataclass
@@ -99,11 +103,16 @@ class TwisterHarnessConfig:
         elif test_params.flash_command:
             flash_command = [w.strip() for w in next(csv.reader([test_params.flash_command]))]
 
+        base_params: list[str] = []
+        if config.option.base_params:
+            base_params = [w.strip() for w in config.option.base_params]
+
         runner_params: list[str] = []
         if config.option.runner_params:
             runner_params = [w.strip() for w in config.option.runner_params]
 
-        # for native, qemu and backwards compatibility with DUT defined from command line
+        # for backwards compatibility if config file is not given or there are no duts defined
+        # in the config file, create a single DUT based on command line options
         if not test_params.duts:
             dut = CompoundHardwareData()
             dut.serial = config.option.device_serial[0] if config.option.device_serial else None
@@ -119,7 +128,7 @@ class TwisterHarnessConfig:
                     dut.entries.append(core_dut)
             test_params.duts.append(dut)
 
-        for dut in test_params.duts:
+        for dut_number, dut in enumerate(test_params.duts):
             serial_configs: list[DeviceSerialConfig] = []
             for _dut in [dut] + dut.entries:
                 serial_configs.append(
@@ -129,15 +138,18 @@ class TwisterHarnessConfig:
                 )
 
             device = DeviceConfig(
+                dut_number=dut_number,
                 type=device_type,
                 build_dir=build_dir,
-                base_timeout=config.option.base_timeout or test_params.base_timeout,
-                flash_timeout=config.option.flash_timeout or dut.flash_timeout,
+                current_build_dir=get_path(dut.build_dir),
+                base_timeout=config.option.base_timeout or test_params.base_timeout or 60.0,
+                flash_timeout=config.option.flash_timeout or dut.flash_timeout or 60.0,
                 platform=dut.platform or config.option.platform or test_params.platform,
                 serial_configs=serial_configs,
                 runner=config.option.runner or test_params.runner or dut.runner,
+                base_params=base_params or dut.base_params,
                 runner_params=runner_params or dut.runner_params,
-                id=config.option.device_id or dut.id,
+                id=config.option.device_id or dut.probe_id or dut.id,
                 product=config.option.device_product or dut.product,
                 flash_before=config.option.flash_before or test_params.flash_before or dut.flash_before,
                 west_flash_extra_args=west_flash_extra_args,
@@ -147,7 +159,7 @@ class TwisterHarnessConfig:
                 post_script=get_path(config.option.post_script) or get_path(dut.post_script),
                 post_flash_script=get_path(config.option.post_flash_script) or get_path(dut.post_flash_script),
                 fixtures=config.option.fixtures or test_params.twister_fixtures or dut.fixtures,
-                extra_test_args=config.option.extra_test_args,
+                extra_test_args=config.option.extra_test_args or test_params.extra_test_args,
             )
             devices.append(device)
 

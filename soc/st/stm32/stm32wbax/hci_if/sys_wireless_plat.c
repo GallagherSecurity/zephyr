@@ -12,17 +12,24 @@
 
 #include <stm32_ll_rng.h>
 #if defined(CONFIG_BT_STM32WBA)
-#include "bleplat.h"
-#include "bpka.h"
-#include "baes.h"
+#include <bleplat.h>
+#include <pka_ctrl.h>
+#include <baes.h>
 #endif /* CONFIG_BT_STM32WBA */
-#include "linklayer_plat.h"
+#include <linklayer_plat.h>
 
 #define LOG_LEVEL CONFIG_SOC_LOG_LEVEL
 LOG_MODULE_REGISTER(sys_wireless_plat);
 
+#if defined(CONFIG_BT_STM32WBA)
+#define PKA_NODE DT_INST(0, st_stm32wba_pka)
+/* Ensure PKA node is enabled: required by BLE wireless stack */
+BUILD_ASSERT(DT_NODE_HAS_STATUS(PKA_NODE, okay),
+	     "PKA node must be enabled (status=\"okay\") for BLE/radio stack");
+#endif /* CONFIG_BT_STM32WBA */
+
 RAMCFG_HandleTypeDef hramcfg_SRAM1;
-const struct device *rng_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_entropy));
+const struct device *rng_dev;
 
 struct entropy_stm32_rng_dev_data {
 	RNG_TypeDef *rng;
@@ -32,15 +39,39 @@ struct entropy_stm32_rng_dev_cfg {
 	struct stm32_pclken *pclken;
 };
 
+
+const struct device *get_rng_device(void)
+{
+	if (rng_dev == NULL) {
+		rng_dev = entropy_get_default_device();
+
+		if (!device_is_ready(rng_dev)) {
+			LOG_ERR("error: random device not ready");
+			rng_dev = NULL;
+		}
+	}
+	return rng_dev;
+}
+
 #if defined(CONFIG_BT_STM32WBA)
+
+static void pka_isr(const struct device *dev)
+{
+	if (0u != LL_PKA_IsActiveFlag_PROCEND(PKA)) {
+		/* Clear the interrupt flag */
+		LL_PKA_ClearFlag_PROCEND(PKA);
+
+		/* Call the PKACTRL Callback */
+		PKACTRL_EndOfProcessCb();
+	}
+}
+
 void BLEPLAT_Init(void)
 {
-	BPKA_Reset();
+	PKACTRL_Reset();
+	IRQ_CONNECT(DT_IRQN(PKA_NODE), DT_IRQ(PKA_NODE, priority), pka_isr, NULL, 0);
 
-	rng_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_entropy));
-	if (!device_is_ready(rng_dev)) {
-		LOG_ERR("error: random device not ready");
-	}
+	get_rng_device();
 }
 
 int BLEPLAT_AesCcmCrypt(uint8_t mode,
@@ -75,26 +106,26 @@ void BLEPLAT_RngGet(uint8_t n, uint32_t *val)
 
 int BLEPLAT_PkaStartP256Key(const uint32_t *local_private_key)
 {
-	return BPKA_StartP256Key(local_private_key);
+	return PKACTRL_StartP256Key(local_private_key);
 }
 
 void BLEPLAT_PkaReadP256Key(uint32_t *local_public_key)
 {
-	BPKA_ReadP256Key(local_public_key);
+	PKACTRL_ReadP256Key(local_public_key);
 }
 
 int BLEPLAT_PkaStartDhKey(const uint32_t *local_private_key,
 			  const uint32_t *remote_public_key)
 {
-	return BPKA_StartDhKey(local_private_key, remote_public_key);
+	return PKACTRL_StartDhKey(local_private_key, remote_public_key);
 }
 
 int BLEPLAT_PkaReadDhKey(uint32_t *dh_key)
 {
-	return BPKA_ReadDhKey(dh_key);
+	return PKACTRL_ReadDhKey(dh_key);
 }
 
-void BPKACB_Complete(void)
+void PKACTRL_CB_Complete(void)
 {
 	BLEPLATCB_PkaComplete();
 }
@@ -116,27 +147,31 @@ void Error_Handler(void)
 
 void enable_rng_clock(bool enable)
 {
-	const struct entropy_stm32_rng_dev_cfg *dev_cfg = rng_dev->config;
-	struct entropy_stm32_rng_dev_data *dev_data = rng_dev->data;
-	struct stm32_pclken *rng_pclken;
-	const struct device *rcc;
-	unsigned int key;
+	get_rng_device();
 
-	rcc = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
-	rng_pclken = (clock_control_subsys_t)&dev_cfg->pclken[0];
+	if (rng_dev != NULL) {
+		const struct entropy_stm32_rng_dev_cfg *dev_cfg = rng_dev->config;
+		struct entropy_stm32_rng_dev_data *dev_data = rng_dev->data;
+		struct stm32_pclken *rng_pclken;
+		const struct device *rcc;
+		unsigned int key;
 
-	key = irq_lock();
+		rcc = DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE);
+		rng_pclken = (clock_control_subsys_t)&dev_cfg->pclken[0];
 
-	/* Enable/Disable RNG clock only if not in use */
-	if (!LL_RNG_IsEnabled((RNG_TypeDef *)dev_data->rng)) {
-		if (enable) {
-			clock_control_on(rcc, rng_pclken);
-		} else {
-			clock_control_off(rcc, rng_pclken);
+		key = irq_lock();
+
+		/* Enable/Disable RNG clock only if not in use */
+		if (!LL_RNG_IsEnabled((RNG_TypeDef *)dev_data->rng)) {
+			if (enable) {
+				clock_control_on(rcc, rng_pclken);
+			} else {
+				clock_control_off(rcc, rng_pclken);
+			}
 		}
-	}
 
-	irq_unlock(key);
+		irq_unlock(key);
+	}
 }
 
 /* PKA IP requires RNG clock to be enabled

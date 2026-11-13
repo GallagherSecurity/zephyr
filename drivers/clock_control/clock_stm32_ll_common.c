@@ -354,16 +354,17 @@ int enabled_clock(uint32_t src_clk)
 	return r;
 }
 
+static int stm32_clock_control_configure(const struct device *dev,
+					 clock_control_subsys_t sub_system, void *data);
+
 static int stm32_clock_control_on(const struct device *dev, clock_control_subsys_t sub_system)
 {
 	struct stm32_pclken *pclken = (struct stm32_pclken *)(sub_system);
 	volatile int temp;
 
-	ARG_UNUSED(dev);
-
 	if (!IN_RANGE(pclken->bus, STM32_PERIPH_BUS_MIN, STM32_PERIPH_BUS_MAX)) {
-		/* Attempt to change a wrong periph clock bit */
-		return -ENOTSUP;
+		/* Source selection entry: apply it instead of toggling a gate */
+		return stm32_clock_control_configure(dev, sub_system, NULL);
 	}
 
 	sys_set_bits(DT_REG_ADDR(DT_NODELABEL(rcc)) + pclken->bus,
@@ -992,11 +993,12 @@ static void set_up_fixed_clock_sources(void)
  * handled by this driver. Pick proper register name:
  */
 #define LSE_DRIVING_SHIFT					\
-	COND_CODE_1(IS_ENABLED(CONFIG_SOC_SERIES_STM32C0X),	\
-		(RCC_CSR1_LSEDRV_Pos),				\
-	(COND_CODE_1(IS_ENABLED(CONFIG_SOC_SERIES_STM32L0X),	\
-		(RCC_CSR_LSEDRV_Pos),				\
-		(RCC_BDCR_LSEDRV_Pos))))
+	COND_CASE_1(						\
+		IS_ENABLED(CONFIG_SOC_SERIES_STM32C0X),		\
+			(RCC_CSR1_LSEDRV_Pos),			\
+		IS_ENABLED(CONFIG_SOC_SERIES_STM32L0X),		\
+			(RCC_CSR_LSEDRV_Pos),			\
+		(RCC_BDCR_LSEDRV_Pos))
 
 		/* Configure driving capability */
 		LL_RCC_LSE_SetDriveCapability(STM32_LSE_DRIVING << LSE_DRIVING_SHIFT);

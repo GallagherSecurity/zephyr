@@ -24,6 +24,7 @@ from twisterlib.testsuite import (
     scan_file,
     scan_testsuite_path,
 )
+from twisterlib.testsuitedata import HarnessConfig, RequiredDevice, ShellCommand
 
 from . import ZEPHYR_BASE
 
@@ -168,6 +169,25 @@ TESTDATA_2 = [
             ztest_suite_names = ['feature5']
         )
     ),
+    (
+        os.path.join(
+            'testsuites',
+            'tests',
+            'test_e',
+            'test_ztest_token_paste.c'
+        ),
+        ScanPathResult(
+            warnings=None,
+            # The ## token-pasted ZTEST cases must be skipped so no phantom
+            # 'feature6.dma' testcase is registered; only the literal case
+            # is picked up statically.
+            matches=['feature6.normal_case'],
+            has_registered_test_suites=False,
+            has_run_registered_test_suites=True,
+            has_test_main=False,
+            ztest_suite_names = ['feature6']
+        )
+    ),
 #    (
 #        os.path.join(
 #            'testsuites',
@@ -196,6 +216,7 @@ TESTDATA_2 = [
         'invalid ifdef with test_main',
         'registered testsuite',
         'new testsuite with registered run',
+        'new testsuite with token-pasted testcase names',
 #        'empty testsuite'
     ]
 )
@@ -786,15 +807,6 @@ def test_testsuite_add_subcases(
 
 
 TESTDATA_11 = [
-#    (
-#        ZEPHYR_BASE,
-#        ZEPHYR_BASE,
-#        'test_a.check_1',
-#        {
-#            'testcases': ['testcase1', 'testcase2']
-#        },
-#        [],
-#    ),
     (
         ZEPHYR_BASE,
         ZEPHYR_BASE,
@@ -802,56 +814,81 @@ TESTDATA_11 = [
         {
             'testcases': ['testcase1', 'testcase2'],
             'harness': 'console',
-            'harness_config': { 'dummy': 'config' }
+            'harness_config': { 'regex': 'config' }
         },
         [
             ('harness', 'console'),
-            ('harness_config', { 'dummy': 'config' })
+            ('harness_config', HarnessConfig(regex='config'))
         ],
     ),
-#    (
-#        ZEPHYR_BASE,
-#        ZEPHYR_BASE,
-#        'test_a.check_1',
-#        {
-#            'harness': 'console'
-#        },
-#        Exception,
-#    )
+    (
+        ZEPHYR_BASE,
+        ZEPHYR_BASE,
+        'test_a.check_1',
+        {
+            'harness': 'console'
+        },
+        Exception,
+    )
 ]
 
 
 @pytest.mark.parametrize(
-    'testsuite_root, suite_path, name, data, expected',
-    TESTDATA_11,
+    'data, expected',
+    [
+        (
+            {'fixture': 'fixture1'},
+            HarnessConfig(fixture='fixture1')
+        ),
+        (
+            {'fixture': ['fixture1', 'fixture2']},
+            HarnessConfig(fixture=['fixture1', 'fixture2'])
+        ),
+        (
+            {'shell_commands': [
+                {'command': 'dummy command', 'expected': 'dummy expected'},
+                {'command': 'dummy command 2'}
+            ]},
+            HarnessConfig(shell_commands=[
+                ShellCommand(command='dummy command', expected='dummy expected'),
+                ShellCommand(command='dummy command 2')
+            ])
+        ),
+        (
+            {'required_devices': [
+                {'platform': 'platform', 'fixture': ['fixture1', 'fixture2']},
+                {}
+            ]},
+            HarnessConfig(required_devices=[
+                RequiredDevice(platform='platform', fixture=['fixture1', 'fixture2']),
+                RequiredDevice()
+            ])
+        )
+    ],
     ids=[
-#        'no harness',
-        'proper harness',
-#        'harness error'
+        'fixture_as_string',
+        'fixture_as_list',
+        'shell_commands',
+        'required_devices'
     ]
 )
-def test_testsuite_load(
-    testsuite_root,
-    suite_path,
-    name,
-    data,
-    expected
-):
-    suite = TestSuite(testsuite_root, suite_path, name)
+def test_testsuite_load_harness_config(data, expected):
+    suite = TestSuite('suite_root', 'suite_path', 'test.name')
+    suite.load({'harness': 'test', 'harness_config': data})
 
-    with pytest.raises(expected) if \
-     isinstance(expected, type) and issubclass(expected, Exception) \
-     else nullcontext() as exception:
-        suite.load(data)
+    assert suite.harness_config == expected
 
-    if exception:
-        assert str(exception.value) == 'Harness config error: console harness' \
-                                 ' defined without a configuration.'
-        return
 
-    for attr_name, value in expected:
-        assert getattr(suite, attr_name) == value
+def test_testsuite_load_exception():
+    suite = TestSuite('suite_root', 'suite_path', 'test.name')
 
+    with pytest.raises(Exception) as exception:
+        suite.load({
+            'harness': 'console'
+        })
+
+    assert str(exception.value) == 'Harness config error: console harness' + \
+                                   ' defined without a configuration.'
 
 def test_testcase_dunders():
     case_lesser = TestCase(name='A lesser name')

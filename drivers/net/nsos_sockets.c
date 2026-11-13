@@ -26,11 +26,12 @@ LOG_MODULE_REGISTER(nsos_sockets);
 #include <zephyr/net/socket_offload.h>
 #include <zephyr/sys/fdtable.h>
 #include <zephyr/sys/dlist.h>
+#include <zephyr/spinlock.h>
 
 #include "sockets_internal.h"
 #include "nsos.h"
 #include "nsi_errno.h"
-#include "nsos_fcntl.h"
+#include "nsi_fcntl.h"
 #include "nsos_netdb.h"
 #include "nsos_socket.h"
 
@@ -61,9 +62,17 @@ struct nsos_socket {
 };
 
 static sys_dlist_t nsos_polls = SYS_DLIST_STATIC_INIT(&nsos_polls);
+static struct k_spinlock nsos_polls_lock;
 
-/* Forward declaration of the interface */
-NET_IF_DECLARE(nsos_socket, 0);
+static int nsos_socket_offload_init(const struct device *arg);
+
+static struct offloaded_if_api nsos_iface_offload_api;
+
+NET_DEVICE_OFFLOAD_INIT(nsos_socket, "nsos_socket",
+			nsos_socket_offload_init,
+			NULL,
+			NULL, NULL,
+			0, &nsos_iface_offload_api, NET_ETH_MTU);
 
 static int socket_family_to_nsos_mid(int family, int *family_mid)
 {
@@ -113,6 +122,9 @@ static int socket_proto_to_nsos_mid(int proto, int *proto_mid)
 		break;
 	case NET_IPPROTO_IPV6:
 		*proto_mid = NSOS_MID_IPPROTO_IPV6;
+		break;
+	case NET_IPPROTO_ICMPV6:
+		*proto_mid = NSOS_MID_IPPROTO_ICMPV6;
 		break;
 	case NET_IPPROTO_RAW:
 		*proto_mid = NSOS_MID_IPPROTO_RAW;
@@ -200,7 +212,7 @@ static int nsos_socket_create(int family, int type, int proto)
 		return -1;
 	}
 
-	sock = k_malloc(sizeof(*sock));
+	sock = nsi_host_calloc(1, sizeof(*sock));
 	if (!sock) {
 		errno = ENOMEM;
 		goto free_fd;
@@ -221,7 +233,7 @@ static int nsos_socket_create(int family, int type, int proto)
 	return fd;
 
 free_sock:
-	k_free(sock);
+	nsi_host_free(sock);
 
 free_fd:
 	zvfs_free_fd(fd);
@@ -264,12 +276,15 @@ static int nsos_close(void *obj)
 {
 	struct nsos_socket *sock = obj;
 	struct nsos_socket_poll *poll;
+	k_spinlock_key_t key;
 	int ret;
 
 	ret = nsi_host_close(sock->poll.mid.fd);
 	if (ret < 0) {
 		errno = nsos_adapt_get_zephyr_errno();
 	}
+
+	key = k_spin_lock(&nsos_polls_lock);
 
 	SYS_DLIST_FOR_EACH_CONTAINER(&nsos_polls, poll, node) {
 		if (poll == &sock->poll) {
@@ -278,7 +293,9 @@ static int nsos_close(void *obj)
 		}
 	}
 
-	k_free(sock);
+	k_spin_unlock(&nsos_polls_lock, key);
+
+	nsi_host_free(sock);
 
 	return ret;
 }
@@ -286,6 +303,10 @@ static int nsos_close(void *obj)
 static void pollcb(struct nsos_mid_pollfd *mid)
 {
 	struct nsos_socket_poll *poll = CONTAINER_OF(mid, struct nsos_socket_poll, mid);
+
+	if (poll->mid.cb == NULL) {
+		return;
+	}
 
 	k_poll_signal_raise(&poll->signal, poll->mid.revents);
 
@@ -299,6 +320,7 @@ static int nsos_poll_prepare(struct nsos_socket *sock, struct zsock_pollfd *pfd,
 			     struct nsos_socket_poll *poll)
 {
 	unsigned int signaled;
+	k_spinlock_key_t key;
 	int flags;
 
 	poll->mid.events = pfd->events;
@@ -311,10 +333,13 @@ static int nsos_poll_prepare(struct nsos_socket *sock, struct zsock_pollfd *pfd,
 
 	k_poll_signal_init(&poll->signal);
 	k_poll_event_init(*pev, K_POLL_TYPE_SIGNAL, K_POLL_MODE_NOTIFY_ONLY, &poll->signal);
+	key = k_spin_lock(&nsos_polls_lock);
 
 	sys_dlist_append(&nsos_polls, &poll->node);
 
 	nsos_adapt_poll_add(&poll->mid);
+
+	k_spin_unlock(&nsos_polls_lock, key);
 
 	/* Let other sockets use another k_poll_event */
 	(*pev)++;
@@ -335,6 +360,7 @@ static int nsos_poll_update(struct nsos_socket *sock, struct zsock_pollfd *pfd,
 			    struct k_poll_event **pev, struct nsos_socket_poll *poll)
 {
 	unsigned int signaled;
+	k_spinlock_key_t key;
 	int flags;
 
 	(*pev)++;
@@ -344,14 +370,24 @@ static int nsos_poll_update(struct nsos_socket *sock, struct zsock_pollfd *pfd,
 
 	if (!sys_dnode_is_linked(&poll->node)) {
 		nsos_adapt_poll_update(&poll->mid);
+		pfd->revents = poll->mid.revents;
 		return 0;
 	}
+
+	key = k_spin_lock(&nsos_polls_lock);
+
+	poll->cond = NULL;
+	poll->mid.cb = NULL;
 
 	nsos_adapt_poll_remove(&poll->mid);
 	sys_dlist_remove(&poll->node);
 
+	k_spin_unlock(&nsos_polls_lock, key);
+
 	k_poll_signal_check(&poll->signal, &signaled, &flags);
 	if (!signaled) {
+		nsos_adapt_poll_update(&poll->mid);
+		pfd->revents = poll->mid.revents;
 		return 0;
 	}
 
@@ -395,19 +431,20 @@ static int nsos_ioctl(void *obj, unsigned int request, va_list args)
 
 		flags = nsos_adapt_fcntl_getfl(sock->poll.mid.fd);
 
-		return fl_from_nsos_mid(flags);
+		return nsi_fcntl_from_mid(flags);
 	}
 
 	case ZVFS_F_SETFL: {
 		int flags = va_arg(args, int);
+		int flags_mid;
 		int ret;
 
-		ret = fl_to_nsos_mid_strict(flags);
-		if (ret < 0) {
-			return -nsi_errno_from_mid(-ret);
+		flags_mid = nsi_fcntl_to_mid_strict(flags);
+		if (flags_mid < 0) {
+			return -nsi_errno_from_mid(-flags_mid);
 		}
 
-		ret = nsos_adapt_fcntl_setfl(sock->poll.mid.fd, flags);
+		ret = nsos_adapt_fcntl_setfl(sock->poll.mid.fd, flags_mid);
 
 		return -nsi_errno_from_mid(-ret);
 	}
@@ -424,6 +461,31 @@ static int nsos_ioctl(void *obj, unsigned int request, va_list args)
 
 	return -EINVAL;
 }
+
+/* Only addresses with a scope narrower than global carry an interface index;
+ * everything else must not carry one.
+ */
+static bool ipv6_addr_is_scoped(const uint8_t addr[16])
+{
+	/* fe80::/10 link-local unicast */
+	if (addr[0] == 0xfe && (addr[1] & 0xc0) == 0x80) {
+		return true;
+	}
+
+	/* ff01::/16 interface-local and ff02::/16 link-local multicast */
+	if (addr[0] == 0xff && (addr[1] & 0x0f) <= 0x02) {
+		return true;
+	}
+
+	return false;
+}
+
+static int nsos_host_ifindex(void);
+
+/* net_if index of the single offloaded interface, captured at init. Used to
+ * scope inbound IPv6 addresses back into the Zephyr namespace.
+ */
+static int nsos_zephyr_ifindex;
 
 static int sockaddr_to_nsos_mid(const struct net_sockaddr *addr, net_socklen_t addrlen,
 				struct nsos_mid_sockaddr **addr_mid, size_t *addrlen_mid)
@@ -468,7 +530,12 @@ static int sockaddr_to_nsos_mid(const struct net_sockaddr *addr, net_socklen_t a
 		addr_in_mid->sin6_port = addr_in->sin6_port;
 		memcpy(addr_in_mid->sin6_addr, addr_in->sin6_addr.s6_addr,
 		       sizeof(addr_in_mid->sin6_addr));
-		addr_in_mid->sin6_scope_id = addr_in->sin6_scope_id;
+		/* A Zephyr net_if index means nothing to the host stack. The offloaded
+		 * interface always represents the same host interface, so a scoped
+		 * address can only ever refer to it.
+		 */
+		addr_in_mid->sin6_scope_id =
+			ipv6_addr_is_scoped(addr_in_mid->sin6_addr) ? nsos_host_ifindex() : 0;
 
 		*addrlen_mid = sizeof(*addr_in_mid);
 
@@ -502,7 +569,7 @@ static int sockaddr_to_nsos_mid(const struct net_sockaddr *addr, net_socklen_t a
 			return -NSI_ERRNO_MID_EINVAL;
 		}
 
-		addr_ll_mid->sll_family = NSOS_MID_AF_UNIX;
+		addr_ll_mid->sll_family = NSOS_MID_AF_PACKET;
 		addr_ll_mid->sll_protocol = addr_ll->sll_protocol;
 		addr_ll_mid->sll_ifindex = addr_ll->sll_ifindex;
 		addr_ll_mid->sll_hatype = addr_ll->sll_hatype;
@@ -551,7 +618,11 @@ static int sockaddr_from_nsos_mid(struct net_sockaddr *addr, net_socklen_t *addr
 		addr_in.sin6_port = addr_in_mid->sin6_port;
 		memcpy(addr_in.sin6_addr.s6_addr, addr_in_mid->sin6_addr,
 		       sizeof(addr_in.sin6_addr.s6_addr));
-		addr_in.sin6_scope_id = addr_in_mid->sin6_scope_id;
+		/* A host ifindex means nothing to the Zephyr stack so we map it to the
+		 * Zephyr interface index.
+		 */
+		addr_in.sin6_scope_id =
+			ipv6_addr_is_scoped(addr_in_mid->sin6_addr) ? nsos_zephyr_ifindex : 0;
 
 		memcpy(addr, &addr_in, MIN(*addrlen, sizeof(addr_in)));
 		*addrlen = sizeof(addr_in);
@@ -591,7 +662,7 @@ static int nsos_wait_for_poll(struct nsos_socket *sock, int events,
 
 	ret = nsos_adapt_dup(sock->poll.mid.fd);
 	if (ret < 0) {
-		goto return_ret;
+		return ret;
 	}
 
 	socket_poll.mid.fd = ret;
@@ -618,7 +689,6 @@ poll_update:
 close_dup:
 	nsi_host_close(socket_poll.mid.fd);
 
-return_ret:
 	if (ret < 0) {
 		return -nsi_errno_to_mid(-ret);
 	}
@@ -636,7 +706,7 @@ static int nsos_poll_if_blocking(struct nsos_socket *sock, int events,
 		non_blocking = true;
 	} else {
 		sock_flags = nsos_adapt_fcntl_getfl(sock->poll.mid.fd);
-		non_blocking = sock_flags & NSOS_MID_O_NONBLOCK;
+		non_blocking = sock_flags & NSI_FCNTL_MID_O_NONBLOCK;
 	}
 
 	if (!non_blocking) {
@@ -644,6 +714,33 @@ static int nsos_poll_if_blocking(struct nsos_socket *sock, int events,
 	}
 
 	return 0;
+}
+
+/* The single offloaded interface represents one host interface; resolve and
+ * cache its host ifindex for pinning multicast egress, joins and IPv6 scope.
+ * Resolved once for the process lifetime and accessed single-threaded at iface
+ * enable and socket setup, so the unlocked static needs no protection.
+ */
+static int nsos_host_ifindex(void)
+{
+	static int cached; /* 0 unresolved, -1 resolved-none, >0 host ifindex */
+
+	if (cached == 0) {
+		int ret = nsos_adapt_host_ifindex(CONFIG_NET_NATIVE_OFFLOADED_SOCKETS_HOST_IF_NAME);
+
+		if (ret > 0) {
+			cached = ret;
+		} else {
+			cached = -1;
+			LOG_WRN("Cannot resolve represented host interface \"%s\" (%d); host "
+				"addresses "
+				"are not mirrored and scoped IPv6 binds fall back to host route "
+				"selection",
+				CONFIG_NET_NATIVE_OFFLOADED_SOCKETS_HOST_IF_NAME, ret);
+		}
+	}
+
+	return (cached > 0) ? cached : 0;
 }
 
 static int nsos_bind(void *obj, const struct net_sockaddr *addr, net_socklen_t addrlen)
@@ -676,9 +773,9 @@ static int nsos_connect_blocking(struct nsos_socket *sock,
 				 int fcntl_flags)
 {
 	int clear_nonblock_ret;
-	int ret;
+	int ret; /* As a mid errno */
 
-	ret = nsos_adapt_fcntl_setfl(sock->poll.mid.fd, fcntl_flags | NSOS_MID_O_NONBLOCK);
+	ret = nsos_adapt_fcntl_setfl(sock->poll.mid.fd, fcntl_flags | NSI_FCNTL_MID_O_NONBLOCK);
 	if (ret < 0) {
 		return ret;
 	}
@@ -699,7 +796,7 @@ static int nsos_connect_blocking(struct nsos_socket *sock,
 			goto clear_nonblock;
 		}
 
-		ret = -nsi_errno_to_mid(so_err);
+		ret = -so_err;
 	}
 
 clear_nonblock:
@@ -728,7 +825,7 @@ static int nsos_connect(void *obj, const struct net_sockaddr *addr, net_socklen_
 
 	flags = nsos_adapt_fcntl_getfl(sock->poll.mid.fd);
 
-	if (flags & NSOS_MID_O_NONBLOCK) {
+	if (flags & NSI_FCNTL_MID_O_NONBLOCK) {
 		ret = nsos_adapt_connect(sock->poll.mid.fd, addr_mid, addrlen_mid);
 	} else {
 		ret = nsos_connect_blocking(sock, addr_mid, addrlen_mid, flags);
@@ -794,7 +891,7 @@ static int nsos_accept(void *obj, struct net_sockaddr *addr, net_socklen_t *addr
 		goto close_adapt_fd;
 	}
 
-	conn_sock = k_malloc(sizeof(*conn_sock));
+	conn_sock = nsi_host_calloc(1, sizeof(*conn_sock));
 	if (!conn_sock) {
 		ret = -NSI_ERRNO_MID_ENOMEM;
 		goto free_zephyr_fd;
@@ -802,6 +899,8 @@ static int nsos_accept(void *obj, struct net_sockaddr *addr, net_socklen_t *addr
 
 	conn_sock->fd = zephyr_fd;
 	conn_sock->poll.mid.fd = adapt_fd;
+	conn_sock->recv_timeout = K_FOREVER;
+	conn_sock->send_timeout = K_FOREVER;
 
 	zvfs_finalize_typed_fd(zephyr_fd, conn_sock, &nsos_socket_fd_op_vtable.fd_vtable,
 			       ZVFS_MODE_IFSOCK);
@@ -885,7 +984,7 @@ static ssize_t nsos_sendmsg(void *obj, const struct net_msghdr *msg, int flags)
 		goto return_ret;
 	}
 
-	msg_iov = k_calloc(msg->msg_iovlen, sizeof(*msg_iov));
+	msg_iov = nsi_host_calloc(msg->msg_iovlen, sizeof(*msg_iov));
 	if (!msg_iov) {
 		ret = -NSI_ERRNO_MID_ENOMEM;
 		goto return_ret;
@@ -912,7 +1011,7 @@ static ssize_t nsos_sendmsg(void *obj, const struct net_msghdr *msg, int flags)
 	ret = nsos_adapt_sendmsg(sock->poll.mid.fd, &msg_mid, flags_mid);
 
 free_msg_iov:
-	k_free(msg_iov);
+	nsi_host_free(msg_iov);
 
 return_ret:
 	if (ret < 0) {
@@ -1011,6 +1110,9 @@ static int socket_proto_from_nsos_mid(int proto_mid, int *proto)
 		break;
 	case NSOS_MID_IPPROTO_IPV6:
 		*proto = NET_IPPROTO_IPV6;
+		break;
+	case NSOS_MID_IPPROTO_ICMPV6:
+		*proto = NET_IPPROTO_ICMPV6;
 		break;
 	case NSOS_MID_IPPROTO_RAW:
 		*proto = NET_IPPROTO_RAW;
@@ -1231,18 +1333,13 @@ static int nsos_getsockopt(void *obj, int level, int optname,
 	return -1;
 }
 
-static int nsos_setsockopt_int(struct nsos_socket *sock, int nsos_mid_level, int nsos_mid_optname,
+static int nsos_setsockopt_raw(struct nsos_socket *sock, int nsos_mid_level, int nsos_mid_optname,
 			       const void *optval, net_socklen_t optlen)
 {
 	int err;
 
-	if (optlen != sizeof(int)) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	err = nsos_adapt_setsockopt(sock->poll.mid.fd, nsos_mid_level, nsos_mid_optname,
-				    optval, optlen);
+	err = nsos_adapt_setsockopt(sock->poll.mid.fd, nsos_mid_level, nsos_mid_optname, optval,
+				    optlen);
 	if (err) {
 		errno = nsi_errno_from_mid(-err);
 		return -1;
@@ -1251,8 +1348,19 @@ static int nsos_setsockopt_int(struct nsos_socket *sock, int nsos_mid_level, int
 	return 0;
 }
 
-static int nsos_setsockopt(void *obj, int level, int optname,
-			   const void *optval, net_socklen_t optlen)
+static int nsos_setsockopt_int(struct nsos_socket *sock, int nsos_mid_level, int nsos_mid_optname,
+			       const void *optval, net_socklen_t optlen)
+{
+	if (optlen != sizeof(int)) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	return nsos_setsockopt_raw(sock, nsos_mid_level, nsos_mid_optname, optval, optlen);
+}
+
+static int nsos_setsockopt(void *obj, int level, int optname, const void *optval,
+			   net_socklen_t optlen)
 {
 	struct nsos_socket *sock = obj;
 
@@ -1386,8 +1494,91 @@ static int nsos_setsockopt(void *obj, int level, int optname,
 		}
 		break;
 
+	case NET_IPPROTO_IP:
+		switch (optname) {
+		case ZSOCK_IP_MULTICAST_TTL:
+			return nsos_setsockopt_int(sock, NSOS_MID_IPPROTO_IP,
+						   NSOS_MID_IP_MULTICAST_TTL, optval, optlen);
+		case ZSOCK_IP_MULTICAST_LOOP:
+			return nsos_setsockopt_int(sock, NSOS_MID_IPPROTO_IP,
+						   NSOS_MID_IP_MULTICAST_LOOP, optval, optlen);
+		case ZSOCK_IP_ADD_MEMBERSHIP: {
+			const struct net_ip_mreqn *zmreqn = optval;
+			struct nsos_mid_ip_mreqn mreqn = {0};
+
+			if (optlen != sizeof(*zmreqn)) {
+				errno = EINVAL;
+				return -1;
+			}
+
+			memcpy(mreqn.imr_multiaddr, &zmreqn->imr_multiaddr,
+			       sizeof(mreqn.imr_multiaddr));
+			memcpy(mreqn.imr_address, &zmreqn->imr_address, sizeof(mreqn.imr_address));
+			/* Pin the join to the represented host interface. */
+			mreqn.imr_ifindex = nsos_host_ifindex();
+
+			return nsos_setsockopt_raw(sock, NSOS_MID_IPPROTO_IP,
+						   NSOS_MID_IP_ADD_MEMBERSHIP, &mreqn,
+						   sizeof(mreqn));
+		}
+		case ZSOCK_IP_MULTICAST_IF: {
+			struct nsos_mid_ip_mreqn mreqn = {0};
+
+			if (optval == NULL || (optlen != sizeof(struct net_ip_mreqn) &&
+					       optlen != sizeof(struct net_ip_mreq))) {
+				errno = EINVAL;
+				return -1;
+			}
+
+			/* Egress interface is the represented host interface,
+			 * regardless of the Zephyr ifindex passed in.
+			 */
+			mreqn.imr_ifindex = nsos_host_ifindex();
+
+			return nsos_setsockopt_raw(sock, NSOS_MID_IPPROTO_IP,
+						   NSOS_MID_IP_MULTICAST_IF, &mreqn, sizeof(mreqn));
+		}
+		}
+		break;
+
 	case NET_IPPROTO_IPV6:
 		switch (optname) {
+		case ZSOCK_IPV6_MULTICAST_HOPS:
+			return nsos_setsockopt_int(sock, NSOS_MID_IPPROTO_IPV6,
+						   NSOS_MID_IPV6_MULTICAST_HOPS, optval, optlen);
+		case ZSOCK_IPV6_MULTICAST_LOOP:
+			return nsos_setsockopt_int(sock, NSOS_MID_IPPROTO_IPV6,
+						   NSOS_MID_IPV6_MULTICAST_LOOP, optval, optlen);
+		case ZSOCK_IPV6_ADD_MEMBERSHIP: {
+			const struct net_ipv6_mreq *zmreq = optval;
+			struct nsos_mid_ipv6_mreq mreq = {0};
+
+			if (optlen != sizeof(*zmreq)) {
+				errno = EINVAL;
+				return -1;
+			}
+
+			memcpy(mreq.ipv6mr_multiaddr, &zmreq->ipv6mr_multiaddr,
+			       sizeof(mreq.ipv6mr_multiaddr));
+			/* Pin the join to the represented host interface. */
+			mreq.ipv6mr_ifindex = nsos_host_ifindex();
+
+			return nsos_setsockopt_raw(sock, NSOS_MID_IPPROTO_IPV6,
+						   NSOS_MID_IPV6_ADD_MEMBERSHIP, &mreq,
+						   sizeof(mreq));
+		}
+		case ZSOCK_IPV6_MULTICAST_IF: {
+			int mid_ifindex = nsos_host_ifindex();
+
+			if (optval == NULL || optlen != sizeof(int)) {
+				errno = EINVAL;
+				return -1;
+			}
+
+			return nsos_setsockopt_raw(sock, NSOS_MID_IPPROTO_IPV6,
+						   NSOS_MID_IPV6_MULTICAST_IF, &mid_ifindex,
+						   sizeof(mid_ifindex));
+		}
 		case ZSOCK_IPV6_V6ONLY:
 			return nsos_setsockopt_int(sock,
 						   NSOS_MID_IPPROTO_IPV6, NSOS_MID_IPV6_V6ONLY,
@@ -1521,6 +1712,7 @@ static int addrinfo_from_nsos_mid(struct nsos_mid_addrinfo *nsos_res,
 	struct zsock_addrinfo_wrap *res_wraps;
 	size_t idx_res = 0;
 	size_t n_res = 0;
+	int ret;
 
 	for (struct nsos_mid_addrinfo *res_p = nsos_res; res_p; res_p = res_p->ai_next) {
 		n_res++;
@@ -1530,20 +1722,44 @@ static int addrinfo_from_nsos_mid(struct nsos_mid_addrinfo *nsos_res,
 		return 0;
 	}
 
-	res_wraps = k_calloc(n_res, sizeof(*res_wraps));
+	res_wraps = nsi_host_calloc(n_res, sizeof(*res_wraps));
 	if (!res_wraps) {
 		return -ENOMEM;
 	}
 
 	for (struct nsos_mid_addrinfo *res_p = nsos_res; res_p; res_p = res_p->ai_next, idx_res++) {
 		struct zsock_addrinfo_wrap *wrap = &res_wraps[idx_res];
+		int err;
 
 		wrap->addrinfo_mid = res_p;
 
-		wrap->addrinfo.ai_flags = res_p->ai_flags;
-		wrap->addrinfo.ai_family = res_p->ai_family;
-		wrap->addrinfo.ai_socktype = res_p->ai_socktype;
-		wrap->addrinfo.ai_protocol = res_p->ai_protocol;
+		err = addrinfo_flags_from_nsos_mid(res_p->ai_flags,
+						   &wrap->addrinfo.ai_flags);
+		if (err) {
+			ret = -nsi_errno_from_mid(-err);
+			goto free_wraps;
+		}
+
+		err = socket_family_from_nsos_mid(res_p->ai_family,
+						  &wrap->addrinfo.ai_family);
+		if (err) {
+			ret = -nsi_errno_from_mid(-err);
+			goto free_wraps;
+		}
+
+		err = socket_type_from_nsos_mid(res_p->ai_socktype,
+						&wrap->addrinfo.ai_socktype);
+		if (err) {
+			ret = -nsi_errno_from_mid(-err);
+			goto free_wraps;
+		}
+
+		err = socket_proto_from_nsos_mid(res_p->ai_protocol,
+						 &wrap->addrinfo.ai_protocol);
+		if (err) {
+			ret = -nsi_errno_from_mid(-err);
+			goto free_wraps;
+		}
 
 		wrap->addrinfo.ai_addr =
 			(struct net_sockaddr *)&wrap->addr_storage;
@@ -1553,7 +1769,7 @@ static int addrinfo_from_nsos_mid(struct nsos_mid_addrinfo *nsos_res,
 				       res_p->ai_addr, res_p->ai_addrlen);
 
 		wrap->addrinfo.ai_canonname =
-			res_p->ai_canonname ? strdup(res_p->ai_canonname) : NULL;
+			res_p->ai_canonname ? nsi_host_strdup(res_p->ai_canonname) : NULL;
 		wrap->addrinfo.ai_next = &wrap[1].addrinfo;
 	}
 
@@ -1562,6 +1778,15 @@ static int addrinfo_from_nsos_mid(struct nsos_mid_addrinfo *nsos_res,
 	*res = &res_wraps->addrinfo;
 
 	return 0;
+
+free_wraps:
+	for (size_t i = 0; i < idx_res; i++) {
+		nsi_host_free(res_wraps[i].addrinfo.ai_canonname);
+	}
+
+	nsi_host_free(res_wraps);
+
+	return ret;
 }
 
 static int nsos_getaddrinfo(const char *node, const char *service,
@@ -1579,10 +1804,30 @@ static int nsos_getaddrinfo(const char *node, const char *service,
 	}
 
 	if (hints) {
-		hints_mid.ai_flags    = hints->ai_flags;
-		hints_mid.ai_family   = hints->ai_family;
-		hints_mid.ai_socktype = hints->ai_socktype;
-		hints_mid.ai_protocol = hints->ai_protocol;
+		ret = addrinfo_flags_to_nsos_mid(hints->ai_flags,
+						 &hints_mid.ai_flags);
+		if (ret < 0) {
+			return DNS_EAI_BADFLAGS;
+		}
+
+		ret = socket_family_to_nsos_mid(hints->ai_family,
+						&hints_mid.ai_family);
+		if (ret < 0) {
+			return DNS_EAI_FAMILY;
+		}
+
+		ret = socket_type_to_nsos_mid(hints->ai_socktype,
+					      &hints_mid.ai_socktype);
+		if (ret < 0) {
+			return DNS_EAI_SOCKTYPE;
+		}
+
+		ret = socket_proto_to_nsos_mid(hints->ai_protocol,
+					       &hints_mid.ai_protocol);
+		if (ret < 0) {
+			errno = nsi_errno_from_mid(-ret);
+			return DNS_EAI_SYSTEM;
+		}
 	}
 
 	ret = nsos_adapt_getaddrinfo(node, service,
@@ -1613,11 +1858,11 @@ static void nsos_freeaddrinfo(struct zsock_addrinfo *res)
 		CONTAINER_OF(res, struct zsock_addrinfo_wrap, addrinfo);
 
 	for (struct zsock_addrinfo *res_p = res; res_p; res_p = res_p->ai_next) {
-		free(res_p->ai_canonname);
+		nsi_host_free(res_p->ai_canonname);
 	}
 
 	nsos_adapt_freeaddrinfo(wrap->addrinfo_mid);
-	k_free(wrap);
+	nsi_host_free(wrap);
 }
 
 static const struct socket_dns_offload nsos_dns_ops = {
@@ -1628,12 +1873,18 @@ static const struct socket_dns_offload nsos_dns_ops = {
 static void nsos_isr(const void *obj)
 {
 	struct nsos_socket_poll *poll;
+	k_spinlock_key_t key;
+
+	ARG_UNUSED(obj);
+	key = k_spin_lock(&nsos_polls_lock);
 
 	SYS_DLIST_FOR_EACH_CONTAINER(&nsos_polls, poll, node) {
 		if (poll->mid.revents) {
 			poll->mid.cb(&poll->mid);
 		}
 	}
+
+	k_spin_unlock(&nsos_polls_lock, key);
 }
 
 static int nsos_socket_offload_init(const struct device *arg)
@@ -1649,15 +1900,99 @@ static int nsos_socket_offload_init(const struct device *arg)
 
 static void nsos_iface_api_init(struct net_if *iface)
 {
+	nsos_zephyr_ifindex = net_if_get_by_iface(iface);
+
 	net_if_socket_offload_set(iface, nsos_socket_create);
 
 	socket_offload_dns_register(&nsos_dns_ops);
+
+	if (IS_ENABLED(CONFIG_NET_IPV6)) {
+		/* The host stack owns ND/DAD. Without this, mirrored addresses stay
+		 * TENTATIVE forever and responders (e.g. mDNS) skip them.
+		 */
+		net_if_flag_set(iface, NET_IF_IPV6_NO_ND);
+	}
+}
+
+/* The offloaded interface has no Zephyr-side addresses because the host stack
+ * owns them. mDNS and other responders answer from addresses registered on the
+ * Zephyr net_if, so mirror the host interface addresses onto it.
+ *
+ * The snapshot is taken once when the interface comes up; host address changes
+ * (DHCP renew, add or remove) are not reflected afterwards.
+ */
+static void nsos_iface_add_host_addrs(struct net_if *iface)
+{
+	struct nsos_mid_ifaddr addrs[MAX(NET_IF_MAX_IPV4_ADDR + NET_IF_MAX_IPV6_ADDR, 1)];
+	size_t count = ARRAY_SIZE(addrs);
+	int host_ifindex;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_NET_IPV4) && !IS_ENABLED(CONFIG_NET_IPV6)) {
+		return;
+	}
+
+	host_ifindex = nsos_host_ifindex();
+	if (host_ifindex == 0) {
+		LOG_DBG("Cannot mirror host addresses. Represented host interface unresolved");
+		return;
+	}
+
+	ret = nsos_adapt_get_ifaddrs(host_ifindex, addrs, &count);
+	if (ret < 0) {
+		LOG_DBG("Cannot get host interface addresses (%d)", ret);
+		return;
+	}
+
+	if (count > ARRAY_SIZE(addrs)) {
+		LOG_WRN("Host interface has %zu addresses, only %zu mirrored; increase "
+			"CONFIG_NET_IF_UNICAST_IPV4_ADDR_COUNT / IPV6_ADDR_COUNT",
+			count, ARRAY_SIZE(addrs));
+		count = ARRAY_SIZE(addrs);
+	}
+
+	for (size_t i = 0; i < count; i++) {
+		if (IS_ENABLED(CONFIG_NET_IPV4) && addrs[i].family == NSOS_MID_AF_INET) {
+			struct net_in_addr addr;
+			struct net_in_addr netmask;
+
+			memcpy(&addr, addrs[i].addr, sizeof(addr));
+			if (net_if_ipv4_addr_lookup(&addr, NULL) != NULL) {
+				continue;
+			}
+
+			if (net_if_ipv4_addr_add(iface, &addr, NET_ADDR_MANUAL, 0) == NULL) {
+				LOG_WRN("Cannot mirror host IPv4 address to offloaded iface. "
+					"Increase CONFIG_NET_IF_UNICAST_IPV4_ADDR_COUNT");
+				continue;
+			}
+
+			netmask.s_addr = (addrs[i].prefix_len == 0)
+						 ? 0
+						 : net_htonl(~0U << (32 - addrs[i].prefix_len));
+			net_if_ipv4_set_netmask_by_addr(iface, &addr, &netmask);
+		} else if (IS_ENABLED(CONFIG_NET_IPV6) && addrs[i].family == NSOS_MID_AF_INET6) {
+			struct net_in6_addr addr;
+
+			memcpy(&addr, addrs[i].addr, sizeof(addr));
+			if (net_if_ipv6_addr_lookup(&addr, NULL) != NULL) {
+				continue;
+			}
+
+			if (net_if_ipv6_addr_add(iface, &addr, NET_ADDR_MANUAL, 0) == NULL) {
+				LOG_WRN("Cannot mirror host IPv6 address to offloaded iface. "
+					"Increase CONFIG_NET_IF_UNICAST_IPV6_ADDR_COUNT");
+			}
+		}
+	}
 }
 
 static int nsos_iface_enable(const struct net_if *iface, bool enabled)
 {
-	ARG_UNUSED(iface);
-	ARG_UNUSED(enabled);
+	if (enabled) {
+		nsos_iface_add_host_addrs((struct net_if *)iface);
+	}
+
 	return 0;
 }
 
@@ -1665,12 +2000,6 @@ static struct offloaded_if_api nsos_iface_offload_api = {
 	.iface_api.init = nsos_iface_api_init,
 	.enable = nsos_iface_enable,
 };
-
-NET_DEVICE_OFFLOAD_INIT(nsos_socket, "nsos_socket",
-			nsos_socket_offload_init,
-			NULL,
-			NULL, NULL,
-			0, &nsos_iface_offload_api, NET_ETH_MTU);
 
 #ifdef CONFIG_NET_NATIVE_OFFLOADED_SOCKETS_CONNECTIVITY_SIM
 

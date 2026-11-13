@@ -85,7 +85,7 @@ BUILD_ASSERT(DT_NODE_HAS_COMPAT_STATUS(DT_CHOSEN(zephyr_host_cmd_spi_backend),
 /* Timeout to wait for SPI request packet
  *
  * This affects the slowest SPI clock we can support. A delay of 8192 us
- * permits a 512-byte request at 500 KHz, assuming the master starts sending
+ * permits a 512-byte request at 500 KHz, assuming the controller starts sending
  * bytes as soon as it asserts chip select. That's as slow as we would
  * practically want to run the SPI interface, since running it slower
  * significantly impacts firmware update times.
@@ -397,7 +397,7 @@ static int spi_configure(const struct ec_host_cmd_spi_ctx *hc_spi)
 	LL_SPI_SetTransferBitOrder(spi, LL_SPI_MSB_FIRST);
 	LL_SPI_DisableCRC(spi);
 	LL_SPI_SetDataWidth(spi, LL_SPI_DATAWIDTH_8BIT);
-	/* Set slave options */
+	/* Set peripheral options */
 	LL_SPI_SetNSSMode(spi, LL_SPI_NSS_HARD_INPUT);
 	LL_SPI_SetMode(spi, LL_SPI_MODE_SLAVE);
 
@@ -423,7 +423,7 @@ static int reload_dma_tx(struct ec_host_cmd_spi_ctx *hc_spi, size_t len)
 	SPI_TypeDef *spi = cfg->spi;
 	int ret;
 
-	/* Set DMA at the beggining of the TX buffer and set the number of bytes to send */
+	/* Set DMA at the beginning of the TX buffer and set the number of bytes to send */
 	ret = dma_reload(hc_spi->dma_tx->dma_dev, hc_spi->dma_tx->channel, (uint32_t)hc_spi->tx_buf,
 			 dma_dest_addr(spi), len);
 	if (ret != 0) {
@@ -545,9 +545,9 @@ static int prepare_rx(struct ec_host_cmd_spi_ctx *hc_spi)
 	 * properly, SPI is strongly suggested to be disabled and re-enabled
 	 * before next transaction starts despite its setting is not changed.",
 	 * disable and re-enable the SPI module. Without that, the SPI module
-	 * receives the first byte on a next transaction incorrently - it is
+	 * receives the first byte on a next transaction incorrectly - it is
 	 * always 0x00.
-	 * It also clears RX FIFO, so there is no needed to read the remianing
+	 * It also clears RX FIFO, so there is no needed to read the remaining
 	 * bytes manually.
 	 */
 	LL_SPI_Disable(spi);
@@ -598,7 +598,7 @@ static int spi_setup_dma(struct ec_host_cmd_spi_ctx *hc_spi)
 		return ret;
 	}
 
-	/* Start receiving from the SPI Master */
+	/* Start receiving from the SPI controller */
 	ret = dma_start(hc_spi->dma_rx->dma_dev, hc_spi->dma_rx->channel);
 	if (ret != 0) {
 		return ret;
@@ -626,7 +626,7 @@ static int wait_for_rx_bytes(struct ec_host_cmd_spi_ctx *hc_spi, int needed)
 		current_time = k_ticks_to_us_floor64(k_uptime_ticks());
 
 		ret = dma_get_status(hc_spi->dma_rx->dma_dev, hc_spi->dma_rx->channel, &stat);
-		/* RX DMA is always programed to copy buffer size (max command size) */
+		/* RX DMA is always programmed to copy buffer size (max command size) */
 		if (ret) {
 			return ret;
 		}
@@ -662,10 +662,9 @@ void gpio_cb_nss(const struct device *port, struct gpio_callback *cb, gpio_port_
 	if (gpio_pin_get(hc_spi->cs.port, hc_spi->cs.pin)) {
 		ec_host_cmd_pm_policy_state_lock_put(hc_spi);
 
-		/* CS asserted during processing a command. Prepare for receiving after
-		 * sending response.
-		 */
-		if (hc_spi->state == SPI_HOST_CMD_STATE_PROCESSING) {
+		/* If command processing or response sending is in progress, do not re-arm RX. */
+		if (hc_spi->state == SPI_HOST_CMD_STATE_PROCESSING ||
+		    hc_spi->state == SPI_HOST_CMD_STATE_SENDING) {
 			hc_spi->prepare_rx_later = 1;
 			return;
 		}
@@ -679,6 +678,13 @@ void gpio_cb_nss(const struct device *port, struct gpio_callback *cb, gpio_port_
 	}
 
 	/* CS asserted. Receive full packet and call general handler */
+	if (hc_spi->state == SPI_HOST_CMD_STATE_PROCESSING ||
+	    hc_spi->state == SPI_HOST_CMD_STATE_SENDING) {
+		/* Ignore unexpected CS assertions while busy. Do not alter state to RX_BAD. */
+		LOG_WRN("Unexpected CS assert in state %d", hc_spi->state);
+		return;
+	}
+
 	if (hc_spi->state == SPI_HOST_CMD_STATE_READY_TO_RX) {
 		/* The SPI module and DMA are already configured and ready to receive data.
 		 * Consider disabling the SPI module at the end of sending response and
@@ -745,7 +751,7 @@ static int ec_host_cmd_spi_init(const struct ec_host_cmd_backend *backend,
 	hc_spi->tx->buf = (uint8_t *)hc_spi->tx->buf + sizeof(out_preamble);
 	hc_spi->tx->len_max = hc_spi->tx->len_max - sizeof(out_preamble) - EC_SPI_PAST_END_LENGTH;
 
-	/* Limit the requset/response max sizes */
+	/* Limit the request/response max sizes */
 	if (hc_spi->rx_ctx->len_max > SPI_MAX_REQ_SIZE) {
 		hc_spi->rx_ctx->len_max = SPI_MAX_REQ_SIZE;
 	}
@@ -787,7 +793,7 @@ static int ec_host_cmd_spi_send(const struct ec_host_cmd_backend *backend)
 
 	dma_stop(hc_spi->dma_rx->dma_dev, hc_spi->dma_rx->channel);
 
-	/* Add state bytes at the beggining and the end of the buffer to transmit */
+	/* Add state bytes at the beginning and the end of the buffer to transmit */
 	memcpy(hc_spi->tx_buf, out_preamble, sizeof(out_preamble));
 	for (int i = 0; i < EC_SPI_PAST_END_LENGTH; i++) {
 		hc_spi->tx_buf[sizeof(out_preamble) + hc_spi->tx->len + i] = EC_SPI_PAST_END;

@@ -66,8 +66,8 @@ struct usbip_cmd_node {
 	struct uhc_transfer *xfer;
 };
 
-K_MEM_SLAB_DEFINE(usbip_slab, sizeof(struct usbip_cmd_node),
-		  CONFIG_USBIP_SUBMIT_BACKLOG_COUNT, sizeof(void *));
+K_MEM_SLAB_DEFINE_TYPE(usbip_slab, struct usbip_cmd_node,
+		       CONFIG_USBIP_SUBMIT_BACKLOG_COUNT);
 
 static ALWAYS_INLINE int usbip_send(int sock, const void *const buf, const size_t len)
 {
@@ -202,7 +202,7 @@ usbip_req_cb_error:
 		net_buf_unref(buf);
 	}
 
-	usbh_xfer_free(dev_ctx->udev, xfer);
+	(void)uhc_xfer_unref(xfer);
 
 	return 0;
 }
@@ -253,7 +253,7 @@ static int usbip_submit_req(struct usbip_cmd_node *const cmd_nd, const uint8_t e
 	return 0;
 
 submit_req_err:
-	usbh_xfer_free(dev_ctx->udev, xfer);
+	(void)uhc_xfer_unref(xfer);
 
 	return ret;
 }

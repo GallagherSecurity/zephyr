@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <nxp/rw/RW612-pinctrl.h>
+#include <nxp/rw/pinctrl/RW612-pinctrl.h>
 
 &pinctrl {
 	// default-UART
@@ -99,6 +99,24 @@
 			pinmux = <IO_MUX_GPIO44
 				  IO_MUX_GPIO55>;
 			slew-rate = "normal";
+		};
+	};
+
+	pinmux_enet: pinmux_enet {
+		group0 {
+			pinmux = <IO_MUX_ENET_CLK
+				  IO_MUX_ENET_RX
+				  IO_MUX_ENET_TX
+				  IO_MUX_GPIO21
+				  IO_MUX_GPIO55>;
+			slew-rate = "fast";
+		};
+	};
+
+	pinmux_mdio: pinmux_mdio {
+		group0 {
+			pinmux = <IO_MUX_ENET_MDIO>;
+			slew-rate = "fast";
 		};
 	};
 };

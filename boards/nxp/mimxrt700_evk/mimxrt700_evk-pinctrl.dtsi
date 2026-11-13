@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <nxp/nxp_imx/rt/MIMXRT798SGFOB-pinctrl.h>
+#include <nxp/imxrt/imxrt7xx/pinctrl/MIMXRT798SGFOB-pinctrl.h>
 
 &pinctrl {
 	pinmux_flexcomm0_lpuart: pinmux_flexcomm0_lpuart {
@@ -92,6 +92,40 @@
 		};
 	};
 
+	pinmux_flexio_camera: pinmux_flexio_camera {
+		/* FlexIO inputs: D0-D7 (IO6-IO13), HREF (IO2), PCLK (IO15) + VSYNC GPIO input */
+		group0 {
+			pinmux = <FLEXIO_IO6_PIO2_6>,
+				 <FLEXIO_IO7_PIO2_7>,
+				 <FLEXIO_IO8_PIO2_8>,
+				 <FLEXIO_IO9_PIO2_9>,
+				 <FLEXIO_IO10_PIO2_10>,
+				 <FLEXIO_IO11_PIO2_11>,
+				 <FLEXIO_IO12_PIO2_12>,
+				 <FLEXIO_IO13_PIO2_13>,
+				 <FLEXIO_IO2_PIO2_2>,
+				 <FLEXIO_IO15_PIO2_15>,
+				 <GPIO2_GPIO5_PIO2_5>;
+			input-enable;
+			slew-rate = "normal";
+			drive-strength = "normal";
+		};
+
+		/* XCLK FlexIO output */
+		group1 {
+			pinmux = <FLEXIO_IO1_PIO2_1>;
+			slew-rate = "normal";
+			drive-strength = "normal";
+		};
+
+		/* RESET GPIO output */
+		group2 {
+			pinmux = <GPIO2_GPIO0_PIO2_0>;
+			slew-rate = "normal";
+			drive-strength = "normal";
+		};
+	};
+
 	pinmux_lpadc0: pinmux_lpadc0 {
 		group0 {
 			pinmux = <ADC0_CH0_PIO10_0>,
@@ -144,44 +178,35 @@
 		};
 	};
 
-	pinmux_usdhc: pinmux_usdhc {
+	pinmux_usdhc1: pinmux_usdhc1 {
 		group0 {
-			pinmux = <SDHC0_CMD_PIO7_1>,
-				 <USDHC0_USDHC_DATA0_PIO7_6>,
-				 <USDHC0_USDHC_DATA1_PIO7_7>,
-				 <USDHC0_USDHC_DATA2_PIO7_8>,
-				 <USDHC0_USDHC_DATA3_PIO7_9>,
-				 <USDHC0_USDHC_DATA4_PIO7_2>,
-				 <USDHC0_USDHC_DATA5_PIO7_3>,
-				 <USDHC0_USDHC_DATA6_PIO7_4>,
-				 <USDHC0_USDHC_DATA7_PIO7_5>,
-				 <SDHC0_CARD_DET_N_PIO7_11>;
+			pinmux = <SDHC1_CMD_PIO7_18>,
+				 <USDHC1_USDHC_DATA0_PIO7_19>,
+				 <USDHC1_USDHC_DATA1_PIO7_20>,
+				 <USDHC1_USDHC_DATA2_PIO7_21>,
+				 <USDHC1_USDHC_DATA3_PIO7_22>,
+				 <SDHC1_CARD_DET_N_PIO7_24>;
 			bias-pull-up;
 			input-enable;
 			slew-rate = "normal";
 			drive-strength = "normal";
+			nxp,drive-current = <3>;
 		};
 
 		group1 {
-			pinmux = <SDHC0_CLK_PIO7_0>;
-			bias-pull-down;
+			pinmux = <SDHC1_CLK_PIO7_17>;
+			bias-pull-up;
 			input-enable;
 			slew-rate = "normal";
 			drive-strength = "normal";
+			nxp,drive-current = <3>;
 		};
 
+		/* SD power enable is routed to PIO7_11 as GPIO. */
 		group2 {
-			pinmux = <GPIO7_GPIO12_PIO7_12>;
+			pinmux = <GPIO7_GPIO11_PIO7_11>;
 			bias-pull-down;
 			slew-rate = "normal";
-			drive-strength = "normal";
-		};
-
-		group3 {
-			pinmux = <SDHC0_DS_PIO7_10>;
-			bias-pull-down;
-			input-enable;
-			slew-rate = "slow";
 			drive-strength = "normal";
 		};
 	};
@@ -269,6 +294,47 @@
 				 <XSPI2_DATA15_PIO4_20>;
 			drive-strength = "normal";
 			slew-rate = "normal";
+			input-enable;
+		};
+	};
+
+	pinmux_lcdif_dbi: pinmux_lcdif_dbi {
+		group0 {
+			pinmux = <LCDIF_DBI_DATA0_PIO2_6>,
+				 <LCDIF_DBI_DATA1_PIO2_7>,
+				 <LCDIF_DBI_DATA2_PIO2_8>,
+				 <LCDIF_DBI_DATA3_PIO2_9>,
+				 <LCDIF_DBI_DATA4_PIO2_10>,
+				 <LCDIF_DBI_DATA5_PIO2_11>,
+				 <LCDIF_DBI_DATA6_PIO2_12>,
+				 <LCDIF_DBI_DATA7_PIO2_13>;
+			slew-rate = "normal";
+			drive-strength = "normal";
+			bias-pull-up;
+		};
+
+		group1 {
+			pinmux = <GPIO2_GPIO15_PIO2_15>,
+				 <LCD_DBI_CSX_AB_PIO2_0>,
+				 <LCD_DBI_WRX_PIO2_4>;
+			slew-rate = "normal";
+			drive-strength = "normal";
+		};
+
+		group2 {
+			pinmux = <LCD_DBI_DCX_AB_PIO2_1>,
+				 <LCD_DBI_RWDX_PIO2_3>;
+			slew-rate = "normal";
+			drive-strength = "normal";
+		};
+	};
+
+	pinmux_micfil: pinmux_micfil {
+		group0 {
+			pinmux = <PDM_CLK_PIO10_8>,
+				 <PDM_DATA0_PIO10_9>;
+			slew-rate = "normal";
+			drive-strength = "normal";
 			input-enable;
 		};
 	};

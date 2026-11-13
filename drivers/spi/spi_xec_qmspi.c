@@ -13,7 +13,7 @@ LOG_MODULE_REGISTER(spi_xec, CONFIG_SPI_LOG_LEVEL);
 #include <errno.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/spi/rtio.h>
+#include "spi_rtio.h"
 #include <zephyr/drivers/pinctrl.h>
 #include <soc.h>
 
@@ -189,7 +189,7 @@ static int qmspi_configure(const struct device *dev,
 		return -ENOTSUP;
 	}
 
-	if (config->operation & (SPI_TRANSFER_LSB | SPI_OP_MODE_SLAVE
+	if (config->operation & (SPI_TRANSFER_LSB | SPI_OP_MODE_PERIPHERAL
 				 | SPI_MODE_LOOP)) {
 		return -ENOTSUP;
 	}

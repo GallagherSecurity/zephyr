@@ -6,12 +6,11 @@
 
 /dts-v1/;
 
+#include <freq.h>
 #include <arm/armv8-m.dtsi>
 
 / {
 	compatible = "arm,v2m-musca";
-	#address-cells = <1>;
-	#size-cells = <1>;
 
 	aliases {
 		led0 = &red_led;
@@ -48,6 +47,7 @@
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
+		timebase-frequency = <DT_FREQ_M(50)>;
 
 		cpu@0 {
 			device_type = "cpu";
@@ -95,7 +95,7 @@
 			#size-cells = <1>;
 			ranges = <0x0 0x50000000 0x10000000>;
 
-			#include "v2m_musca_s1-common.dtsi"
+#include "v2m_musca_s1-common.dtsi"
 		};
 	};
 };

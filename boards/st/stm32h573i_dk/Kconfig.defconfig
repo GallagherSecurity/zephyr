@@ -7,17 +7,13 @@
 
 if BOARD_STM32H573I_DK
 
-configdefault NET_L2_ETHERNET
+configdefault ETH_DRIVER
 	default y
 
 configdefault SDMMC_STM32_CLOCK_CHECK
 	default n
 
 if DISPLAY
-
-choice ST7789V_PIXEL_FORMAT
-	default ST7789V_RGB565X
-endchoice
 
 # Required to enable LCD backlight
 config REGULATOR

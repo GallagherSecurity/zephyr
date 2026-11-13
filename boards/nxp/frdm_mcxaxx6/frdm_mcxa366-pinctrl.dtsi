@@ -1,9 +1,9 @@
 /*
- * Copyright 2025 NXP
+ * Copyright 2025-2026 NXP
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <nxp/mcx/MCXA366VLQ-pinctrl.h>
+#include <nxp/mcx/mcxa/pinctrl/MCXA366VLQ-pinctrl.h>
 
 &pinctrl {
 	pinmux_lpuart2: pinmux_lpuart2 {
@@ -41,6 +41,14 @@
 			slew-rate = "fast";
 			drive-strength = "low";
 			input-enable;
+		};
+	};
+
+	pinmux_dac0: pinmux_dac0 {
+		group0 {
+			pinmux = <DAC0_OUT_P2_2>;
+			drive-strength = "low";
+			slew-rate = "fast";
 		};
 	};
 
@@ -144,6 +152,78 @@
 			slew-rate = "fast";
 			drive-strength = "low";
 			input-enable;
+		};
+	};
+
+	pinmux_slcd: slcd_pins {
+		group0 {
+			pinmux = <LCD_P16_P0_12>,
+				 <LCD_P17_P0_13>,
+				 <LCD_P18_P0_14>,
+				 <LCD_P19_P0_15>,
+				 <LCD_P20_P0_16>,
+				 <LCD_P21_P0_17>,
+				 <LCD_P22_P0_18>,
+				 <LCD_P23_P0_19>,
+				 <LCD_P24_P0_20>,
+				 <LCD_P25_P0_21>,
+				 <LCD_P26_P0_22>,
+				 <LCD_P27_P0_23>,
+				 <LCD_P28_P0_24>,
+				 <LCD_P29_P0_25>,
+				 <LCD_P30_P0_26>,
+				 <LCD_P31_P0_27>;
+			drive-strength = "low";
+			slew-rate = "fast";
+		};
+	};
+
+	pinmux_flexpwm0_pwm0: pinmux_flexpwm0_pwm0 {
+		group0 {
+			pinmux = <PWM0_A0_P3_0>,
+				 <PWM0_B0_P3_1>;
+			slew-rate = "fast";
+			drive-strength = "low";
+		};
+	};
+
+	pinmux_flexio_lcd: pinmux_flexio_lcd {
+		group0 {
+			pinmux = <FLEXIO0_D16_P2_8>,
+				 <FLEXIO0_D17_P2_9>,
+				 <FLEXIO0_D18_P2_10>,
+				 <FLEXIO0_D19_P2_11>,
+				 <FLEXIO0_D20_P3_12>,
+				 <FLEXIO0_D21_P3_13>,
+				 <FLEXIO0_D22_P2_14>,
+				 <FLEXIO0_D23_P1_15>,
+				 <FLEXIO0_D24_P3_24>,
+				 <FLEXIO0_D25_P3_25>,
+				 <FLEXIO0_D26_P2_18>,
+				 <FLEXIO0_D27_P1_19>,
+				 <FLEXIO0_D28_P3_20>,
+				 <FLEXIO0_D29_P3_29>,
+				 <FLEXIO0_D30_P2_22>,
+				 <FLEXIO0_D31_P3_23>;
+			drive-strength = "low";
+			slew-rate = "fast";
+			input-enable;
+		};
+
+		group1 {
+			pinmux = <FLEXIO0_D7_P0_7>;
+			drive-strength = "low";
+			slew-rate = "fast";
+			input-enable;
+			bias-pull-up;
+		};
+
+		group2 {
+			pinmux = <FLEXIO0_D8_P4_0>;
+			drive-strength = "low";
+			slew-rate = "fast";
+			input-enable;
+			bias-pull-up;
 		};
 	};
 };

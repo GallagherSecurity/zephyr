@@ -1,4 +1,4 @@
-# Copyright 2024 NXP
+# Copyright 2024, 2026 NXP
 # Copyright (c) 2023 Google LLC.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -28,6 +28,7 @@ config SOC_MIMXRT595S_F1
 	select XTENSA_CPU_HAS_HIFI3
 	select XTENSA_RESET_VECTOR
 	select XTENSA_USE_CORE_CRT1
+	imply XTENSA_ENABLE_BACKTRACE
 
 if SOC_SERIES_IMXRT5XX
 

@@ -37,7 +37,7 @@ def test_if_test_config_file_is_used(tmp_path: Path):
         runner: ''
         duts:
         - connected: true
-          flash_timeout: 60
+          flash_timeout: 120
           id: 0123456789
           platform: sample/board/name
           runner: jlink
@@ -63,9 +63,34 @@ def test_if_test_config_file_is_used(tmp_path: Path):
     assert device.id == '0123456789'
     assert device.west_flash_extra_args == ['--erase']
     assert device.fixtures == ['ble_hci_adapter', 'usb']
-    assert device.flash_timeout == 60
+    assert device.flash_timeout == 120
     assert device.runner == 'jlink'
     assert len(device.serial_configs) == 2
     assert device.serial_configs[0].port == '/dev/ttyACM1'
     assert device.serial_configs[0].baud == 115200
     assert device.serial_configs[1].port == '/dev/ttyACM0'
+
+
+def test_if_probe_id_overrides_id(tmp_path: Path):
+    content = textwrap.dedent("""
+        device_type: hardware
+        platform: sample/board/name
+        duts:
+        - id: '0123456789'
+          probe_id: '000609301751'
+          platform: sample/board/name
+          serial: /dev/ttyACM0
+    """)
+    twister_config = tmp_path / 'twister_config.yaml'
+    twister_config.write_text(content)
+
+    config = create_mock_config_with_defaults()
+    config.option.twister_config = str(twister_config)
+    twister_harness_config = TwisterHarnessConfig.create(config)
+
+    assert len(twister_harness_config.devices) == 1
+    assert twister_harness_config.devices[0].id == '000609301751'
+
+    config.option.device_id = '1122334455'
+    twister_harness_config = TwisterHarnessConfig.create(config)
+    assert twister_harness_config.devices[0].id == '1122334455'

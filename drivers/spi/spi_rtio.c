@@ -8,7 +8,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/rtio/work.h>
-#include <zephyr/drivers/spi/rtio.h>
+#include "spi_rtio.h"
+#include <zephyr/linker/section_tags.h>
 #include <zephyr/sys/mpsc_lockfree.h>
 
 #include <zephyr/logging/log.h>
@@ -151,6 +152,15 @@ void spi_rtio_iodev_default_submit(const struct device *dev,
 	rtio_work_req_submit(req, iodev_sqe, spi_rtio_iodev_default_submit_sync);
 }
 
+#if defined(CONFIG_DCACHE_LINE_SIZE) && (CONFIG_DCACHE_LINE_SIZE > 0)
+#define SPI_RTIO_SCRATCH_ALIGN CONFIG_DCACHE_LINE_SIZE
+#else
+#define SPI_RTIO_SCRATCH_ALIGN 4
+#endif
+
+static uint8_t spi_rtio_scratch_buf[CONFIG_SPI_RTIO_SCRATCH_BUF_SIZE]
+	__aligned(SPI_RTIO_SCRATCH_ALIGN) __nocache;
+
 /**
  * @brief Copy the tx_bufs and rx_bufs into a set of RTIO requests
  *
@@ -167,6 +177,7 @@ int spi_rtio_copy(struct rtio *r,
 		  struct rtio_iodev *iodev,
 		  const struct spi_buf_set *tx_bufs,
 		  const struct spi_buf_set *rx_bufs,
+		  bool no_response,
 		  struct rtio_sqe **last_sqe)
 {
 	int ret = 0;
@@ -184,7 +195,7 @@ int spi_rtio_copy(struct rtio *r,
 		tx_len = tx_bufs->buffers[tx].len;
 	} else {
 		tx_buf = NULL;
-		tx_len = rx_bufs->buffers[rx].len;
+		tx_len = (rx_bufs != NULL && rx < rx_count) ? rx_bufs->buffers[rx].len : 0;
 	}
 
 	if (rx < rx_count) {
@@ -209,99 +220,225 @@ int spi_rtio_copy(struct rtio *r,
 
 		/* If tx/rx len are same, we can do a simple transceive */
 		if (tx_len == rx_len) {
-			if (tx_buf == NULL) {
-				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
-						   rx_buf, rx_len, NULL);
-			} else if (rx_buf == NULL) {
-				rtio_sqe_prep_write(sqe, iodev, RTIO_PRIO_NORM,
-						    tx_buf, tx_len, NULL);
-			} else {
+			if (tx_buf != NULL && rx_buf != NULL) {
 				rtio_sqe_prep_transceive(sqe, iodev, RTIO_PRIO_NORM,
 							 tx_buf, rx_buf, rx_len, NULL);
-			}
-			tx++;
-			rx++;
-			if (rx < rx_count) {
-				rx_buf = rx_bufs->buffers[rx].buf;
-				rx_len = rx_bufs->buffers[rx].len;
-			} else {
-				rx_buf = NULL;
-				rx_len = 0;
-			}
-			if (tx < tx_count) {
-				tx_buf = tx_bufs->buffers[tx].buf;
-				tx_len = tx_bufs->buffers[tx].len;
-			} else {
-				tx_buf = NULL;
 				tx_len = 0;
+				rx_len = 0;
+			} else if (tx_buf != NULL) {
+				rtio_sqe_prep_write(sqe, iodev, RTIO_PRIO_NORM,
+						    tx_buf, tx_len, NULL);
+				tx_len = 0;
+				rx_len = 0;
+			} else if (rx_buf != NULL) {
+				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
+						   rx_buf, rx_len, NULL);
+				tx_len = 0;
+				rx_len = 0;
+			} else {
+				/* Both NULL: discard read into scratch buffer */
+				uint32_t chunk = MIN(rx_len, sizeof(spi_rtio_scratch_buf));
+
+				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
+						   spi_rtio_scratch_buf, chunk, NULL);
+				tx_len -= chunk;
+				rx_len -= chunk;
+			}
+
+			if (tx_len == 0) {
+				tx++;
+				if (tx < tx_count) {
+					tx_buf = tx_bufs->buffers[tx].buf;
+					tx_len = tx_bufs->buffers[tx].len;
+				} else {
+					tx_buf = NULL;
+					tx_len = 0;
+				}
+			}
+
+			if (rx_len == 0) {
+				rx++;
+				if (rx < rx_count) {
+					rx_buf = rx_bufs->buffers[rx].buf;
+					rx_len = rx_bufs->buffers[rx].len;
+				} else {
+					rx_buf = NULL;
+					rx_len = 0;
+				}
 			}
 		} else if (tx_len == 0) {
-			rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
-					   (uint8_t *)rx_buf,
-					   (uint32_t)rx_len,
-					   NULL);
-			rx++;
-			if (rx < rx_count) {
-				rx_buf = rx_bufs->buffers[rx].buf;
-				rx_len = rx_bufs->buffers[rx].len;
+			if (rx_buf != NULL) {
+				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
+						   (uint8_t *)rx_buf,
+						   (uint32_t)rx_len,
+						   NULL);
+				rx++;
+				if (rx < rx_count) {
+					rx_buf = rx_bufs->buffers[rx].buf;
+					rx_len = rx_bufs->buffers[rx].len;
+				} else {
+					rx_buf = NULL;
+					rx_len = 0;
+				}
 			} else {
-				rx_buf = NULL;
-				rx_len = 0;
+				/* Discard read: stream incoming data into scratch bit-bucket */
+				uint32_t chunk = MIN(rx_len, sizeof(spi_rtio_scratch_buf));
+
+				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
+						   spi_rtio_scratch_buf,
+						   chunk,
+						   NULL);
+				rx_len -= chunk;
+				if (rx_len == 0) {
+					rx++;
+					if (rx < rx_count) {
+						rx_buf = rx_bufs->buffers[rx].buf;
+						rx_len = rx_bufs->buffers[rx].len;
+					} else {
+						rx_buf = NULL;
+						rx_len = 0;
+					}
+				}
 			}
 		} else if (rx_len == 0) {
-			rtio_sqe_prep_write(sqe, iodev, RTIO_PRIO_NORM,
-					    (uint8_t *)tx_buf,
-					    (uint32_t)tx_len,
-					    NULL);
-			tx++;
-			if (tx < tx_count) {
-				tx_buf = tx_bufs->buffers[tx].buf;
-				tx_len = tx_bufs->buffers[tx].len;
+			if (tx_buf != NULL) {
+				rtio_sqe_prep_write(sqe, iodev, RTIO_PRIO_NORM,
+						    (uint8_t *)tx_buf,
+						    (uint32_t)tx_len,
+						    NULL);
+				tx++;
+				if (tx < tx_count) {
+					tx_buf = tx_bufs->buffers[tx].buf;
+					tx_len = tx_bufs->buffers[tx].len;
+				} else {
+					tx_buf = NULL;
+					tx_len = 0;
+				}
 			} else {
-				tx_buf = NULL;
-				tx_len = 0;
+				/* tx_buf NULL: clock dummy bytes on bus, discard RX */
+				uint32_t chunk = MIN(tx_len, sizeof(spi_rtio_scratch_buf));
+
+				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
+						   spi_rtio_scratch_buf,
+						   chunk,
+						   NULL);
+				tx_len -= chunk;
+				if (tx_len == 0) {
+					tx++;
+					if (tx < tx_count) {
+						tx_buf = tx_bufs->buffers[tx].buf;
+						tx_len = tx_bufs->buffers[tx].len;
+					} else {
+						tx_buf = NULL;
+						tx_len = 0;
+					}
+				}
 			}
 		} else if (tx_len > rx_len) {
-			rtio_sqe_prep_transceive(sqe, iodev, RTIO_PRIO_NORM,
-						 (uint8_t *)tx_buf,
-						 (uint8_t *)rx_buf,
-						 (uint32_t)rx_len,
-						 NULL);
-			tx_len -= rx_len;
-			tx_buf += rx_len;
-			rx++;
-			if (rx < rx_count) {
-				rx_buf = rx_bufs->buffers[rx].buf;
-				rx_len = rx_bufs->buffers[rx].len;
+			if (tx_buf != NULL && rx_buf != NULL) {
+				rtio_sqe_prep_transceive(sqe, iodev, RTIO_PRIO_NORM,
+							 (uint8_t *)tx_buf,
+							 (uint8_t *)rx_buf,
+							 (uint32_t)rx_len,
+							 NULL);
+				tx_len -= rx_len;
+				tx_buf += rx_len;
+				rx_len = 0;
+			} else if (tx_buf != NULL) {
+				rtio_sqe_prep_write(sqe, iodev, RTIO_PRIO_NORM,
+						    (uint8_t *)tx_buf,
+						    (uint32_t)rx_len,
+						    NULL);
+				tx_len -= rx_len;
+				tx_buf += rx_len;
+				rx_len = 0;
+			} else if (rx_buf != NULL) {
+				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
+						   (uint8_t *)rx_buf,
+						   (uint32_t)rx_len,
+						   NULL);
+				tx_len -= rx_len;
+				rx_len = 0;
 			} else {
-				rx_buf = NULL;
-				rx_len = tx_len;
+				uint32_t chunk = MIN(rx_len, sizeof(spi_rtio_scratch_buf));
+
+				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
+						   spi_rtio_scratch_buf,
+						   chunk,
+						   NULL);
+				tx_len -= chunk;
+				rx_len -= chunk;
+			}
+
+			if (rx_len == 0) {
+				rx++;
+				if (rx < rx_count) {
+					rx_buf = rx_bufs->buffers[rx].buf;
+					rx_len = rx_bufs->buffers[rx].len;
+				} else {
+					rx_buf = NULL;
+					rx_len = tx_len;
+				}
 			}
 		} else if (rx_len > tx_len) {
-			rtio_sqe_prep_transceive(sqe, iodev, RTIO_PRIO_NORM,
-						 (uint8_t *)tx_buf,
-						 (uint8_t *)rx_buf,
-						 (uint32_t)tx_len,
-						 NULL);
-			rx_len -= tx_len;
-			rx_buf += tx_len;
-			tx++;
-			if (tx < tx_count) {
-				tx_buf = tx_bufs->buffers[tx].buf;
-				tx_len = tx_bufs->buffers[tx].len;
+			if (tx_buf != NULL && rx_buf != NULL) {
+				rtio_sqe_prep_transceive(sqe, iodev, RTIO_PRIO_NORM,
+							 (uint8_t *)tx_buf,
+							 (uint8_t *)rx_buf,
+							 (uint32_t)tx_len,
+							 NULL);
+				rx_len -= tx_len;
+				rx_buf += tx_len;
+				tx_len = 0;
+			} else if (tx_buf != NULL) {
+				rtio_sqe_prep_write(sqe, iodev, RTIO_PRIO_NORM,
+						    (uint8_t *)tx_buf,
+						    (uint32_t)tx_len,
+						    NULL);
+				rx_len -= tx_len;
+				tx_len = 0;
+			} else if (rx_buf != NULL) {
+				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
+						   (uint8_t *)rx_buf,
+						   (uint32_t)tx_len,
+						   NULL);
+				rx_len -= tx_len;
+				rx_buf += tx_len;
+				tx_len = 0;
 			} else {
-				tx_buf = NULL;
-				tx_len = rx_len;
+				uint32_t chunk = MIN(tx_len, sizeof(spi_rtio_scratch_buf));
+
+				rtio_sqe_prep_read(sqe, iodev, RTIO_PRIO_NORM,
+						   spi_rtio_scratch_buf,
+						   chunk,
+						   NULL);
+				rx_len -= chunk;
+				tx_len -= chunk;
+			}
+
+			if (tx_len == 0) {
+				tx++;
+				if (tx < tx_count) {
+					tx_buf = tx_bufs->buffers[tx].buf;
+					tx_len = tx_bufs->buffers[tx].len;
+				} else {
+					tx_buf = NULL;
+					tx_len = rx_len;
+				}
 			}
 		} else {
 			__ASSERT(false, "Invalid %s state", __func__);
 		}
 
 		sqe->flags = RTIO_SQE_TRANSACTION;
+
+		if (no_response) {
+			sqe->flags |= RTIO_SQE_NO_RESPONSE;
+		}
 	}
 
 	if (sqe != NULL) {
-		sqe->flags = 0;
+		sqe->flags = no_response ? RTIO_SQE_NO_RESPONSE : 0;
 		*last_sqe = sqe;
 	}
 
@@ -336,6 +473,18 @@ static inline void spi_spin_unlock(struct spi_rtio *ctx, k_spinlock_key_t key)
 	k_spin_unlock(&ctx->lock, key);
 }
 
+/** Lock the shared rtio context used for fallback implementations */
+static inline void spi_r_lock(struct spi_rtio *ctx)
+{
+	(void)k_sem_take(&ctx->r_lock, K_FOREVER);
+}
+
+/** Unlock the shared rtio context used for fallback implementations */
+static inline void spi_r_unlock(struct spi_rtio *ctx)
+{
+	k_sem_give(&ctx->r_lock);
+}
+
 void spi_rtio_init(struct spi_rtio *ctx,
 		   const struct device *dev)
 {
@@ -345,6 +494,7 @@ void spi_rtio_init(struct spi_rtio *ctx,
 	ctx->dt_spec.bus = dev;
 	ctx->iodev.data = &ctx->dt_spec;
 	ctx->iodev.api = &spi_iodev_api;
+	k_sem_init(&ctx->r_lock, 1, 1);
 }
 
 /**
@@ -419,10 +569,17 @@ int spi_rtio_transceive(struct spi_rtio *ctx,
 		return -EINVAL;
 	}
 
+	if (config->operation & SPI_LOCK_ON) {
+		return -EINVAL;
+	}
+
+	spi_r_lock(ctx);
+
 	dt_spec->config = *config;
 
-	ret = spi_rtio_copy(ctx->r, &ctx->iodev, tx_bufs, rx_bufs, &sqe);
+	ret = spi_rtio_copy(ctx->r, &ctx->iodev, tx_bufs, rx_bufs, false, &sqe);
 	if (ret < 0) {
+		spi_r_unlock(ctx);
 		return ret;
 	}
 
@@ -444,5 +601,89 @@ int spi_rtio_transceive(struct spi_rtio *ctx,
 		ret--;
 	}
 
+	spi_r_unlock(ctx);
 	return err;
+}
+
+#if CONFIG_SPI_ASYNC
+static void transceive_cb_callback(struct rtio *r,
+				   const struct rtio_sqe *sqe,
+				   int res,
+				   void *arg0)
+{
+	struct spi_rtio *ctx = arg0;
+	spi_callback_t cb = ctx->async_cb;
+	struct spi_dt_spec *dt_spec = &ctx->dt_spec;
+	const struct device *dev = dt_spec->bus;
+	void *userdata = sqe->userdata;
+
+	/*
+	 * We have stored the context data needed for the callback so
+	 * we can unlock the context here
+	 */
+	spi_r_unlock(ctx);
+
+	if (cb == NULL) {
+		return;
+	}
+
+	cb(dev, res, userdata);
+}
+
+int spi_rtio_transceive_cb(struct spi_rtio *ctx,
+			   const struct spi_config *config,
+			   const struct spi_buf_set *tx_bufs,
+			   const struct spi_buf_set *rx_bufs,
+			   spi_callback_t cb,
+			   void *userdata)
+{
+	struct spi_dt_spec *dt_spec = &ctx->dt_spec;
+	struct rtio_sqe *sqe;
+	int ret = 0;
+
+	if (tx_bufs == NULL && rx_bufs == NULL) {
+		return -EINVAL;
+	}
+
+	if (config->operation & SPI_LOCK_ON) {
+		return -EINVAL;
+	}
+
+	spi_r_lock(ctx);
+
+	dt_spec->config = *config;
+
+	ret = spi_rtio_copy(ctx->r, &ctx->iodev, tx_bufs, rx_bufs, true, &sqe);
+	if (ret < 0) {
+		spi_r_unlock(ctx);
+		return ret;
+	}
+
+	sqe->flags |= RTIO_SQE_CHAINED;
+
+	sqe = rtio_sqe_acquire(ctx->r);
+	if (sqe == NULL) {
+		rtio_sqe_drop_all(ctx->r);
+		spi_r_unlock(ctx);
+		return ret;
+	}
+
+	ctx->async_cb = cb;
+
+	rtio_sqe_prep_callback_no_cqe(sqe,
+				      transceive_cb_callback,
+				      ctx,
+				      userdata);
+
+	rtio_submit(ctx->r, 0);
+
+	return 0;
+}
+#endif /* CONFIG_SPI_ASYNC */
+
+int spi_rtio_release(const struct device *dev, const struct spi_config *config)
+{
+	ARG_UNUSED(dev);
+	ARG_UNUSED(config);
+	return -ENOTSUP;
 }

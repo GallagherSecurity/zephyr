@@ -41,7 +41,7 @@ uint32_t sx126x_get_dio1_pin_state(struct sx126x_data *dev_data)
 
 void sx126x_dio1_irq_enable(struct sx126x_data *dev_data)
 {
-	NVIC_ClearPendingIRQ(DT_INST_IRQN(0));
+	k_irq_clear_pending(DT_INST_IRQN(0));
 	irq_enable(DT_INST_IRQN(0));
 }
 
@@ -61,7 +61,7 @@ void sx126x_set_tx_params(int8_t power, RadioRampTimes_t ramp_time)
 			power = max_power;
 		}
 		if (max_power == 15) {
-			SX126xSetPaConfig(0x07, 0x00, 0x01, 0x01);
+			SX126xSetPaConfig(0x06, 0x00, 0x01, 0x01);
 			power = 14 - (max_power - power);
 		} else if (max_power == 10) {
 			SX126xSetPaConfig(0x01, 0x00, 0x01, 0x01);

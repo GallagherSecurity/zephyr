@@ -7,7 +7,7 @@
 
 /dts-v1/;
 
-#include <nxp/kinetis/nxp_k22fn512.dtsi>
+#include <nxp/kinetis/k2x/nxp_k22fn512.dtsi>
 #include <zephyr/dt-bindings/pwm/pwm.h>
 #include "frdm_k22f-pinctrl.dtsi"
 #include <zephyr/dt-bindings/gpio/arduino-header-r3.h>
@@ -40,6 +40,7 @@
 		zephyr,console = &uart1;
 		zephyr,shell-uart = &uart1;
 		zephyr,uart-pipe = &uart1;
+		zephyr,crc = &crc;
 	};
 
 	leds {
@@ -124,6 +125,10 @@
 			   <ARDUINO_HEADER_R3_D14 0 &gpioe 0 0>,
 			   <ARDUINO_HEADER_R3_D15 0 &gpioe 1 0>;
 	};
+};
+
+&{/cpus} {
+	timebase-frequency = <DT_FREQ_M(72)>;
 };
 
 &sim {
@@ -212,7 +217,7 @@ zephyr_uhc0: &usbh {
 
 &flash0 {
 	partitions {
-		compatible = "fixed-partitions";
+		ranges;
 		#address-cells = <1>;
 		#size-cells = <1>;
 
@@ -221,24 +226,32 @@ zephyr_uhc0: &usbh {
 		 * to the flash memory sector size of 2KB.
 		 */
 		boot_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
 			label = "mcuboot";
 			reg = <0x00000000 DT_SIZE_K(64)>;
 			read-only;
 		};
 
 		slot0_partition: partition@10000 {
+			compatible = "zephyr,mapped-partition";
 			label = "image-0";
 			reg = <0x00010000 DT_SIZE_K(182)>;
 		};
 
 		slot1_partition: partition@3d800 {
+			compatible = "zephyr,mapped-partition";
 			label = "image-1";
 			reg = <0x0003d800 DT_SIZE_K(182)>;
 		};
 
 		storage_partition: partition@6b000 {
+			compatible = "zephyr,mapped-partition";
 			label = "storage";
 			reg = <0x0006b000 DT_SIZE_K(84)>;
 		};
 	};
+};
+
+&crc {
+	status = "okay";
 };

@@ -37,8 +37,8 @@ static bool uart_mcumgr_ignoring;
 #endif
 
 /** Contains buffers to hold incoming request fragments. */
-K_MEM_SLAB_DEFINE(uart_mcumgr_slab, sizeof(struct uart_mcumgr_rx_buf),
-		  CONFIG_UART_MCUMGR_RX_BUF_COUNT, 1);
+K_MEM_SLAB_DEFINE_TYPE(uart_mcumgr_slab, struct uart_mcumgr_rx_buf,
+		       CONFIG_UART_MCUMGR_RX_BUF_COUNT);
 
 #if defined(CONFIG_MCUMGR_TRANSPORT_UART_ASYNC)
 uint8_t async_buffer[CONFIG_MCUMGR_TRANSPORT_UART_ASYNC_BUFS]
@@ -76,10 +76,6 @@ void uart_mcumgr_free_rx_buf(struct uart_mcumgr_rx_buf *rx_buf)
  */
 static int uart_mcumgr_read_chunk(void *buf, int capacity)
 {
-	if (!uart_irq_rx_ready(uart_mcumgr_dev)) {
-		return 0;
-	}
-
 	return uart_fifo_read(uart_mcumgr_dev, buf, capacity);
 }
 #endif
@@ -92,6 +88,14 @@ static struct uart_mcumgr_rx_buf *uart_mcumgr_rx_byte(uint8_t byte)
 	struct uart_mcumgr_rx_buf *rx_buf;
 
 #if !defined(CONFIG_UART_MCUMGR_RAW_PROTOCOL)
+	/* Frame markers never occur inside a frame, so they always start a new line. */
+	if (byte == MCUMGR_SERIAL_HDR_PKT_1 || byte == MCUMGR_SERIAL_HDR_FRAG_1) {
+		uart_mcumgr_ignoring = false;
+		if (uart_mcumgr_cur_buf != NULL) {
+			uart_mcumgr_cur_buf->length = 0;
+		}
+	}
+
 	if (!uart_mcumgr_ignoring) {
 #endif
 		if (uart_mcumgr_cur_buf == NULL) {
@@ -149,6 +153,7 @@ static void uart_mcumgr_async(const struct device *dev, struct uart_event *evt, 
 	struct uart_mcumgr_rx_buf *rx_buf;
 	uint8_t *p;
 	int len;
+	int rc;
 
 	ARG_UNUSED(dev);
 
@@ -168,7 +173,13 @@ static void uart_mcumgr_async(const struct device *dev, struct uart_event *evt, 
 		}
 		break;
 	case UART_RX_DISABLED:
+		/* Reception stops after an RX error; restart it */
 		async_current = 0;
+		rc = uart_rx_enable(dev, async_buffer[0], sizeof(async_buffer[0]),
+				    CONFIG_MCUMGR_TRANSPORT_UART_ASYNC_RX_TIMEOUT_US);
+		if (rc != 0) {
+			LOG_ERR("Failed to restart RX: %d", rc);
+		}
 		break;
 	case UART_RX_BUF_REQUEST:
 		/*
@@ -202,12 +213,16 @@ static void uart_mcumgr_isr(const struct device *unused, void *user_data)
 	ARG_UNUSED(unused);
 	ARG_UNUSED(user_data);
 
-	while (uart_irq_update(uart_mcumgr_dev) &&
-	       uart_irq_is_pending(uart_mcumgr_dev)) {
+	uart_irq_update(uart_mcumgr_dev);
 
+	if (uart_irq_rx_ready(uart_mcumgr_dev) <= 0) {
+		return;
+	}
+
+	while (true) {
 		chunk_len = uart_mcumgr_read_chunk(buf, sizeof(buf));
-		if (chunk_len == 0) {
-			continue;
+		if (chunk_len <= 0) {
+			break;
 		}
 
 		for (i = 0; i < chunk_len; i++) {
@@ -249,7 +264,8 @@ static void uart_mcumgr_setup(const struct device *uart)
 {
 	uart_callback_set(uart, uart_mcumgr_async, NULL);
 
-	uart_rx_enable(uart, async_buffer[0], sizeof(async_buffer[0]), 0);
+	uart_rx_enable(uart, async_buffer[0], sizeof(async_buffer[0]),
+		       CONFIG_MCUMGR_TRANSPORT_UART_ASYNC_RX_TIMEOUT_US);
 }
 #else
 static void uart_mcumgr_setup(const struct device *uart)

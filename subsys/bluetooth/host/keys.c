@@ -46,7 +46,9 @@ static struct bt_keys key_pool[CONFIG_BT_MAX_PAIRED];
 /* Configuration version used to detect if the device has configuration flags present in the stored
  * keys. Shall be higher than the maximum value of the `enc_size` field (16).
  */
-#define STORAGE_CFG_VERSION 17U
+#define STORAGE_CFG_VERSION_MIN		17U
+#define STORAGE_CFG_VERSION		17U
+BUILD_ASSERT(STORAGE_CFG_VERSION >= STORAGE_CFG_VERSION_MIN, "STORAGE_CFG_VERSION is too small");
 BUILD_ASSERT(STORAGE_CFG_VERSION <= UINT8_MAX, "STORAGE_CFG_VERSION is too large");
 /* Configuration flags for storage. Based on the bt_keys_cfg_flags enum. */
 #define STORAGE_CFG_FLAGS                                                                          \
@@ -82,7 +84,7 @@ static void find_key_in_use(struct bt_conn *conn, void *data)
 		if (key == &key_pool[kdata->id]) {
 			kdata->in_use = true;
 			LOG_DBG("Connected device %s is using key_pool[%d]",
-				bt_addr_le_str(bt_conn_get_dst(conn)), kdata->id);
+				bt_conn_dst_str(conn), kdata->id);
 		}
 	}
 }
@@ -100,6 +102,17 @@ static bool key_is_in_use(uint8_t id)
 void bt_keys_reset(void)
 {
 	memset(key_pool, 0, sizeof(key_pool));
+}
+
+bool bt_keys_has_bond(uint8_t id)
+{
+	for (size_t i = 0U; i < ARRAY_SIZE(key_pool); i++) {
+		if ((key_pool[i].keys != 0U) && (key_pool[i].id == id)) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 struct bt_keys *bt_keys_get_addr(uint8_t id, const bt_addr_le_t *addr)
@@ -193,6 +206,31 @@ void bt_foreach_bond(uint8_t id, void (*func)(const struct bt_bond_info *info,
 			func(&info, user_data);
 		}
 	}
+}
+
+enum bt_le_addr_res_support bt_le_bond_addr_res_support(uint8_t id, const bt_addr_le_t *peer)
+{
+	struct bt_keys *keys;
+
+	__ASSERT_NO_MSG(peer != NULL);
+
+	if (!IS_ENABLED(CONFIG_BT_GATT_AUTO_READ_CENTRAL_ADDR_RES)) {
+		/* Also ignores an answer stored by a previous firmware that
+		 * had the option enabled.
+		 */
+		return BT_LE_ADDR_RES_SUPPORT_UNKNOWN;
+	}
+
+	keys = bt_keys_find_addr(id, peer);
+	if (keys == NULL || (keys->flags & BT_KEYS_CENTRAL_ADDR_RES_KNOWN) == 0) {
+		return BT_LE_ADDR_RES_SUPPORT_UNKNOWN;
+	}
+
+	if ((keys->flags & BT_KEYS_CENTRAL_ADDR_RES_SUPPORT) != 0) {
+		return BT_LE_ADDR_RES_SUPPORT_YES;
+	}
+
+	return BT_LE_ADDR_RES_SUPPORT_NO;
 }
 
 void bt_keys_foreach_type(enum bt_keys_type type, void (*func)(struct bt_keys *keys, void *data),
@@ -424,7 +462,7 @@ static int keys_set(const char *name, size_t len_rd, settings_read_cb read_cb,
 		return -ENOMEM;
 	}
 	if (len != BT_KEYS_STORAGE_LEN) {
-		if ((uint8_t)val[0] != (uint8_t)STORAGE_CFG_VERSION &&
+		if ((uint8_t)val[0] < (uint8_t)STORAGE_CFG_VERSION_MIN &&
 		    len == BT_KEYS_STORAGE_LEN_COMPAT) {
 			/* This check migrates keys without configuration flags to the new format
 			 * granted only the configuration version and flags are missing. Older keys
@@ -448,6 +486,35 @@ static int keys_set(const char *name, size_t len_rd, settings_read_cb read_cb,
 
 			return -EINVAL;
 		}
+	} else if (!IS_ENABLED(CONFIG_BT_SIGNING) && IS_ENABLED(CONFIG_BT_SMP_SC_PAIR_ONLY) &&
+		   (uint8_t)val[0] < (uint8_t)STORAGE_CFG_VERSION_MIN) {
+		/* Migrate `bt_keys` stored with extra data to the new format in the most common
+		 * scenario where both legacy pairing and signing support are disabled. This allows
+		 * to still properly load and use the keys after firmware upgrade.
+		 */
+		size_t load_size = BT_KEYS_STORAGE_LEN_COMPAT;
+
+		if (IS_ENABLED(CONFIG_BT_KEYS_OVERWRITE_OLDEST)) {
+			/* Restoring aging counter is not implemented for this use-case. */
+			LOG_WRN("Skip aging counter - keys for %s", bt_addr_le_str(&addr));
+			/* `aging_counter` is an `uint32_t` */
+			load_size -= sizeof(uint32_t);
+		}
+
+		if (len >= load_size) {
+			LOG_DBG("Adding configuration flags to keys for %s", bt_addr_le_str(&addr));
+			keys->cfg_version = STORAGE_CFG_VERSION;
+			sys_put_le24(STORAGE_CFG_FLAGS, keys->cfg_flags);
+			(void)memcpy((char *)keys + offsetof(struct bt_keys, enc_size),
+				     val, load_size);
+			/* Ensure no unsupported key types are set. */
+			keys->keys &= (BT_KEYS_IRK | BT_KEYS_LTK_P256);
+			if ((keys->keys & BT_KEYS_LTK_P256) == 0U) {
+				LOG_WRN("Dropping keys for %s, no SC LTK", bt_addr_le_str(&addr));
+				bt_keys_clear(keys);
+				return -EINVAL;
+			}
+		}
 	} else {
 		memcpy(keys->storage_start, val, len);
 	}
@@ -468,7 +535,7 @@ static int keys_set(const char *name, size_t len_rd, settings_read_cb read_cb,
 	 * previous version that did not enforce this requirement.
 	 */
 	if ((keys->flags & BT_KEYS_AUTHENTICATED) &&
-	    !((keys->flags & BT_KEYS_OOB) || (keys->flags & BT_KEYS_SC))) {
+	    !(keys->flags & (BT_KEYS_OOB | BT_KEYS_SC))) {
 		LOG_WRN("The keys for %s are downgraded to unauthenticated as they no longer meet "
 			"authentication requirements",
 			bt_addr_le_str(&addr));
@@ -487,6 +554,10 @@ static int keys_set(const char *name, size_t len_rd, settings_read_cb read_cb,
 static void id_add(struct bt_keys *keys, void *user_data)
 {
 	__ASSERT_NO_MSG(keys != NULL);
+
+	if ((keys->state & BT_KEYS_ID_ADDED) != 0U) {
+		return;
+	}
 
 	/* Only mark as pending here. Keys are added to the controller RL on
 	 * demand when advertising or scanning starts, avoiding bt_id_add()

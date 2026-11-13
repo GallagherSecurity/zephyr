@@ -259,7 +259,7 @@ static void isoal_test_rx_common_before(void *f)
 }
 
 /**
- * Cacluate RX latency based on role and framing
+ * Calculate RX latency based on role and framing
  * @param  role              Peripheral / Central / Broadcast
  * @param  framed            PDU framing (Framed / Unframed)
  * @param  flush_timeout     FT
@@ -10576,7 +10576,7 @@ ZTEST(test_rx_framed, test_rx_framed_trppl_pdu_dbl_sdu_pdu_err1)
 	/* SDU 1 -------------------------------------------------------------*/
 	/* SDU payload should not be written */
 
-	/* SDU shold not be emitted */
+	/* SDU should not be emitted */
 	ZASSERT_ISOAL_SDU_EMIT_TEST_CALL_COUNT(1);
 
 	/* SDU 2 -------------------------------------------------------------*/

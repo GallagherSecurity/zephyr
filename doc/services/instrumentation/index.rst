@@ -124,8 +124,8 @@ bottlenecks. The subsystem tracks up to
    9.45% 0000061d main
    6.00% 0000049d k_msleep
    5.98% 00000469 k_sleep
-   5.95% 0000aea1 z_impl_k_sleep
-   5.93% 0000ad6d z_tick_sleep
+   5.95% 0000aea1 k_sleep_ticks
+   5.93% 0000ad6d z_impl_k_sleep_ticks
    5.66% 00000431 k_sem_take
    5.65% 00007e65 z_impl_k_sem_take
    5.51% 0000ac29 z_pend_curr
@@ -143,8 +143,13 @@ Enable instrumentation with:
    CONFIG_INSTRUMENTATION_MODE_CALLGRAPH=y    # For tracing
    CONFIG_INSTRUMENTATION_MODE_STATISTICAL=y  # For profiling
 
-The instrumentation subsystem uses :ref:`retained memory <retention_api>` to persist trigger/stopper
-function addresses across reboots. This must be configured in the devicetree:
+The instrumentation subsystem communicates with the target device via a UART console. Ensure that
+the ``zephyr_console`` chosen node points to the desired UART controller.
+
+:ref:`Retained memory <retention_api>` allows trigger/stopper function addresses to persist across
+reboots. This feature is optional and enabled with the
+:kconfig:option:`CONFIG_INSTRUMENTATION_DYNAMIC_TRIGGER` Kconfig option. Once enabled, devicetree
+must specify a retained memory region:
 
 .. code-block:: devicetree
 
@@ -186,8 +191,12 @@ provides an interface for controlling instrumentation and extracting data from t
 
 The tool offers several commands:
 
-- ``status``: Check if the target device supports callgraph (tracing) and statistical (profiling)
-  modes.
+- ``status``: Check if the target device supports
+
+  - callgraph (tracing) mode
+  - statistical (profiling) mode
+  - dynamic trigger/stopper functions configuration
+
 - ``trace``: Capture and display function call traces.
 - ``profile``: Capture and display function profiling data.
 - ``reboot``: Reboot the target device.

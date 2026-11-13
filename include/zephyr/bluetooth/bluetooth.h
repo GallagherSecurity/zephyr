@@ -34,6 +34,7 @@
 #include <zephyr/bluetooth/gap.h>
 #include <zephyr/bluetooth/addr.h>
 #include <zephyr/bluetooth/crypto.h>
+#include <zephyr/bluetooth/data.h>
 #include <zephyr/bluetooth/hci_types.h>
 #include <zephyr/bluetooth/classic/classic.h>
 #include <zephyr/net_buf.h>
@@ -59,7 +60,7 @@ extern "C" {
  *
  * @defgroup bt_gap Generic Access Profile (GAP)
  * @since 1.0
- * @version 1.0.0
+ * @version 1.1.2
  * @ingroup bluetooth
  * @{
  */
@@ -71,19 +72,22 @@ extern "C" {
  */
 #define BT_ID_DEFAULT 0
 
+/** Size of an Identity Resolving Key in octets. */
+#define BT_IRK_SIZE 16U
+
 /**
  * @brief Number of octets for local supported features
  *
  * The value of 8 correspond to page 0 in the LE Controller supported features.
  * 24 bytes are required for all subsequent supported feature pages.
  */
-#define BT_LE_LOCAL_SUPPORTED_FEATURES_SIZE                         \
-	(BT_HCI_LE_BYTES_PAGE_0_FEATURE_PAGE +                      \
-	 COND_CODE_1(CONFIG_BT_LE_MAX_LOCAL_SUPPORTED_FEATURE_PAGE, \
-		(CONFIG_BT_LE_MAX_LOCAL_SUPPORTED_FEATURE_PAGE      \
-			* BT_HCI_LE_BYTES_PER_FEATURE_PAGE),        \
-		(0U)))
-
+ #if defined(CONFIG_BT_LE_EXTENDED_FEAT_SET)
+ #define BT_LE_LOCAL_SUPPORTED_FEATURES_SIZE \
+	 (BT_HCI_LE_BYTES_PAGE_0_FEATURE_PAGE + \
+	  (CONFIG_BT_LE_MAX_LOCAL_SUPPORTED_FEATURE_PAGE * BT_HCI_LE_BYTES_PER_FEATURE_PAGE))
+ #else
+ #define BT_LE_LOCAL_SUPPORTED_FEATURES_SIZE BT_HCI_LE_BYTES_PAGE_0_FEATURE_PAGE
+ #endif
 /**
  * @struct bt_le_ext_adv
  * @brief Opaque type representing an advertiser.
@@ -211,6 +215,14 @@ struct bt_le_per_adv_response_info {
  * @note Must point to valid memory during the lifetime of the advertising set.
  *
  * @note Used in @ref bt_le_ext_adv_create.
+ *
+ * @note The callbacks are invoked from a thread context, never from an
+ *       ISR. Whether a callback is invoked from a context internal to
+ *       the stack or synchronously from within the API call that
+ *       triggers it, and from which context, is not part of the API and
+ *       may change between releases. See
+ *       @rstref{Callback execution contexts <bluetooth_callback_contexts>}
+ *       for the hazards of blocking in a callback and their mitigations.
  */
 struct bt_le_ext_adv_cb {
 	/**
@@ -251,7 +263,7 @@ struct bt_le_ext_adv_cb {
 	void (*scanned)(struct bt_le_ext_adv *adv,
 			struct bt_le_ext_adv_scanned_info *info);
 
-#if defined(CONFIG_BT_PRIVACY)
+#if defined(CONFIG_BT_PRIVACY) || defined(__DOXYGEN__)
 	/**
 	 * @brief The RPA validity of the advertising set has expired.
 	 *
@@ -289,6 +301,13 @@ struct bt_le_ext_adv_cb {
 	 * @brief The Controller indicates that one or more synced devices have
 	 * responded to a periodic advertising subevent indication.
 	 *
+	 * A response may be fragmented across several controller reports. When
+	 * @kconfig{CONFIG_BT_PER_ADV_RSP_REASSEMBLY} is enabled, the host
+	 * reassembles the fragments and delivers the complete response in a
+	 * single callback. If it is disabled, partial reports are discarded
+	 * and only reports already marked as "complete" by the controller are
+	 * forwarded to the application.
+	 *
 	 * @param adv  The advertising set object.
 	 * @param info Information about the responses received.
 	 * @param buf  The received data. NULL if the controller reported
@@ -325,9 +344,17 @@ typedef void (*bt_ready_cb_t)(int err);
  * earlier.
  *
  * @param cb Callback to notify completion or NULL to perform the
- * enabling synchronously. The callback is called from the system workqueue.
+ * enabling synchronously. The callback is called from a thread context
+ * internal to the stack, never from an ISR; see
+ * @rstref{Callback execution contexts <bluetooth_callback_contexts>}.
  *
- * @return Zero on success or (negative) error code otherwise.
+ * @return 0 on success, negative errno value on failure.
+ * @retval -EALREADY Bluetooth is already enabled, or being enabled.
+ * @retval -EAGAIN Bluetooth is being disabled; retry once bt_disable() has returned.
+ * @retval -ENODEV The HCI driver is not ready.
+ * @retval -ETIMEDOUT The Controller did not respond to any command. The HCI transport is
+ *         closed, so bt_enable() can be called again without bt_disable(). With a @p cb,
+ *         the callback gets this error.
  */
 int bt_enable(bt_ready_cb_t cb);
 
@@ -335,6 +362,10 @@ int bt_enable(bt_ready_cb_t cb);
  * @brief Disable Bluetooth
  *
  * Disable Bluetooth. Can't be called before bt_enable has completed.
+ *
+ * When bt_enable() was called with a ready callback the initialization runs
+ * asynchronously. If bt_disable() is called before the ready callback fires,
+ * it returns -EAGAIN. The caller should retry after the ready callback.
  *
  * This API will clear all configured identity addresses and keys that are not persistently
  * stored with @kconfig{CONFIG_BT_SETTINGS}. These can be restored
@@ -348,7 +379,16 @@ int bt_enable(bt_ready_cb_t cb);
  *
  * Close and release HCI resources. Result is architecture dependent.
  *
- * @return Zero on success or (negative) error code otherwise.
+ * If the HCI driver fails to close its transport, the error is returned with
+ * Bluetooth left not ready, as the Host has torn down its state, connections
+ * included, by then. bt_disable() can be called again.
+ *
+ * @return 0 on success, negative errno value on failure.
+ * @retval -ENOSYS The HCI driver does not support closing its transport. Bluetooth is
+ *                 left as it was.
+ * @retval -EALREADY Bluetooth is already disabled, or being disabled.
+ * @retval -EAGAIN Bluetooth is still being enabled, which with @kconfig{CONFIG_BT_SETTINGS}
+ *                 includes loading the Bluetooth settings; retry once bt_is_ready() returns true.
  */
 int bt_disable(void);
 
@@ -467,7 +507,7 @@ void bt_id_get(bt_addr_le_t *addrs, size_t *count);
  *             to BT_ADDR_LE_ANY the stack will generate a new random static address
  *             for the identity address and copy it to the given parameter upon return
  *             from this function (in case the parameter was non-NULL).
- * @param irk  Identity Resolving Key (16 octets) to be used with this
+ * @param irk  Identity Resolving Key (@ref BT_IRK_SIZE octets) to be used with this
  *             identity address. If set to all zeroes or NULL, the stack will
  *             generate a random IRK for the identity address and copy it back
  *             to the parameter upon return from this function (in case
@@ -495,7 +535,7 @@ int bt_id_create(bt_addr_le_t *addr, uint8_t *irk);
  *             to BT_ADDR_LE_ANY the stack will generate a new static random
  *             address for the identity address and copy it to the given
  *             parameter upon return from this function.
- * @param irk  Identity Resolving Key (16 octets) to be used with this
+ * @param irk  Identity Resolving Key (@ref BT_IRK_SIZE octets) to be used with this
  *             identity address. If set to all zeroes or NULL, the stack will
  *             generate a random IRK for the identity address and copy it back
  *             to the parameter upon return from this function (in case
@@ -526,92 +566,43 @@ int bt_id_reset(uint8_t id, bt_addr_le_t *addr, uint8_t *irk);
 int bt_id_delete(uint8_t id);
 
 /**
- * @brief Bluetooth data serialized size.
+ * @brief Reset the local Identity Resolving Key (IRK) for an identity.
  *
- * Get the size of a serialized @ref bt_data given its data length.
+ * Replaces the IRK for the given identity and persists it to flash when
+ * @kconfig{CONFIG_BT_SETTINGS} is enabled. Existing bonds must be removed
+ * before calling this function because bonded peers retain the old IRK and
+ * cannot resolve RPAs generated with the new one. Without
+ * @kconfig{CONFIG_BT_SETTINGS}, the new IRK is lost on reboot.
  *
- * Size of 'AD Structure'->'Length' field, equal to 1.
- * Size of 'AD Structure'->'Data'->'AD Type' field, equal to 1.
- * Size of 'AD Structure'->'Data'->'AD Data' field, equal to data_len.
+ * @note Unlike @ref bt_id_reset, this function also accepts
+ *       @ref BT_ID_DEFAULT because it does not modify the identity address.
  *
- * See Core Specification Version 5.4 Vol. 3 Part C, 11, Figure 11.1.
+ * @kconfig_dep{CONFIG_BT_PRIVACY}.
+ *
+ * @note The Bluetooth stack must be enabled via @ref bt_enable before calling
+ *       this function.
+ *
+ * @note With extended advertising, an advertising set assigned to this identity
+ *       must be deleted before calling this function; stopping it is not enough.
+ *
+ * @param id  Identity index, as returned by @ref bt_id_get or @ref BT_ID_DEFAULT.
+ *            Must be less than the number of currently configured identities.
+ * @param[in,out] irk Identity Resolving Key (@ref BT_IRK_SIZE octets) to use for the identity.
+ *                    If NULL or all zeroes, the stack generates a new random
+ *                    IRK and copies it back to this buffer when non-NULL.
+ *
+ * @retval 0           Success.
+ * @retval -EAGAIN     Bluetooth stack is not ready.
+ * @retval -EINVAL     @p id is out of range.
+ * @retval -EALREADY   The identity slot is empty.
+ * @retval -EBUSY      An advertising set is active, the identity is used by
+ *                     scanning or initiating, or a created extended advertising
+ *                     set is assigned to the identity.
+ * @retval -ENOTEMPTY  Bonds exist for this identity; call @ref bt_unpair first.
+ * @retval -EIO        Random IRK generation failed.
+ * @retval -ENOTSUP    Random generation is unsupported.
  */
-#define BT_DATA_SERIALIZED_SIZE(data_len) ((data_len) + 2)
-
-/**
- * @brief Bluetooth data.
- *
- * @details Description of different AD Types that can be encoded into advertising data. Used to
- * form arrays that are passed to the @ref bt_le_adv_start function. The @ref BT_DATA define can
- * be used as a helpter to declare the elements of an @ref bt_data array.
- */
-struct bt_data {
-	/** Type of scan response data or advertisement data. */
-	uint8_t type;
-	/** Length of scan response data or advertisement data. */
-	uint8_t data_len;
-	/** Pointer to Scan response or advertisement data. */
-	const uint8_t *data;
-};
-
-/**
- * @brief Helper to declare elements of bt_data arrays
- *
- * This macro is mainly for creating an array of struct bt_data
- * elements which is then passed to e.g. @ref bt_le_adv_start function.
- *
- * @param _type Type of advertising data field
- * @param _data Pointer to the data field payload
- * @param _data_len Number of octets behind the _data pointer
- */
-#define BT_DATA(_type, _data, _data_len) \
-	{ \
-		.type = (_type), \
-		.data_len = (_data_len), \
-		.data = (const uint8_t *)(_data), \
-	}
-
-/**
- * @brief Helper to declare elements of bt_data arrays
- *
- * This macro is mainly for creating an array of struct bt_data
- * elements which is then passed to e.g. @ref bt_le_adv_start function.
- *
- * @param _type Type of advertising data field
- * @param _bytes Variable number of single-byte parameters
- */
-#define BT_DATA_BYTES(_type, _bytes...) \
-	BT_DATA(_type, ((uint8_t []) { _bytes }), \
-		sizeof((uint8_t []) { _bytes }))
-
-/**
- * @brief Get the total size (in octets) of a given set of @ref bt_data
- * structures.
- *
- * The total size includes the length (1 octet) and type (1 octet) fields for each element, plus
- * their respective data lengths.
- *
- * @param[in] data Array of @ref bt_data structures.
- * @param[in] data_count Number of @ref bt_data structures in @p data.
- *
- * @return Size of the concatenated data, built from the @ref bt_data structure set.
- */
-size_t bt_data_get_len(const struct bt_data data[], size_t data_count);
-
-/**
- * @brief Serialize a @ref bt_data struct into an advertising structure (a flat array).
- *
- * The data are formatted according to the Bluetooth Core Specification v. 5.4,
- * vol. 3, part C, 11.
- *
- * @param[in]  input Single @ref bt_data structure to read from.
- * @param[out] output Buffer large enough to store the advertising structure in
- *             @p input. The size of it must be at least the size of the
- *             `input->data_len + 2` (for the type and the length).
- *
- * @return Number of octets written in @p output.
- */
-size_t bt_data_serialize(const struct bt_data *input, uint8_t *output);
+int bt_id_reset_irk(uint8_t id, uint8_t *irk);
 
 /**
  * @brief Local Bluetooth LE controller features and capabilities.
@@ -751,9 +742,13 @@ enum bt_le_adv_opt {
 	 * This is required if the remote device is privacy-enabled and
 	 * supports address resolution of the target address in directed
 	 * advertisement.
-	 * It is the responsibility of the application to check that the remote
-	 * device supports address resolution of directed advertisements by
-	 * reading its Central Address Resolution characteristic.
+	 * When @kconfig{CONFIG_BT_GATT_AUTO_READ_CENTRAL_ADDR_RES} is enabled
+	 * the host reads the peer's Central Address Resolution characteristic
+	 * when a bond is created, advertising towards a peer known not to
+	 * support address resolution fails with -ENOTSUP, and the answer can
+	 * be queried with @ref bt_le_bond_addr_res_support. When the support
+	 * is not known, it is the responsibility of the application to check
+	 * it by reading that characteristic.
 	 */
 	BT_LE_ADV_OPT_DIR_ADDR_RPA = BIT(5),
 
@@ -866,6 +861,10 @@ enum bt_le_adv_opt {
 	 * @kconfig{CONFIG_BT_EXT_ADV} instead.
 	 *
 	 * @note Mutually exclusive with BT_LE_ADV_OPT_USE_IDENTITY.
+	 *
+	 * @note With @kconfig{CONFIG_BT_PRIVACY} and the legacy advertising
+	 *       commands, scanning uses the same NRPA, and connection creation
+	 *       fails while the advertiser is enabled.
 	 */
 	BT_LE_ADV_OPT_USE_NRPA = BIT(19),
 
@@ -882,7 +881,7 @@ enum bt_le_adv_opt {
 	 * Coding Selection. If these conditions are not met, it will default to
 	 * no required coding scheme.
 	 *
-	 * @kconfig_dep{BT_EXT_ADV_CODING_SELECTION}
+	 * @kconfig_dep{CONFIG_BT_EXT_ADV_CODING_SELECTION}
 	 */
 	BT_LE_ADV_OPT_REQUIRE_S2_CODING = BIT(20),
 
@@ -899,9 +898,22 @@ enum bt_le_adv_opt {
 	 * Coding Selection. If these conditions are not met, it will default to
 	 * no required coding scheme.
 	 *
-	 * @kconfig_dep{BT_EXT_ADV_CODING_SELECTION}
+	 * @kconfig_dep{CONFIG_BT_EXT_ADV_CODING_SELECTION}
 	 */
 	BT_LE_ADV_OPT_REQUIRE_S8_CODING = BIT(21),
+
+	/**
+	 * @brief Request a specific TX power level for the advertising set.
+	 *
+	 * When set, the @ref bt_le_adv_param.tx_power field is passed to the
+	 * controller as the desired TX power. The controller selects the closest
+	 * supported level and reports the actual value via
+	 * @ref bt_le_ext_adv_info.tx_power.
+	 *
+	 * When not set, the controller chooses the TX power freely
+	 * (equivalent to @ref BT_HCI_LE_ADV_TX_POWER_NO_PREF).
+	 */
+	BT_LE_ADV_OPT_TX_POWER = BIT(22),
 };
 
 /** LE Advertising Parameters. */
@@ -922,8 +934,7 @@ struct bt_le_adv_param {
 	 * @brief Advertising Set Identifier, valid range is @ref BT_GAP_SID_MIN to
 	 * @ref BT_GAP_SID_MAX.
 	 *
-	 * @note Requires @ref BT_LE_ADV_OPT_EXT_ADV bit (see @ref bt_le_adv_opt field)  to be
-	 *set as @ref bt_le_adv_param.options.
+	 * @note If @ref BT_LE_ADV_OPT_EXT_ADV is not set in the options, this field is ignored.
 	 **/
 	uint8_t  sid;
 
@@ -938,6 +949,17 @@ struct bt_le_adv_param {
 	 */
 	uint8_t  secondary_max_skip;
 
+	/**
+	 * @brief Requested TX power in dBm.
+	 *
+	 * Only used when @ref BT_LE_ADV_OPT_TX_POWER is set in @ref options.
+	 * Valid range is @ref BT_HCI_LE_ADV_TX_POWER_MIN to
+	 * @ref BT_HCI_LE_ADV_TX_POWER_MAX.
+	 * The controller selects the closest supported level and reports the
+	 * actual value via @ref bt_le_ext_adv_info.tx_power.
+	 */
+	int8_t tx_power;
+
 	/** @brief Bit-field of advertising options, see the @ref bt_le_adv_opt field. */
 	uint32_t options;
 
@@ -948,8 +970,10 @@ struct bt_le_adv_param {
 	 * Advertising Interval. The Minimum Advertising Interval and Maximum Advertising Interval
 	 * aren't recommended to be the same value to enable the Controller to determine the best
 	 * advertising interval given other activities.
-	 * (See Bluetooth Core Spec 6.0, Vol 4, Part E, section 7.8.5)
-	 * Range: 0x0020 to 0x4000
+	 * (See Bluetooth Core Spec 6.2, Vol 4, Part E, section 7.8.5)
+	 * Range for legacy advertising: 0x0020 to 0x4000
+	 * (See Bluetooth Core Spec 6.2, Vol 4, Part E, section 7.8.53)
+	 * Range for extended advertising: 0x0020 to 0xFFFFFF
 	 */
 	uint32_t interval_min;
 
@@ -960,8 +984,10 @@ struct bt_le_adv_param {
 	 * Advertising Interval. The Minimum Advertising Interval and Maximum Advertising Interval
 	 * aren't recommended to be the same value to enable the Controller to determine the best
 	 * advertising interval given other activities.
-	 * (See Bluetooth Core Spec 6.0, Vol 4, Part E, section 7.8.5)
-	 * Range: 0x0020 to 0x4000
+	 * (See Bluetooth Core Spec 6.2, Vol 4, Part E, section 7.8.5)
+	 * Range for legacy advertising: 0x0020 to 0x4000
+	 * (See Bluetooth Core Spec 6.2, Vol 4, Part E, section 7.8.53)
+	 * Range for extended advertising: 0x0020 to 0xFFFFFF
 	 */
 	uint32_t interval_max;
 
@@ -983,6 +1009,23 @@ struct bt_le_adv_param {
 	const bt_addr_le_t *peer;
 };
 
+/**
+ * @brief Set the TX power in an advertising parameter struct.
+ *
+ * Convenience helper that sets @ref bt_le_adv_param.tx_power and enables
+ * @ref BT_LE_ADV_OPT_TX_POWER in @ref bt_le_adv_param.options in a single
+ * call.
+ *
+ * @param param    Advertising parameters to update.
+ * @param tx_power Requested TX power in dBm. Valid range is
+ *                 @ref BT_HCI_LE_ADV_TX_POWER_MIN to
+ *                 @ref BT_HCI_LE_ADV_TX_POWER_MAX.
+ */
+static inline void bt_le_adv_param_set_tx_power(struct bt_le_adv_param *param, int8_t tx_power)
+{
+	param->options |= BT_LE_ADV_OPT_TX_POWER;
+	param->tx_power = tx_power;
+}
 
 /** Periodic Advertising options */
 enum bt_le_per_adv_opt {
@@ -1256,8 +1299,8 @@ struct bt_le_per_adv_param {
 /**
  * Helper to declare periodic advertising parameters inline
  *
- * @param _int_min     Minimum periodic advertising interval, N * 0.625 milliseconds
- * @param _int_max     Maximum periodic advertising interval, N * 0.625 milliseconds
+ * @param _int_min     Minimum periodic advertising interval, N * 1.25 ms
+ * @param _int_max     Maximum periodic advertising interval, N * 1.25 ms
  * @param _options     Periodic advertising properties bitfield, see @ref bt_le_adv_opt
  *                     field.
  */
@@ -1271,8 +1314,8 @@ struct bt_le_per_adv_param {
 /**
  * Helper to declare periodic advertising parameters inline
  *
- * @param _int_min     Minimum periodic advertising interval, N * 0.625 milliseconds
- * @param _int_max     Maximum periodic advertising interval, N * 0.625 milliseconds
+ * @param _int_min     Minimum periodic advertising interval, N * 1.25 ms
+ * @param _int_max     Maximum periodic advertising interval, N * 1.25 ms
  * @param _options     Periodic advertising properties bitfield, see @ref bt_le_adv_opt
  *                     field.
  */
@@ -1306,6 +1349,9 @@ struct bt_le_per_adv_param {
  * @return Zero on success or (negative) error code otherwise.
  * @return -ENOMEM No free connection objects available for connectable
  *                 advertiser.
+ * @retval -ENOTSUP @ref BT_LE_ADV_OPT_DIR_ADDR_RPA was used and the peer is
+ *                  known not to support address resolution, as reported by
+ *                  @ref bt_le_bond_addr_res_support.
  * @return -ECONNREFUSED When connectable advertising is requested and there
  *                       is already maximum number of connections established
  *                       in the controller.
@@ -1516,6 +1562,8 @@ int bt_le_ext_adv_update_param(struct bt_le_ext_adv *adv,
  * possible to create a new advertising set if the limit @kconfig{CONFIG_BT_EXT_ADV_MAX_ADV_SET}
  * was reached.
  *
+ * @param adv Advertising set object.
+ *
  * @return Zero on success or (negative) error code otherwise.
  */
 int bt_le_ext_adv_delete(struct bt_le_ext_adv *adv);
@@ -1531,7 +1579,7 @@ int bt_le_ext_adv_delete(struct bt_le_ext_adv *adv);
  * @return Index of the advertising set object.
  * The range of the returned value is 0..@kconfig{CONFIG_BT_EXT_ADV_MAX_ADV_SET}-1
  */
-uint8_t bt_le_ext_adv_get_index(struct bt_le_ext_adv *adv);
+uint8_t bt_le_ext_adv_get_index(const struct bt_le_ext_adv *adv);
 
 /** Advertising states. */
 enum bt_le_ext_adv_state {
@@ -1559,13 +1607,37 @@ struct bt_le_ext_adv_info {
 	/** Local identity handle. */
 	uint8_t                    id;
 
-	/** Currently selected Transmit Power (dBM). */
+	/** Currently selected Transmit Power in dBm. Range: -127 to +20. */
 	int8_t                     tx_power;
 
-	/** Advertising Set ID */
+	/**
+	 * @brief Advertising Set ID
+	 *
+	 * Will be @ref BT_GAP_SID_INVALID for advertising sets that were configured without
+	 * @ref BT_LE_ADV_OPT_EXT_ADV.
+	 */
 	uint8_t                    sid;
 
-	/** Current local advertising address used. */
+	/** @brief Current local advertising address used.
+	 *
+	 *  The address the set advertises with, whether that is an identity
+	 *  address, a static random address, an RPA or an NRPA. For a set
+	 *  advertising with an RPA this is the RPA itself, not the identity
+	 *  address it resolves to. The value is determined when the
+	 *  advertising parameters are set, so it is only meaningful once
+	 *  bt_le_ext_adv_create() or bt_le_ext_adv_update_param() has
+	 *  succeeded, and reads as @ref BT_ADDR_LE_ANY before that.
+	 *
+	 *  The pointer is valid for as long as the advertising set object
+	 *  itself, i.e. until bt_le_ext_adv_delete(), and tracks the set
+	 *  across reconfiguration and private address rotation. Copy the
+	 *  address if it is needed beyond that.
+	 *
+	 *  @note If the set was configured to let the controller resolve the
+	 *  address against its resolving list, the controller may substitute a
+	 *  locally generated RPA that the host cannot observe. The configured
+	 *  fallback address is reported in that case.
+	 */
 	const bt_addr_le_t         *addr;
 
 	/** Extended advertising state. */
@@ -1595,7 +1667,9 @@ int bt_le_ext_adv_get_info(const struct bt_le_ext_adv *adv,
  * and will be called for any discovered LE device.
  *
  * @param addr Advertiser LE address and type.
- * @param rssi Strength of advertiser signal.
+ * @param rssi Strength of advertiser signal in dBm. Range: -127 to +20.
+ *             May be set to @ref BT_GAP_RSSI_INVALID when the value is not
+ *             available.
  * @param adv_type Type of advertising response from advertiser.
  *                 Uses the @ref bt_gap_adv_type values.
  * @param buf Buffer containing advertiser data.
@@ -1635,6 +1709,27 @@ int bt_le_per_adv_set_param(struct bt_le_ext_adv *adv,
  */
 int bt_le_per_adv_set_data(const struct bt_le_ext_adv *adv,
 			   const struct bt_data *ad, size_t ad_len);
+
+/**
+ * @brief Update the Advertising Data Identifier (DID) for periodic advertising
+ *        without changing the data.
+ *
+ * This sends a HCI command with operation set to "unchanged data" which causes
+ * the controller to update the ADI field (DID) in the periodic advertising PDU
+ * without modifying the advertising data payload.
+ *
+ * @kconfig_dep{CONFIG_BT_PER_ADV}
+ *
+ * @note The advertising set must have periodic advertising started
+ *       (via @ref bt_le_per_adv_start), must contain data, and ADI inclusion
+ *       must have been enabled via @ref BT_LE_PER_ADV_OPT_INCLUDE_ADI
+ *       before calling this function.
+ *
+ * @param adv       Advertising set object.
+ *
+ * @return 0 on success, negative errno value on failure.
+ */
+int bt_le_per_adv_update_did(const struct bt_le_ext_adv *adv);
 
 /**
  * @brief Parameters for setting data for a specific periodic advertising with response subevent.
@@ -1752,7 +1847,7 @@ struct bt_le_per_adv_sync_synced_info {
 	 *
 	 */
 	struct bt_conn *conn;
-#if defined(CONFIG_BT_PER_ADV_SYNC_RSP)
+#if defined(CONFIG_BT_PER_ADV_SYNC_RSP) || defined(__DOXYGEN__)
 	/** Number of subevents */
 	uint8_t num_subevents;
 
@@ -1807,15 +1902,23 @@ struct bt_le_per_adv_sync_recv_info {
 	/** Advertising Set Identifier, valid range @ref BT_GAP_SID_MIN to @ref BT_GAP_SID_MAX. */
 	uint8_t sid;
 
-	/** The TX power of the advertisement. */
+	/** @brief The TX power of the advertisement in dBm.
+	 *
+	 *  Range: -127 to +20. May be set to @ref BT_GAP_TX_POWER_INVALID when the
+	 *  value is not available.
+	 */
 	int8_t tx_power;
 
-	/** The RSSI of the advertisement excluding any CTE. */
+	/** @brief The RSSI of the advertisement (excluding any CTE), in dBm.
+	 *
+	 *  Range: -127 to +20. May be set to @ref BT_GAP_RSSI_INVALID when the value
+	 *  is not available.
+	 */
 	int8_t rssi;
 
 	/** The Constant Tone Extension (CTE) of the advertisement (@ref bt_df_cte_type) */
 	uint8_t cte_type;
-#if defined(CONFIG_BT_PER_ADV_SYNC_RSP)
+#if defined(CONFIG_BT_PER_ADV_SYNC_RSP) || defined(__DOXYGEN__)
 	/** The value of the event counter where the subevent indication was received. */
 	uint16_t periodic_event_counter;
 
@@ -1845,6 +1948,14 @@ struct bt_le_per_adv_sync_state_info {
  * advertising.
  *
  * @note Used in @ref bt_le_per_adv_sync_cb_register function.
+ *
+ * @note The callbacks are invoked from a thread context, never from an
+ *       ISR. Whether a callback is invoked from a context internal to
+ *       the stack or synchronously from within the API call that
+ *       triggers it, and from which context, is not part of the API and
+ *       may change between releases. See
+ *       @rstref{Callback execution contexts <bluetooth_callback_contexts>}
+ *       for the hazards of blocking in a callback and their mitigations.
  */
 
 struct bt_le_per_adv_sync_cb {
@@ -2367,6 +2478,21 @@ enum bt_le_scan_opt {
 	 * @note Requires @ref BT_LE_SCAN_OPT_CODED.
 	 */
 	BT_LE_SCAN_OPT_NO_1M = BIT(3),
+
+	/**
+	 * @brief Use the extended scanner filter policy.
+	 *
+	 * Also report directed advertisements whose target address is a resolvable private
+	 * address that the Controller was unable to resolve. The target address is reported
+	 * in @ref bt_le_scan_recv_info.direct_addr.
+	 *
+	 * @note Requires @kconfig{CONFIG_BT_SCAN_EXT_FILTER_POLICY}. @ref bt_le_scan_start
+	 *       returns @c -EINVAL if this option is set while it is disabled.
+	 *
+	 * @note Requires a Controller that supports the Extended Scanner Filter Policies.
+	 *       @ref bt_le_scan_start returns @c -ENOTSUP otherwise.
+	 */
+	BT_LE_SCAN_OPT_EXT_FILTER_POLICY = BIT(4),
 };
 
 enum bt_le_scan_type {
@@ -2447,10 +2573,18 @@ struct bt_le_scan_recv_info {
 	/** Advertising Set Identifier, valid range @ref BT_GAP_SID_MIN to @ref BT_GAP_SID_MAX. */
 	uint8_t sid;
 
-	/** Strength of advertiser signal. */
+	/** @brief Strength of advertiser signal in dBm.
+	 *
+	 *  Range: -127 to +20. May be set to @ref BT_GAP_RSSI_INVALID when the value
+	 *  is not available.
+	 */
 	int8_t rssi;
 
-	/** Transmit power of the advertiser. */
+	/** @brief Transmit power of the advertiser in dBm.
+	 *
+	 *  Range: -127 to +20. May be set to @ref BT_GAP_TX_POWER_INVALID when the
+	 *  value is not available.
+	 */
 	int8_t tx_power;
 
 	/**
@@ -2485,9 +2619,35 @@ struct bt_le_scan_recv_info {
 
 	/** Secondary advertising channel PHY. */
 	uint8_t secondary_phy;
+
+	/**
+	 * @brief Target address of a directed advertisement.
+	 *
+	 * @c NULL if the report carries no target address. Whether the advertisement was
+	 * directed is given by @ref BT_GAP_ADV_PROP_DIRECTED in
+	 * @ref bt_le_scan_recv_info.adv_props.
+	 *
+	 * An LE Extended Advertising Report always carries the target address of a directed
+	 * advertisement, whether or not the Controller resolved it. An LE Advertising Report
+	 * has no target address field, so this is @c NULL for a directed advertisement the
+	 * Controller resolved while scanning with the legacy scanning commands.
+	 *
+	 * The address type is @ref BT_ADDR_LE_UNRESOLVED if the Controller was unable to
+	 * resolve it.
+	 */
+	const bt_addr_le_t *direct_addr;
 };
 
-/** Listener context for (LE) scanning. */
+/** Listener context for (LE) scanning.
+ *
+ * @note The callbacks are invoked from a thread context, never from an
+ *       ISR. Whether a callback is invoked from a context internal to
+ *       the stack or synchronously from within the API call that
+ *       triggers it, and from which context, is not part of the API and
+ *       may change between releases. See
+ *       @rstref{Callback execution contexts <bluetooth_callback_contexts>}
+ *       for the hazards of blocking in a callback and their mitigations.
+ */
 struct bt_le_scan_cb {
 
 	/**
@@ -2618,6 +2778,10 @@ BUILD_ASSERT(BT_GAP_SCAN_FAST_WINDOW == BT_GAP_SCAN_FAST_INTERVAL_MIN,
  *       when requesting additional information from advertisers.
  *       In order to enable directed advertiser reports then
  *       @kconfig{CONFIG_BT_SCAN_WITH_IDENTITY} must be enabled.
+ *       This does not apply to directed advertisements whose target address the Controller
+ *       was unable to resolve. Those are reported whenever
+ *       @ref BT_LE_SCAN_OPT_EXT_FILTER_POLICY is used, as they cannot disclose the local
+ *       identity address.
  *
  * @note Setting the `param.timeout` parameter is not supported when
  *       @kconfig{CONFIG_BT_PRIVACY} is enabled, when the param.type is @ref
@@ -2634,6 +2798,10 @@ BUILD_ASSERT(BT_GAP_SCAN_FAST_WINDOW == BT_GAP_SCAN_FAST_INTERVAL_MIN,
  * @return Zero on success or error code otherwise, positive in case of
  *         protocol error or negative (POSIX) in case of stack internal error.
  * @retval -EBUSY if the scanner is already being started in a different thread.
+ * @retval -EINVAL if @ref BT_LE_SCAN_OPT_EXT_FILTER_POLICY is set and
+ *         @kconfig{CONFIG_BT_SCAN_EXT_FILTER_POLICY} is disabled.
+ * @retval -ENOTSUP if @ref BT_LE_SCAN_OPT_EXT_FILTER_POLICY is set and the Controller does
+ *         not support the Extended Scanner Filter Policies.
  */
 int bt_le_scan_start(const struct bt_le_scan_param *param, bt_le_scan_cb_t cb);
 
@@ -2644,6 +2812,7 @@ int bt_le_scan_start(const struct bt_le_scan_param *param, bt_le_scan_cb_t cb);
  *
  * @return Zero on success or error code otherwise, positive in case of
  *         protocol error or negative (POSIX) in case of stack internal error.
+ * @retval -EBUSY The scanner is being started or stopped in a different thread.
  */
 int bt_le_scan_stop(void);
 
@@ -2724,7 +2893,7 @@ int bt_le_filter_accept_list_clear(void);
  * channels are bad or unknown by setting the corresponding bit in the channel map to respectively
  * 0 or 1.
  *
- * @note The interval between two succesive calls to this function must be at least one second.
+ * @note The interval between two successive calls to this function must be at least one second.
  *
  * @param chan_map Channel map. 5 octets where each bit represents a channel. Only the lower 37 bits
  *        are valid.
@@ -2816,6 +2985,7 @@ struct bt_le_oob {
  *         different local identity address.
  *       - The local identity address conflicts with the local identity address used by other
  *         roles.
+ *       - Advertiser is enabled with @ref BT_LE_ADV_OPT_USE_NRPA.
  *
  * @note This function randomly generates cryptographic material used in the pairing process, and
  *       should be called again for each new pairing process.
@@ -2888,6 +3058,43 @@ struct bt_bond_info {
 void bt_foreach_bond(uint8_t id, void (*func)(const struct bt_bond_info *info,
 					   void *user_data),
 		     void *user_data);
+
+/** A bonded peer's support for address resolution. */
+enum bt_le_addr_res_support {
+	/** The peer has not been asked, or the answer could not be read. */
+	BT_LE_ADDR_RES_SUPPORT_UNKNOWN,
+	/** The peer does not support address resolution. */
+	BT_LE_ADDR_RES_SUPPORT_NO,
+	/**
+	 * The peer supports address resolution.
+	 *
+	 * Support is a static capability: it does not guarantee that the peer has address
+	 * resolution enabled at any given moment.
+	 */
+	BT_LE_ADDR_RES_SUPPORT_YES,
+};
+
+/**
+ * @brief Get a bonded peer's support for address resolution.
+ *
+ * A peer that does not support address resolution is unable to resolve the target address
+ * of a directed advertisement, i.e. it can only be reached by directed advertising that
+ * does not use @ref BT_LE_ADV_OPT_DIR_ADDR_RPA.
+ *
+ * The answer is the value of the peer's Central Address Resolution characteristic, which
+ * the host reads when the bond is created if
+ * @kconfig{CONFIG_BT_GATT_AUTO_READ_CENTRAL_ADDR_RES} is enabled, with a new attempt on
+ * later connections to the peer as long as the answer is unknown. It is unknown when that
+ * option is disabled, when there is no bond with the peer, or when the characteristic has
+ * not been read yet. The completion of the automatic read is signalled through
+ * @ref bt_conn_auth_info_cb.addr_res_support_read.
+ *
+ * @param id    Local identity handle (typically @ref BT_ID_DEFAULT).
+ * @param peer  Identity address of the bonded peer.
+ *
+ * @return The peer's support for address resolution.
+ */
+enum bt_le_addr_res_support bt_le_bond_addr_res_support(uint8_t id, const bt_addr_le_t *peer);
 
 /**
  * @brief Configure vendor data path

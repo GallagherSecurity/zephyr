@@ -5,39 +5,106 @@
  */
 #include <zephyr/kernel.h>
 #include <zephyr/pm/pm.h>
+#include <zephyr/arch/arch_interface.h>
 #include <fsl_cmc.h>
 #include <fsl_spc.h>
 #include <fsl_vbat.h>
-#include <fsl_wuu.h>
 
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_DECLARE(soc, CONFIG_SOC_LOG_LEVEL);
 
-#define MCXW7_WUU_ADDR (WUU_Type *)DT_REG_ADDR(DT_INST(0, nxp_wuu))
 #define MCXW7_CMC_ADDR (CMC_Type *)DT_REG_ADDR(DT_INST(0, nxp_cmc))
 #define MCXW7_VBAT_ADDR (VBAT_Type *)DT_REG_ADDR(DT_INST(0, nxp_vbat))
 #define MCXW7_SPC_ADDR (SPC_Type *)DT_REG_ADDR(DT_INST(0, nxp_spc))
 
-/* Get the IRQ number for lptmr0 */
-#define MCXW7_LPTMR0_IRQ_N           DT_IRQN(DT_NODELABEL(lptmr0))
-#define MCXW7_WUU_WAKEUP_LPTMR_IDX   0
-/* Get the IRQ number used by NBU */
-#define MCXW7_RF_IMU0_IRQ_N          DT_IRQN(DT_NODELABEL(nbu))
-#define MCXW7_WUU_WAKEUP_RF_IMU0_IDX 2
-
 #define MCXW7_LPWKUP_DELAY_10MHz (0xAAU)
 
-void mcxw7xx_set_wakeup(int32_t irqn)
+#ifdef CONFIG_SOC_SERIES_MCXW7XX_SHUTDOWN_UNUSED_RAM
+
+#define CMC_BANKS_NODE DT_NODELABEL(cmc)
+
+BUILD_ASSERT(DT_NODE_HAS_PROP(CMC_BANKS_NODE, sram_banks),
+	     "cmc node must define the sram-banks property");
+BUILD_ASSERT((DT_PROP_LEN(CMC_BANKS_NODE, sram_banks) % 3) == 0,
+	     "sram-banks must contain three cells (<start size disable-bit>) per bank");
+
+/* Three cells per bank: <start-address size cmc-disable-bit>. */
+#define MCXW7_BANK_CELLS 3U
+#define MCXW7_BANK_NUM   (DT_PROP_LEN(CMC_BANKS_NODE, sram_banks) / MCXW7_BANK_CELLS)
+
+/*
+ * A memory region the linked image relies on: keep the SRAM banks it overlaps
+ * powered across all modes. Built from devicetree, so it does not depend on any
+ * region-scoped linker symbol (_image_ram_end only marks the end of use inside
+ * zephyr,sram, not of every distinct linker region).
+ */
+struct mcxw7x_keep_region {
+	uintptr_t start;
+	size_t size;
+};
+
+/* Emit a {start, size} entry for a devicetree node's reg. */
+#define MCXW7_KEEP_ENTRY(node_id) {DT_REG_ADDR(node_id), DT_REG_SIZE(node_id)},
+
+/*
+ * Regions to keep powered: the chosen RAM node (whole node, not up to
+ * _image_ram_end), the chosen flash node when it is linked on-chip, and every
+ * status-okay zephyr,memory-region (this is how an application keeps a distinct
+ * region alive, e.g. an ECC region holding critical data). Banks overlapping
+ * none of these are powered off.
+ */
+static const struct mcxw7x_keep_region mcxw7x_keep_regions[] = {
+	MCXW7_KEEP_ENTRY(DT_CHOSEN(zephyr_sram))
+#if DT_HAS_CHOSEN(zephyr_flash)
+	MCXW7_KEEP_ENTRY(DT_CHOSEN(zephyr_flash))
+#endif
+	DT_FOREACH_STATUS_OKAY(zephyr_memory_region, MCXW7_KEEP_ENTRY)
+};
+
+/*
+ * Compute the CMC bank mask of SRAM power partitions that no kept region uses.
+ * Pure function of the devicetree memory map (bank geometry from the cmc
+ * sram-banks list, kept regions from chosen/memory-region nodes); evaluated
+ * once at init. A bank is kept when it overlaps any kept region and powered off
+ * otherwise, so distinct regions such as a non-ECC/ECC split are respected.
+ */
+static uint32_t mcxw7x_compute_unused_ram_mask(void)
 {
-	if (irqn == MCXW7_LPTMR0_IRQ_N) {
-		WUU_SetInternalWakeUpModulesConfig(MCXW7_WUU_ADDR, MCXW7_WUU_WAKEUP_LPTMR_IDX,
-						   kWUU_InternalModuleInterrupt);
-	} else if (irqn == MCXW7_RF_IMU0_IRQ_N) {
-		WUU_SetInternalWakeUpModulesConfig(MCXW7_WUU_ADDR, MCXW7_WUU_WAKEUP_RF_IMU0_IDX,
-						   kWUU_InternalModuleDMATrigger);
+	/*
+	 * Materialize the flat device tree bank list into a C array so it can be
+	 * indexed at run time; DT_PROP_BY_IDX() only accepts compile-time indices.
+	 */
+	static const uint32_t sram_banks[] = DT_PROP(CMC_BANKS_NODE, sram_banks);
+	uint32_t mask = 0U;
+
+	for (size_t i = 0U; i < MCXW7_BANK_NUM; i++) {
+		uintptr_t bank_start = (uintptr_t)sram_banks[(i * MCXW7_BANK_CELLS) + 0U];
+		size_t bank_size = (size_t)sram_banks[(i * MCXW7_BANK_CELLS) + 1U];
+		uint32_t bit = sram_banks[(i * MCXW7_BANK_CELLS) + 2U];
+		uintptr_t bank_end = bank_start + bank_size;
+		bool keep = false;
+
+		for (size_t r = 0U; r < ARRAY_SIZE(mcxw7x_keep_regions); r++) {
+			uintptr_t reg_start = mcxw7x_keep_regions[r].start;
+			uintptr_t reg_end = reg_start + mcxw7x_keep_regions[r].size;
+
+			/* Half-open overlap: bank_start < reg_end && reg_start < bank_end. */
+			if ((bank_start < reg_end) && (reg_start < bank_end)) {
+				keep = true;
+				break;
+			}
+		}
+
+		if (!keep) {
+			mask |= BIT(bit);
+		}
 	}
+
+	return mask;
 }
+
+#endif /* CONFIG_SOC_SERIES_MCXW7XX_SHUTDOWN_UNUSED_RAM */
 
 /*
  * 1. Set power mode protection
@@ -70,23 +137,21 @@ static void deinit_vbat(void)
 /* Invoke Low Power/System Off specific Tasks */
 __weak void pm_state_set(enum pm_state state, uint8_t substate_id)
 {
-	/* Set PRIMASK */
-	__disable_irq();
-	/* Set BASEPRI to 0 */
-	irq_unlock(0);
+	cmc_power_domain_config_t config;
+	unsigned int key;
 
 	set_cmc_configuration();
 	deinit_vbat();
 
 	switch (state) {
 	case PM_STATE_SUSPEND_TO_IDLE:
-		cmc_power_domain_config_t config;
-
 		/* Set MAIN_CORE and MAIN_WAKE power domain into sleep mode. */
 		config.clock_mode  = kCMC_GateAllSystemClocksEnterLowPowerMode;
 		config.main_domain = kCMC_SleepMode;
 		config.wake_domain = kCMC_SleepMode;
+		key = arch_pm_state_set_prepare();
 		CMC_EnterLowPowerMode(MCXW7_CMC_ADDR, &config);
+		arch_pm_state_set_finish(key);
 
 		break;
 	case PM_STATE_STANDBY:
@@ -98,7 +163,9 @@ __weak void pm_state_set(enum pm_state state, uint8_t substate_id)
 		config.main_domain = kCMC_DeepSleepMode;
 		config.wake_domain = kCMC_DeepSleepMode;
 
+		key = arch_pm_state_set_prepare();
 		CMC_EnterLowPowerMode(MCXW7_CMC_ADDR, &config);
+		arch_pm_state_set_finish(key);
 
 		break;
 	default:
@@ -113,9 +180,6 @@ __weak void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 	ARG_UNUSED(state);
 	ARG_UNUSED(substate_id);
 
-	/* Clear PRIMASK */
-	__enable_irq();
-
 	if (SPC_CheckPowerDomainLowPowerRequest(MCXW7_SPC_ADDR, kSPC_PowerDomain0)) {
 		SPC_ClearPowerDomainLowPowerRequestFlag(MCXW7_SPC_ADDR, kSPC_PowerDomain0);
 	}
@@ -129,8 +193,10 @@ __weak void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 }
 
 /*
- * In active mode, all HVDs/LVDs are disabled.
- * DCDC regulated to 1.8V, Core LDO regulated to 1.1V;
+ * In active mode, all HVDs/LVDs are disabled, Core LDO regulated to 1.1V.
+ * The active-mode DCDC output voltage is configured separately and earlier by
+ * nxp_mcxw7x_dcdc_init() (see soc_dcdc.c), driven by the SPC device tree node,
+ * so it is intentionally not touched here.
  * In low power modes, all HVDs/LVDs are disabled.
  * Bandgap is disabled, DCDC regulated to 1.25V, Core LDO regulated to 1.05V.
  */
@@ -150,9 +216,6 @@ __weak void set_spc_configuration(void)
 
 	active_mode_regulator.bandgapMode = kSPC_BandgapEnabledBufferDisabled;
 	active_mode_regulator.lpBuff = false;
-	/* DCDC regulate to 1.8V. */
-	active_mode_regulator.DCDCOption.DCDCVoltage = kSPC_DCDC_SafeModeVoltage;
-	active_mode_regulator.DCDCOption.DCDCDriveStrength = kSPC_DCDC_NormalDriveStrength;
 	active_mode_regulator.SysLDOOption.SysLDOVoltage = kSPC_SysLDO_NormalVoltage;
 	active_mode_regulator.SysLDOOption.SysLDODriveStrength = kSPC_SysLDO_NormalDriveStrength;
 	/* Core LDO regulate to 1.1V. */
@@ -161,10 +224,10 @@ __weak void set_spc_configuration(void)
 	active_mode_regulator.CoreLDOOption.CoreLDODriveStrength = kSPC_CoreLDO_NormalDriveStrength;
 #endif /* FSL_FEATURE_SPC_HAS_CORELDO_VDD_DS */
 
-	SPC_SetActiveModeDCDCRegulatorConfig(MCXW7_SPC_ADDR, &active_mode_regulator.DCDCOption);
-
-	while (SPC_GetBusyStatusFlag(MCXW7_SPC_ADDR)) {
-	}
+	/*
+	 * Active-mode DCDC voltage is owned by nxp_mcxw7x_dcdc_init(); do not
+	 * reconfigure it here so the device tree configured value is preserved.
+	 */
 
 	SPC_SetActiveModeSystemLDORegulatorConfig(MCXW7_SPC_ADDR,
 						  &active_mode_regulator.SysLDOOption);
@@ -196,6 +259,13 @@ __weak void set_spc_configuration(void)
 void nxp_mcxw7x_power_init(void)
 {
 	set_spc_configuration();
-	/* Enable LPTMR0 as wakeup source */
-	NXP_ENABLE_WAKEUP_SIGNAL(MCXW7_LPTMR0_IRQ_N);
+
+#ifdef CONFIG_SOC_SERIES_MCXW7XX_SHUTDOWN_UNUSED_RAM
+	uint32_t unused_ram_mask = mcxw7x_compute_unused_ram_mask();
+
+	if (unused_ram_mask != 0U) {
+		/* Power off unused SRAM banks in all modes to reduce leakage. */
+		CMC_PowerOffSRAMAllMode(MCXW7_CMC_ADDR, unused_ram_mask);
+	}
+#endif /* CONFIG_SOC_SERIES_MCXW7XX_SHUTDOWN_UNUSED_RAM */
 }

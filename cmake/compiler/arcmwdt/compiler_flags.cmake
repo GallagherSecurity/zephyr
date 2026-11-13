@@ -127,16 +127,17 @@ set_property(TARGET compiler-cpp PROPERTY dialect_cpp11 "-std=c++11")
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp14 "-std=c++14")
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp17 "-std=c++17")
 
-# no support of C++2a, C++20, C++2b, C++23
+# no support of C++2a, C++20, C++2b, C++23, C++26
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp2a "")
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp20 "")
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp2b "")
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp23 "")
+set_property(TARGET compiler-cpp PROPERTY dialect_cpp26 "")
 
 # Flag for disabling strict aliasing rule in C and C++
 set_compiler_property(PROPERTY no_strict_aliasing -fno-strict-aliasing)
 
-# Flags for set extra warnigs (ARCMWDT asm can't recognize --fatal-warnings. Skip it)
+# Flags for set extra warnings (ARCMWDT asm can't recognize --fatal-warnings. Skip it)
 set_property(TARGET compiler PROPERTY warnings_as_errors -Werror)
 set_property(TARGET asm PROPERTY warnings_as_errors -Werror)
 

@@ -9,6 +9,7 @@ ram: 128
 flash: 1024
 supported:
   - arduino_gpio
+  - arduino_spi
   - gpio
   - netif:eth
   - spi

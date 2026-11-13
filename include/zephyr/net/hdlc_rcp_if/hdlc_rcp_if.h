@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#ifndef ZEPHYR_INCLUDE_NET_HDLC_RCP_IF_HDLC_RCP_IF_H_
+#define ZEPHYR_INCLUDE_NET_HDLC_RCP_IF_HDLC_RCP_IF_H_
+
 /**
  * @file
  * @brief Public APIs of HDLC RCP communication Interface
@@ -59,12 +62,19 @@ struct hdlc_api {
 	/**
 	 * @brief Deinitialize the device.
 	 *
-	 * @param none
-	 *
 	 * @retval 0 The interface was successfully stopped.
 	 * @retval -EIO The interface could not be stopped.
 	 */
 	int (*deinit)(void);
+
+	/**
+	 * @brief Optional: complete the RCP interface initialization in deferred init mode.
+	 * If NULL, the interface is started automatically at init.
+	 *
+	 * @retval 0 The interface was successfully started.
+	 * @retval -EIO The interface could not be started.
+	 */
+	int (*deferred_init)(void);
 };
 
 /* Make sure that the interface API is properly setup inside
@@ -75,3 +85,5 @@ BUILD_ASSERT(offsetof(struct hdlc_api, iface_api) == 0);
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* ZEPHYR_INCLUDE_NET_HDLC_RCP_IF_HDLC_RCP_IF_H_ */

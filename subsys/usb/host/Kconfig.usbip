@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 menuconfig USBIP
-	bool "USB USBIP support"
+	bool "USB USBIP support [EXPERIMENTAL]"
 	select EXPERIMENTAL
 	select EVENTS
 	depends on NETWORKING
@@ -14,6 +14,11 @@ menuconfig USBIP
 	  Experimental USB USBIP support.
 
 if USBIP
+
+config USBIP_SERVICE_PORT
+	int "Port number for USBIP service"
+	range 1 $(UINT16_MAX)
+	default 3240
 
 config USBIP_THREAD_STACK_SIZE
 	int "USBIP thread stack size"

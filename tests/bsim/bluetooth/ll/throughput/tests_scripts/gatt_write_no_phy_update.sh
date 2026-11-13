@@ -4,7 +4,7 @@
 
 source ${ZEPHYR_BASE}/tests/bsim/sh_common.source
 
-simulation_id="ll-throughput-no-phy-update"
+simulation_id="${BOARD_TS}_ll-throughput-no-phy-update"
 verbosity_level=2
 EXECUTE_TIMEOUT=2400
 
@@ -19,6 +19,6 @@ Execute ./bs_${BOARD_TS}_tests_bsim_bluetooth_ll_throughput_prj_conf_overlay-no_
   -testid=peripheral
 
 Execute ./bs_2G4_phy_v1 -v=${verbosity_level} -s=${simulation_id} \
-  -D=2 -sim_length=1500e6 $@ -argschannel -at=40
+  -D=2 -sim_length=1500e6 -nodump $@ -argschannel -at=40
 
 wait_for_background_jobs

@@ -92,7 +92,7 @@ static int max6675_init(const struct device *dev)
 	const struct max6675_config *config = dev->config;
 
 	if (!spi_is_ready_dt(&config->spi)) {
-		LOG_ERR("SPI bus is not ready");
+		LOG_ERR_DEVICE_NOT_READY(config->spi.bus);
 		return -ENODEV;
 	}
 
@@ -103,7 +103,7 @@ static int max6675_init(const struct device *dev)
 	static struct max6675_data max6675_data_##n;			\
 	static const struct max6675_config max6675_config_##n = {	\
 		.spi = SPI_DT_SPEC_INST_GET(n,				\
-					    SPI_OP_MODE_MASTER |	\
+					    SPI_OP_MODE_CONTROLLER |	\
 					    SPI_WORD_SET(8U)),		\
 	};								\
 	SENSOR_DEVICE_DT_INST_DEFINE(n, &max6675_init, NULL,		\

@@ -6,13 +6,14 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/portability/cmsis_types.h>
+#include <zephyr/sys/check.h>
 #include <string.h>
 #include "wrapper.h"
 
 #define TIME_OUT_TICKS 10
 
-K_MEM_SLAB_DEFINE(cv2_mem_slab, sizeof(struct cmsis_rtos_mempool_cb),
-		  CONFIG_CMSIS_V2_MEM_SLAB_MAX_COUNT, 4);
+K_MEM_SLAB_DEFINE_TYPE(cv2_mem_slab, struct cmsis_rtos_mempool_cb,
+		       CONFIG_CMSIS_V2_MEM_SLAB_MAX_COUNT);
 
 static const osMemoryPoolAttr_t init_mslab_attrs = {
 	.name = "ZephyrMemPool",
@@ -47,8 +48,9 @@ osMemoryPoolId_t osMemoryPoolNew(uint32_t block_count, uint32_t block_size,
 	}
 
 	if (attr->cb_mem != NULL) {
-		__ASSERT(attr->cb_size == sizeof(struct cmsis_rtos_mempool_cb),
-			 "Invalid cb_size\n");
+		CHECKIF(attr->cb_size < sizeof(struct cmsis_rtos_mempool_cb)) {
+			return NULL;
+		}
 		mslab = (struct cmsis_rtos_mempool_cb *)attr->cb_mem;
 	} else if (k_mem_slab_alloc(&cv2_mem_slab, (void **)&mslab, K_MSEC(100)) != 0) {
 		return NULL;

@@ -6,7 +6,7 @@
 
 #define DT_DRV_COMPAT kvaser_pcican
 
-#include <zephyr/drivers/can/can_sja1000.h>
+#include "can_sja1000.h"
 
 #include <zephyr/drivers/can.h>
 #include <zephyr/drivers/pcie/pcie.h>
@@ -140,7 +140,6 @@ DEVICE_API(can, can_kvaser_pci_driver_api) = {
 	.add_rx_filter = can_sja1000_add_rx_filter,
 	.remove_rx_filter = can_sja1000_remove_rx_filter,
 	.get_state = can_sja1000_get_state,
-	.set_state_change_callback = can_sja1000_set_state_change_callback,
 	.get_core_clock = can_kvaser_pci_get_core_clock,
 	.get_max_filters = can_sja1000_get_max_filters,
 #ifdef CONFIG_CAN_MANUAL_RECOVERY_MODE
@@ -182,7 +181,7 @@ DEVICE_API(can, can_kvaser_pci_driver_api) = {
 	static void can_kvaser_pci_config_func_##inst(const struct device *dev)                    \
 	{                                                                                          \
 		IRQ_CONNECT(DT_INST_IRQN(inst), DT_INST_IRQ(inst, priority), can_sja1000_isr,      \
-			    DEVICE_DT_INST_GET(inst), DT_INST_IRQ(inst, sense));                   \
+			    DEVICE_DT_INST_GET(inst), DT_INST_IRQ(inst, flags));                   \
 		irq_enable(DT_INST_IRQN(inst));                                                    \
 	}
 

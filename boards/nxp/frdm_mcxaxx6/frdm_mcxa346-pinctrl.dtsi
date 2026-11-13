@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <nxp/mcx/MCXA346VLQ-pinctrl.h>
+#include <nxp/mcx/mcxa/pinctrl/MCXA346VLQ-pinctrl.h>
 
 &pinctrl {
 	pinmux_lpuart2: pinmux_lpuart2 {
@@ -23,6 +23,14 @@
 			drive-strength = "low";
 			slew-rate = "fast";
 			input-enable;
+		};
+	};
+
+	pinmux_dac0: pinmux_dac0 {
+		group0 {
+			pinmux = <DAC0_OUT_P2_2>;
+			drive-strength = "low";
+			slew-rate = "fast";
 		};
 	};
 
@@ -126,6 +134,15 @@
 			slew-rate = "fast";
 			drive-strength = "low";
 			input-enable;
+		};
+	};
+
+	pinmux_flexpwm0_pwm0: pinmux_flexpwm0_pwm0 {
+		group0 {
+			pinmux = <PWM0_A0_P3_0>,
+				 <PWM0_B0_P3_1>;
+			slew-rate = "fast";
+			drive-strength = "low";
 		};
 	};
 };

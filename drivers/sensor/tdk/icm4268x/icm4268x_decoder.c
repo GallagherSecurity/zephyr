@@ -232,15 +232,15 @@ static inline q31_t icm4268x_read_temperature_from_packet(const uint8_t *pkt)
 
 	/* Temperature always assumes a shift of 9 for a range of (-273,273) C */
 	if (FIELD_GET(FIFO_HEADER_20, pkt[0]) == 1) {
-		temperature = (pkt[0xd] << 8) | pkt[0xe];
+		temperature = (int16_t)((pkt[0xd] << 8) | pkt[0xe]);
 
 		icm4268x_temp_c(temperature, &whole, &fraction);
 	} else {
 		if (FIELD_GET(FIFO_HEADER_ACCEL, pkt[0]) == 1 &&
 		    FIELD_GET(FIFO_HEADER_GYRO, pkt[0]) == 1) {
-			temperature = pkt[0xd];
+			temperature = (int8_t)pkt[0xd];
 		} else {
-			temperature = pkt[0x7];
+			temperature = (int8_t)pkt[0x7];
 		}
 
 		int64_t sensitivity = 207;
@@ -251,7 +251,7 @@ static inline q31_t icm4268x_read_temperature_from_packet(const uint8_t *pkt)
 			((temperature100 - whole * sensitivity) * INT64_C(1000000)) / sensitivity;
 	}
 	__ASSERT_NO_MSG(whole >= -512 && whole <= 511);
-	return FIELD_PREP(GENMASK(31, 22), whole) | (fraction * GENMASK64(21, 0) / 1000000);
+	return (q31_t)(((int64_t)whole << 22) + (((int64_t)fraction << 22) / INT64_C(1000000)));
 }
 
 static int icm4268x_read_imu_from_packet(const uint8_t *pkt, bool is_accel, int fs,
@@ -293,7 +293,7 @@ static int icm4268x_read_imu_from_packet(const uint8_t *pkt, bool is_accel, int 
 			return -ENODATA;
 		}
 	} else {
-		signed_value = unsigned_value | (0 - (unsigned_value & BIT(16)));
+		signed_value = unsigned_value | (0 - (unsigned_value & BIT(15)));
 	}
 
 	*out = (q31_t)(signed_value * scale[is_accel][is_hires]);
@@ -369,7 +369,42 @@ static int icm4268x_fifo_decode(const uint8_t *buffer, struct sensor_chan_spec c
 		return 0;
 	}
 
-	((struct sensor_data_header *)data_out)->base_timestamp_ns = edata->header.timestamp;
+	/* Pre-count frames for the requested channel to compute first-sample timestamp */
+	uint16_t total_frames = 0;
+	const uint8_t *pre = buffer + sizeof(struct icm4268x_fifo_data);
+
+	while (pre < buffer_end) {
+		const bool is_20b = FIELD_GET(FIFO_HEADER_20, pre[0]) == 1;
+		const bool has_accel = FIELD_GET(FIFO_HEADER_ACCEL, pre[0]) == 1;
+		const bool has_gyro = FIELD_GET(FIFO_HEADER_GYRO, pre[0]) == 1;
+
+		if ((IS_ACCEL(chan_spec.chan_type) && has_accel) ||
+		    (IS_GYRO(chan_spec.chan_type) && has_gyro) ||
+		    (chan_spec.chan_type == SENSOR_CHAN_DIE_TEMP && (has_accel || has_gyro))) {
+			total_frames++;
+		}
+		if (is_20b) {
+			pre += 20;
+		} else if (has_accel && has_gyro) {
+			pre += 16;
+		} else {
+			pre += 8;
+		}
+	}
+
+	uint64_t period_ns = 0;
+
+	if (IS_ACCEL(chan_spec.chan_type) || chan_spec.chan_type == SENSOR_CHAN_DIE_TEMP) {
+		icm4268x_calc_timestamp_delta(edata->rtc_freq, SENSOR_CHAN_ACCEL_XYZ,
+					      edata->accel_odr, 1, &period_ns);
+	} else {
+		icm4268x_calc_timestamp_delta(edata->rtc_freq, SENSOR_CHAN_GYRO_XYZ,
+					      edata->gyro_odr, 1, &period_ns);
+	}
+
+	((struct sensor_data_header *)data_out)->base_timestamp_ns =
+		edata->header.timestamp -
+		(total_frames > 0 ? (total_frames - 1) : 0) * period_ns;
 
 	buffer += sizeof(struct icm4268x_fifo_data);
 	while (count < max_count && buffer < buffer_end) {
@@ -581,10 +616,22 @@ static int icm4268x_one_shot_decode(const uint8_t *buffer, struct sensor_chan_sp
 			return -EINVAL;
 		}
 
-		icm4268x_convert_raw_to_q31(
-			&cfg, chan_spec.chan_type,
-			edata->readings[icm4268x_get_channel_position(chan_spec.chan_type)],
-			&out->readings[0].value);
+		if (chan_spec.chan_type == SENSOR_CHAN_DIE_TEMP) {
+			icm4268x_convert_raw_to_q31(
+				&cfg, chan_spec.chan_type,
+				edata->readings[icm4268x_get_channel_position(chan_spec.chan_type)],
+				&out->readings[0].value);
+		} else {
+			int8_t pos = icm4268x_get_channel_position(chan_spec.chan_type);
+			int8_t base = pos >= 4 ? 4 : 1;
+			int8_t axis = pos - base;
+
+			icm4268x_convert_raw_to_q31(
+				&cfg, chan_spec.chan_type,
+				header->axis_align[axis].sign *
+					edata->readings[base + header->axis_align[axis].index],
+				&out->readings[0].value);
+		}
 		*fit = 1;
 		return 1;
 	}
@@ -605,17 +652,22 @@ static int icm4268x_one_shot_decode(const uint8_t *buffer, struct sensor_chan_sp
 			return -EINVAL;
 		}
 
+		int8_t base = icm4268x_get_channel_position(chan_spec.chan_type - 3);
+
 		icm4268x_convert_raw_to_q31(
 			&cfg, chan_spec.chan_type - 3,
-			edata->readings[icm4268x_get_channel_position(chan_spec.chan_type - 3)],
+			header->axis_align[0].sign *
+				edata->readings[base + header->axis_align[0].index],
 			&out->readings[0].x);
 		icm4268x_convert_raw_to_q31(
 			&cfg, chan_spec.chan_type - 2,
-			edata->readings[icm4268x_get_channel_position(chan_spec.chan_type - 2)],
+			header->axis_align[1].sign *
+				edata->readings[base + header->axis_align[1].index],
 			&out->readings[0].y);
 		icm4268x_convert_raw_to_q31(
 			&cfg, chan_spec.chan_type - 1,
-			edata->readings[icm4268x_get_channel_position(chan_spec.chan_type - 1)],
+			header->axis_align[2].sign *
+				edata->readings[base + header->axis_align[2].index],
 			&out->readings[0].z);
 		*fit = 1;
 		return 1;

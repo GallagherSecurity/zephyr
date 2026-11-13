@@ -13,6 +13,7 @@
 #include <zephyr/drivers/clock_control/sf32lb.h>
 #include <zephyr/irq.h>
 #include <zephyr/sys/math_extras.h>
+#include <zephyr/sys/util.h>
 
 #include <register.h>
 
@@ -23,6 +24,7 @@
 #define GPIO1_DOERX  offsetof(GPIO1_TypeDef, DOER0)
 #define GPIO1_DOESRX offsetof(GPIO1_TypeDef, DOESR0)
 #define GPIO1_DOECRX offsetof(GPIO1_TypeDef, DOECR0)
+#define GPIO1_IERX   offsetof(GPIO1_TypeDef, IER0)
 #define GPIO1_IESRX  offsetof(GPIO1_TypeDef, IESR0)
 #define GPIO1_IECRX  offsetof(GPIO1_TypeDef, IECR0)
 #define GPIO1_ISRX   offsetof(GPIO1_TypeDef, ISR0)
@@ -33,15 +35,20 @@
 #define GPIO1_IPHSRX offsetof(GPIO1_TypeDef, IPHSR0)
 #define GPIO1_IPLSRX offsetof(GPIO1_TypeDef, IPLSR0)
 
-#define PINMUX_PAD_XXYY_PE      BIT(4)
-#define PINMUX_PAD_XXYY_PS_PUP  BIT(5)
-#define PINMUX_PAD_XXYY_IE      BIT(6)
-#define PINMUX_PAD_XXYY_SR_SLOW BIT(8)
+#define PINMUX_PAD_XXYY_FSEL_MSK GENMASK(3, 0)
+#define PINMUX_PAD_XXYY_PE       BIT(4)
+#define PINMUX_PAD_XXYY_PS_PUP   BIT(5)
+#define PINMUX_PAD_XXYY_IE       BIT(6)
+#define PINMUX_PAD_XXYY_MODE_I2C BIT(8)
+#define PINMUX_PAD_XXYY_CFG_MSK                                                              \
+	(PINMUX_PAD_XXYY_FSEL_MSK | PINMUX_PAD_XXYY_PE | PINMUX_PAD_XXYY_PS_PUP |           \
+	 PINMUX_PAD_XXYY_IE)
 
 struct gpio_sf32lb_config {
 	struct gpio_driver_config common;
 	uintptr_t gpio;
 	uintptr_t pinmux;
+	uint8_t pad_base;
 };
 
 struct gpio_sf32lb_data {
@@ -59,6 +66,14 @@ BUILD_ASSERT((DT_NODE_HAS_COMPAT(DT_INST_PARENT(0), sifli_sf32lb_gpio_parent)) &
 		     (DT_NUM_INST_STATUS_OKAY(sifli_sf32lb_gpio_parent) == 1),
 	     "Only one parent instance is supported");
 
+static inline bool gpio_sf32lb_pad_has_mode_bit(const struct gpio_sf32lb_config *config,
+						gpio_pin_t pin)
+{
+	uint8_t abs_pin = config->pad_base + pin;
+
+	return (abs_pin >= 39U) && (abs_pin <= 42U);
+}
+
 static void gpio_sf32lb_irq(const void *arg)
 {
 	for (size_t c = 0U; c < ARRAY_SIZE(controllers); c++) {
@@ -66,17 +81,21 @@ static void gpio_sf32lb_irq(const void *arg)
 		struct gpio_sf32lb_data *data = controllers[c]->data;
 		uint8_t min, max;
 		uint32_t val;
+		uint32_t enabled;
 
 		min = u32_count_trailing_zeros(config->common.port_pin_mask);
 		max = 32 - u32_count_leading_zeros(config->common.port_pin_mask);
 
-		val = sys_read32(config->gpio + GPIO1_ISRX);
+		val = sys_read32(config->gpio + GPIO1_ISRX) & config->common.port_pin_mask;
+		enabled = sys_read32(config->gpio + GPIO1_IERX);
+		/* Preserve a new edge arriving while a callback is running. */
+		sys_write32(val, config->gpio + GPIO1_ISRX);
+		val &= enabled;
 		for (uint8_t i = min; i < max; i++) {
 			if ((val & BIT(i)) != 0U) {
 				gpio_fire_callbacks(&data->callbacks, controllers[c], BIT(i));
 			}
 		}
-		sys_write32(val, config->gpio + GPIO1_ISRX);
 	}
 }
 
@@ -85,6 +104,8 @@ static inline int gpio_sf32lb_configure(const struct device *port, gpio_pin_t pi
 {
 	const struct gpio_sf32lb_config *config = port->config;
 	struct gpio_sf32lb_data *data = port->data;
+	bool has_mode_bit = gpio_sf32lb_pad_has_mode_bit(config, pin);
+	uintptr_t pad = config->pinmux + (pin * 4U);
 	uint32_t val;
 
 	if ((flags & GPIO_OUTPUT) != 0U) {
@@ -103,9 +124,9 @@ static inline int gpio_sf32lb_configure(const struct device *port, gpio_pin_t pi
 
 			/* set initial state (OE) */
 			if ((flags & GPIO_OUTPUT_INIT_HIGH) != 0U) {
-				sys_write32(BIT(pin), config->gpio + GPIO1_DOESRX);
-			} else if ((flags & GPIO_OUTPUT_INIT_LOW) != 0U) {
 				sys_write32(BIT(pin), config->gpio + GPIO1_DOECRX);
+			} else if ((flags & GPIO_OUTPUT_INIT_LOW) != 0U) {
+				sys_write32(BIT(pin), config->gpio + GPIO1_DOESRX);
 			}
 		} else {
 			data->od &= ~BIT(pin);
@@ -130,7 +151,11 @@ static inline int gpio_sf32lb_configure(const struct device *port, gpio_pin_t pi
 	}
 
 	/* configure pad settings in PINMUX */
-	val = PINMUX_PAD_XXYY_SR_SLOW;
+	val = sys_read32(pad);
+	val &= ~PINMUX_PAD_XXYY_CFG_MSK;
+	if (has_mode_bit) {
+		val &= ~PINMUX_PAD_XXYY_MODE_I2C;
+	}
 
 	if ((flags & GPIO_INPUT) != 0U) {
 		val |= PINMUX_PAD_XXYY_IE;
@@ -142,7 +167,7 @@ static inline int gpio_sf32lb_configure(const struct device *port, gpio_pin_t pi
 		val |= PINMUX_PAD_XXYY_PE;
 	}
 
-	sys_write32(val, config->pinmux + (pin * 4U));
+	sys_write32(val, pad);
 
 	return 0;
 }
@@ -174,7 +199,7 @@ static int gpio_sf32lb_port_set_masked_raw(const struct device *port, gpio_port_
 	od_mask = mask & data->od;
 	if (od_mask != 0U) {
 		val = sys_read32(config->gpio + GPIO1_DOERX);
-		val = (val & ~od_mask) | (value & od_mask);
+		val = (val & ~od_mask) | (~value & od_mask);
 		sys_write32(val, config->gpio + GPIO1_DOERX);
 	}
 
@@ -191,7 +216,7 @@ static int gpio_sf32lb_port_set_bits_raw(const struct device *port, gpio_port_pi
 	sys_write32(pp_pins, config->gpio + GPIO1_DOSRX);
 
 	od_pins = pins & data->od;
-	sys_write32(od_pins, config->gpio + GPIO1_DOESRX);
+	sys_write32(od_pins, config->gpio + GPIO1_DOECRX);
 
 	return 0;
 }
@@ -206,7 +231,7 @@ static int gpio_sf32lb_port_clear_bits_raw(const struct device *port, gpio_port_
 	sys_write32(pp_pins, config->gpio + GPIO1_DOCRX);
 
 	od_pins = pins & data->od;
-	sys_write32(od_pins, config->gpio + GPIO1_DOECRX);
+	sys_write32(od_pins, config->gpio + GPIO1_DOESRX);
 
 	return 0;
 }
@@ -321,6 +346,7 @@ static int gpio_sf32lb_init(const struct device *dev)
 		.pinmux = DT_REG_ADDR_BY_IDX(DT_INST_PHANDLE(n, sifli_pinmuxs),                    \
 					     DT_INST_PHA(n, sifli_pinmuxs, port)) +                \
 			  DT_INST_PHA(n, sifli_pinmuxs, offset),                                   \
+		.pad_base = DT_INST_PHA(n, sifli_pinmuxs, offset) / 4U,                           \
 	};                                                                                         \
                                                                                                    \
 	static struct gpio_sf32lb_data gpio_sf32lb_data##n;                                        \

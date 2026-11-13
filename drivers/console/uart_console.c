@@ -105,7 +105,11 @@ static int console_out(int c)
 	 * when tranmiting chain of chars.
 	 * As errors cannot be returned, ignore the return value
 	 */
+#ifdef CONFIG_PM_DEVICE_RUNTIME_ASYNC
 	(void)pm_device_runtime_put_async(uart_console_dev, K_MSEC(1));
+#else
+	(void)pm_device_runtime_put(uart_console_dev);
+#endif
 
 	return c;
 }
@@ -439,8 +443,13 @@ static void uart_console_isr(const struct device *unused, void *user_data)
 	ARG_UNUSED(user_data);
 	static uint8_t last_char = '\0';
 
-	while (uart_irq_update(uart_console_dev) > 0 &&
-	       uart_irq_rx_ready(uart_console_dev) > 0) {
+	uart_irq_update(uart_console_dev);
+
+	if (uart_irq_rx_ready(uart_console_dev) <= 0) {
+		return;
+	}
+
+	while (true) {
 		static struct console_input *cmd;
 		uint8_t byte;
 		int rx;
@@ -448,7 +457,7 @@ static void uart_console_isr(const struct device *unused, void *user_data)
 		/* Character(s) have been received */
 
 		rx = read_uart(uart_console_dev, &byte, 1);
-		if (rx < 0) {
+		if (rx <= 0) {
 			return;
 		}
 

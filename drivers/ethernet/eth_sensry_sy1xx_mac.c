@@ -45,9 +45,12 @@ LOG_MODULE_REGISTER(sy1xx_mac, CONFIG_ETHERNET_LOG_LEVEL);
 /* Clock divider mask */
 #define SY1XX_MAC_CTRL_CLK_DIV_MASK (0x3)
 
-#define MAX_MAC_PACKET_LEN      1600
-#define MAX_TX_RETRIES          5
-#define RECEIVE_GRACE_TIME_MSEC 1
+#define MAX_MAC_PACKET_LEN         1600
+#define SY1XX_MAC_RX_TIMESTAMP_SIZE 8
+#define SY1XX_MAC_RX_STATUS_SIZE    1
+#define SY1XX_MAC_RX_METADATA_SIZE  (SY1XX_MAC_RX_TIMESTAMP_SIZE + SY1XX_MAC_RX_STATUS_SIZE)
+#define MAX_TX_RETRIES             5
+#define RECEIVE_GRACE_TIME_MSEC    1
 
 #define SY1XX_ETH_STACK_SIZE      4096
 #define SY1XX_ETH_THREAD_PRIORITY K_PRIO_PREEMPT(0)
@@ -101,9 +104,10 @@ struct sy1xx_mac_dev_data {
 };
 
 /* prototypes */
-static int sy1xx_mac_set_mac_addr(const struct device *dev);
 static int sy1xx_mac_set_promiscuous_mode(const struct device *dev, bool promiscuous_mode);
-static int sy1xx_mac_set_config(const struct device *dev, enum ethernet_config_type type,
+static int sy1xx_mac_set_config(const struct device *dev,
+				struct net_if *iface,
+				enum ethernet_config_type type,
 				const struct ethernet_config *config);
 static void sy1xx_mac_rx_thread_entry(void *p1, void *p2, void *p3);
 
@@ -143,21 +147,16 @@ static int sy1xx_mac_set_promiscuous_mode(const struct device *dev, bool promisc
 
 	/* set promiscuous mode */
 	prom = sys_read32(cfg->ctrl_addr + SY1XX_MAC_ADDRESS_HIGH_REG);
-	if (promiscuous_mode) {
-		prom &= ~BIT(16);
-	} else {
-		prom |= BIT(16);
-	}
+	WRITE_BIT(prom, 16, promiscuous_mode);
 	sys_write32(prom, cfg->ctrl_addr + SY1XX_MAC_ADDRESS_HIGH_REG);
 
 	return 0;
 }
 
-static int sy1xx_mac_set_mac_addr(const struct device *dev)
+static void sy1xx_mac_set_mac_addr(const struct device *dev)
 {
 	struct sy1xx_mac_dev_config *cfg = (struct sy1xx_mac_dev_config *)dev->config;
 	struct sy1xx_mac_dev_data *data = (struct sy1xx_mac_dev_data *)dev->data;
-	int ret;
 	uint32_t v_low, v_high;
 
 	LOG_INF("%s set link address %02x:%02x:%02x:%02x:%02x:%02x", dev->name, data->mac_addr[0],
@@ -169,21 +168,11 @@ static int sy1xx_mac_set_mac_addr(const struct device *dev)
 	sys_write32(v_low, cfg->ctrl_addr + SY1XX_MAC_ADDRESS_LOW_REG);
 
 	v_high = sys_read32(cfg->ctrl_addr + SY1XX_MAC_ADDRESS_HIGH_REG);
-	v_high |= (v_high & 0xffff0000) | sys_get_le16(&data->mac_addr[4]);
+	v_high = (v_high & 0xffff0000) | sys_get_le16(&data->mac_addr[4]);
 	sys_write32(v_high, cfg->ctrl_addr + SY1XX_MAC_ADDRESS_HIGH_REG);
-
-	/* Register Ethernet MAC Address with the upper layer */
-	ret = net_if_set_link_addr(data->iface, data->mac_addr, sizeof(data->mac_addr),
-				   NET_LINK_ETHERNET);
-	if (ret) {
-		LOG_ERR("%s failed to set link address", dev->name);
-		return ret;
-	}
-
-	return 0;
 }
 
-static int sy1xx_mac_start(const struct device *dev)
+static int sy1xx_mac_start(const struct device *dev, struct net_if *iface __unused)
 {
 	struct sy1xx_mac_dev_config *cfg = (struct sy1xx_mac_dev_config *)dev->config;
 	struct sy1xx_mac_dev_data *data = (struct sy1xx_mac_dev_data *)dev->data;
@@ -208,7 +197,7 @@ static int sy1xx_mac_start(const struct device *dev)
 	return 0;
 }
 
-static int sy1xx_mac_stop(const struct device *dev)
+static int sy1xx_mac_stop(const struct device *dev, struct net_if *iface __unused)
 {
 	struct sy1xx_mac_dev_data *data = (struct sy1xx_mac_dev_data *)dev->data;
 
@@ -270,8 +259,6 @@ static void phy_link_state_changed(const struct device *pdev, struct phy_link_st
 		data->link_is_up = is_up;
 
 		if (is_up) {
-			LOG_DBG("Link up");
-
 			/* enable mac controller */
 			en = sys_read32(cfg->ctrl_addr + SY1XX_MAC_CTRL_REG);
 			en |= BIT(SY1XX_MAC_CTRL_TX_EN_OFFS) | BIT(SY1XX_MAC_CTRL_RX_EN_OFFS);
@@ -281,8 +268,6 @@ static void phy_link_state_changed(const struct device *pdev, struct phy_link_st
 			net_eth_carrier_on(data->iface);
 
 		} else {
-			LOG_DBG("Link down");
-
 			/* disable mac controller */
 			en = sys_read32(cfg->ctrl_addr + SY1XX_MAC_CTRL_REG);
 			en &= ~(BIT(SY1XX_MAC_CTRL_TX_EN_OFFS) | BIT(SY1XX_MAC_CTRL_RX_EN_OFFS));
@@ -306,22 +291,22 @@ static void sy1xx_mac_iface_init(struct net_if *iface)
 
 	(void)net_eth_mac_load(&cfg->mcfg, data->mac_addr);
 
+	(void)net_if_set_link_addr(data->iface, data->mac_addr, sizeof(data->mac_addr),
+				   NET_LINK_ETHERNET);
+
 	ethernet_init(iface);
+
+	net_if_carrier_off(iface);
 
 	if (device_is_ready(cfg->phy_dev)) {
 		phy_link_callback_set(cfg->phy_dev, &phy_link_state_changed, (void *)dev);
 	} else {
 		LOG_ERR("PHY device not ready");
 	}
-
-	/* Do not start the interface until PHY link is up */
-	if (!(data->link_is_up)) {
-		LOG_INF("found PHY link down");
-		net_if_carrier_off(iface);
-	}
 }
 
-static enum ethernet_hw_caps sy1xx_mac_get_caps(const struct device *dev)
+static enum ethernet_hw_caps sy1xx_mac_get_caps(const struct device *dev __unused,
+						struct net_if *iface __unused)
 {
 	enum ethernet_hw_caps supported = 0;
 
@@ -333,7 +318,9 @@ static enum ethernet_hw_caps sy1xx_mac_get_caps(const struct device *dev)
 	return supported;
 }
 
-static int sy1xx_mac_set_config(const struct device *dev, enum ethernet_config_type type,
+static int sy1xx_mac_set_config(const struct device *dev,
+				struct net_if *iface __unused,
+				enum ethernet_config_type type,
 				const struct ethernet_config *config)
 {
 	struct sy1xx_mac_dev_data *data = (struct sy1xx_mac_dev_data *)dev->data;
@@ -347,7 +334,7 @@ static int sy1xx_mac_set_config(const struct device *dev, enum ethernet_config_t
 
 	case ETHERNET_CONFIG_TYPE_MAC_ADDRESS:
 		memcpy(data->mac_addr, config->mac_address.addr, sizeof(data->mac_addr));
-		ret = sy1xx_mac_set_mac_addr(dev);
+		sy1xx_mac_set_mac_addr(dev);
 		break;
 	default:
 		return -ENOTSUP;
@@ -355,7 +342,8 @@ static int sy1xx_mac_set_config(const struct device *dev, enum ethernet_config_t
 	return ret;
 }
 
-static const struct device *sy1xx_mac_get_phy(const struct device *dev)
+static const struct device *sy1xx_mac_get_phy(const struct device *dev,
+					      struct net_if *iface __unused)
 {
 	const struct sy1xx_mac_dev_config *const cfg = dev->config;
 
@@ -398,9 +386,7 @@ static int sy1xx_mac_low_level_send(const struct device *dev, uint8_t *tx, uint1
 	}
 
 	/* copy data to dma buffer */
-	for (uint32_t i = 0; i < len; i++) {
-		data->dma_buffers->tx[i] = tx[i];
-	}
+	memcpy(data->dma_buffers->tx, tx, len);
 
 	/* start dma transfer */
 	SY1XX_UDMA_START_TX(cfg->base_addr, (uint32_t)data->dma_buffers->tx, len, 0);
@@ -424,15 +410,23 @@ static int sy1xx_mac_low_level_receive(const struct device *dev, uint8_t *rx, ui
 
 	/* rx udma is ready */
 	bytes_transferred = SY1XX_UDMA_READ_REG(cfg->base_addr, SY1XX_UDMA_CFG_REG) & 0x0000ffff;
-	if (bytes_transferred) {
-		/* message received, copy data */
-		memcpy(rx, data->dma_buffers->rx, bytes_transferred);
-		*len = bytes_transferred;
-		ret = 0;
-	} else {
+	if (bytes_transferred == 0) {
 		/* no data, should never happen */
 		SY1XX_UDMA_CANCEL_RX(cfg->base_addr);
 		ret = -EINVAL;
+	} else if (bytes_transferred < SY1XX_MAC_RX_METADATA_SIZE +
+		   NET_ETH_MINIMAL_FRAME_SIZE) {
+		LOG_ERR("rx frame too short (%u bytes)", bytes_transferred);
+		ret = -EINVAL;
+	} else {
+		/*
+		 * The MAC appends its internal RTC timestamp and RX status to every
+		 * received frame. Do not pass this MAC-specific metadata to the
+		 * Ethernet stack.
+		 */
+		*len = bytes_transferred - SY1XX_MAC_RX_METADATA_SIZE;
+		memcpy(rx, data->dma_buffers->rx, *len);
+		ret = 0;
 	}
 
 	/* start new reception */
@@ -453,14 +447,12 @@ static int sy1xx_mac_send(const struct device *dev, struct net_pkt *pkt)
 	data->temp.tx_len = 0;
 	do {
 		/* copy fragment to buffer */
-		for (uint32_t i = 0; i < frag->len; i++) {
-			if (data->temp.tx_len < MAX_MAC_PACKET_LEN) {
-				data->temp.tx[data->temp.tx_len++] = frag->data[i];
-			} else {
-				LOG_ERR("tx buffer overflow");
-				return -ENOMEM;
-			}
+		if (data->temp.tx_len + frag->len > MAX_MAC_PACKET_LEN) {
+			LOG_ERR("tx buffer overflow");
+			return -ENOMEM;
 		}
+		memcpy(&data->temp.tx[data->temp.tx_len], frag->data, frag->len);
+		data->temp.tx_len += frag->len;
 
 		frag = frag->frags;
 	} while (frag);

@@ -13,8 +13,8 @@
  * implementation to handle interrupts.
  */
 
-#ifndef ZEPHYR_INCLUDE_DRIVERS_GIC_H_
-#define ZEPHYR_INCLUDE_DRIVERS_GIC_H_
+#ifndef ZEPHYR_INCLUDE_DRIVERS_INTERRUPT_CONTROLLER_GIC_H_
+#define ZEPHYR_INCLUDE_DRIVERS_INTERRUPT_CONTROLLER_GIC_H_
 
 /*
  * GIC Register Interface Base Addresses
@@ -317,7 +317,12 @@
 /* GIC special interrupt id */
 #define GIC_INTID_SPURIOUS 1023
 
-/* Fixme: update from platform specific define or dt */
+/**
+ * @brief Max number of supported CPUs in a SMP environment
+ *
+ * Fixme: update from platform specific define or dt
+ * DEPRECATED - Use CONFIG_MP_MAX_NUM_CPUS instead.
+ */
 #define GIC_NUM_CPU_IF CONFIG_MP_MAX_NUM_CPUS
 
 #ifndef _ASMLANGUAGE
@@ -383,6 +388,31 @@ void arm_gic_irq_clear_pending(unsigned int irq);
 void arm_gic_irq_set_priority(unsigned int irq, unsigned int prio, unsigned int flags);
 
 /**
+ * @brief Route an SPI/extended-SPI interrupt to a specific core
+ *
+ * Programs GICD_IROUTER for @p irq with specific-affinity routing (IRM=0)
+ * targeting the core identified by @p mpidr, analogous to pinning a thread
+ * to a CPU with k_thread_cpu_pin(). Only valid for SPIs/extended SPIs, and
+ * only takes effect once GICv3 affinity routing itself is enabled
+ * (GICD_CTLR.ARE_S/ARE_NS) - true by default on builds with
+ * CONFIG_ARMV8_A_NS or CONFIG_GIC_SINGLE_SECURITY_STATE, and on any SoC
+ * whose own EL3/Secure pre-init already enables it.
+ *
+ * Callable at any time after the interrupt is connected, from any core -
+ * unlike arm_gic_irq_enable()'s implicit self-affinity (which always
+ * targets whichever core is calling it), this can target an arbitrary
+ * core. If called after arm_gic_irq_enable(), this call's target wins.
+ *
+ * @param irq   interrupt ID (must be an SPI or extended SPI)
+ * @param mpidr target core's MPIDR affinity value. On arm64 this can come
+ *              from a specific CPU's devicetree node
+ *              (@c DT_REG_ADDR(DT_NODELABEL(cpuX))), or, for the core the
+ *              caller is currently pinned to, from
+ *              @c MPIDR_TO_CORE(GET_MPIDR())
+ */
+void arm_gic_irq_set_affinity(unsigned int irq, uint64_t mpidr);
+
+/**
  * @brief Get active interrupt ID
  *
  * @return Returns the ID of an active interrupt
@@ -415,4 +445,4 @@ void gic_raise_sgi(unsigned int sgi_id, uint64_t target_aff, uint16_t target_lis
 
 #endif /* !_ASMLANGUAGE */
 
-#endif /* ZEPHYR_INCLUDE_DRIVERS_GIC_H_ */
+#endif /* ZEPHYR_INCLUDE_DRIVERS_INTERRUPT_CONTROLLER_GIC_H_ */

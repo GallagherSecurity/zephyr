@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @file
+ * @brief Header file for the PCIe driver APIs.
+ * @ingroup pcie_interface
+ */
+
 #ifndef ZEPHYR_INCLUDE_DRIVERS_PCIE_PCIE_H_
 #define ZEPHYR_INCLUDE_DRIVERS_PCIE_PCIE_H_
 
@@ -32,7 +38,6 @@ extern "C" {
 #endif
 
 /**
- * @typedef pcie_bdf_t
  * @brief A unique PCI(e) endpoint (bus, device, function).
  *
  * A PCI(e) endpoint is uniquely identified topologically using a
@@ -43,7 +48,6 @@ extern "C" {
 typedef uint32_t pcie_bdf_t;
 
 /**
- * @typedef pcie_id_t
  * @brief A unique PCI(e) identifier (vendor ID, device ID).
  *
  * The PCIE_CONF_ID register for each endpoint is a (vendor ID, device ID)
@@ -216,6 +220,9 @@ struct pcie_scan_opt {
 
 	/** Scan flags */
 	uint32_t flags;
+
+	/** Function to call to determine if a BDF is masked */
+	bool (*scan_masking_fn)(pcie_bdf_t bdf);
 };
 
 /** Scan for PCIe devices.
@@ -424,7 +431,7 @@ extern bool pcie_connect_dynamic_irq(pcie_bdf_t bdf,
 #define PCIE_CONF_CMDSTAT_IO		0x00000001U  /* I/O access enable */
 #define PCIE_CONF_CMDSTAT_MEM		0x00000002U  /* mem access enable */
 #define PCIE_CONF_CMDSTAT_MASTER	0x00000004U  /* bus master enable */
-#define PCIE_CONF_CMDSTAT_SERR		0x00000010U  /* SERR# enable */
+#define PCIE_CONF_CMDSTAT_SERR		0x00000100U  /* SERR# enable */
 #define PCIE_CONF_CMDSTAT_INTERRUPT	0x00080000U  /* interrupt status */
 #define PCIE_CONF_CMDSTAT_CAPS		0x00100000U  /* capabilities list */
 

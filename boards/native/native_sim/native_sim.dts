@@ -5,8 +5,10 @@
  */
 
 /dts-v1/;
+#include <freq.h>
 #include <posix/posix.dtsi>
 #include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/display/panel.h>
 #include <zephyr/dt-bindings/i2c/i2c.h>
 #include <zephyr/dt-bindings/gpio/gpio.h>
 
@@ -29,8 +31,11 @@
 	};
 
 	aliases {
+		codec0 = &audio_codec;
+		dmic0 = &dmic0;
 		eeprom-0 = &eeprom0;
 		i2c-0 = &i2c0;
+		i2s-node0 = &i2s_rxtx;
 		spi-0 = &spi0;
 		led0 = &led0;
 		rtc = &rtc;
@@ -46,6 +51,7 @@
 	};
 
 	cpus {
+		timebase-frequency = <DT_FREQ_M(1)>;
 		#address-cells = <1>;
 		#size-cells = <0>;
 
@@ -58,6 +64,7 @@
 	flashcontroller0: flash-controller@0 {
 		compatible = "zephyr,sim-flash";
 		reg = <0x00000000 DT_SIZE_K(2048)>;
+		ranges;
 
 		#address-cells = <1>;
 		#size-cells = <1>;
@@ -69,33 +76,41 @@
 			erase-block-size = <4096>;
 			write-block-size = <1>;
 			reg = <0x00000000 DT_SIZE_K(2048)>;
+			ranges = <0x0 0x0 DT_SIZE_K(2048)>;
+			#address-cells = <1>;
+			#size-cells = <1>;
 
 			partitions {
-				compatible = "fixed-partitions";
+				ranges;
 				#address-cells = <1>;
 				#size-cells = <1>;
 
 				boot_partition: partition@0 {
+					compatible = "zephyr,mapped-partition";
 					label = "mcuboot";
 					reg = <0x00000000 0x0000c000>;
 				};
 
 				slot0_partition: partition@c000 {
+					compatible = "zephyr,mapped-partition";
 					label = "image-0";
 					reg = <0x0000c000 0x00069000>;
 				};
 
 				slot1_partition: partition@75000 {
+					compatible = "zephyr,mapped-partition";
 					label = "image-1";
 					reg = <0x00075000 0x00069000>;
 				};
 
 				scratch_partition: partition@de000 {
+					compatible = "zephyr,mapped-partition";
 					label = "image-scratch";
 					reg = <0x000de000 0x0001e000>;
 				};
 
 				storage_partition: partition@fc000 {
+					compatible = "zephyr,mapped-partition";
 					label = "storage";
 					reg = <0x000fc000 0x00004000>;
 				};
@@ -177,6 +192,7 @@
 	counter0: counter {
 		status = "okay";
 		compatible = "zephyr,native-sim-counter";
+		#counter-capture-cells = <2>;
 	};
 
 	gpio0: gpio_emul {
@@ -196,6 +212,7 @@
 
 	sdl_dc: sdl_dc {
 		compatible = "zephyr,sdl-dc";
+		pixel-format = <PANEL_PIXEL_FORMAT_ARGB_8888>;
 		height = <240>;
 		width = <320>;
 	};
@@ -232,6 +249,34 @@
 		status = "okay";
 	};
 
+	audio_codec: audio_codec {
+		compatible = "zephyr,dummy-codec";
+		status = "okay";
+	};
+
+	dmic0: dmic0 {
+		compatible = "zephyr,native-sim-dmic";
+		status = "okay";
+	};
+
+	i2s_rx0: i2s_rx {
+		compatible = "zephyr,native-sim-i2s";
+		status = "okay";
+		stream-direction = "rx";
+	};
+
+	i2s_rxtx: i2s_rxtx {
+		compatible = "zephyr,native-sim-i2s";
+		status = "okay";
+		stream-direction = "both";
+	};
+
+	i2s_tx0: i2s_tx {
+		compatible = "zephyr,native-sim-i2s";
+		status = "okay";
+		stream-direction = "tx";
+	};
+
 	dma: dma {
 		compatible = "zephyr,dma-emul";
 		#dma-cells = <1>;
@@ -260,6 +305,19 @@
 			compatible = "zephyr,native-sim-pstate";
 			load-threshold = <0>;
 			pstate-id = <2>;
+		};
+	};
+
+	zeth0: zeth0 {
+		compatible = "zephyr,native-tap";
+		status = "okay";
+		zephyr,random-mac-address;
+		zephyr,mac-address-prefix = [00 00 5e 00 53];
+		host-interface = "zeth";
+
+		ptp_clock: ptp_clock {
+			compatible = "zephyr,native-ptp-clock";
+			status = "okay";
 		};
 	};
 };

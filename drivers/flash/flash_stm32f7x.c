@@ -60,7 +60,7 @@ static int write_byte(const struct device *dev, off_t offset, uint8_t val)
 	barrier_dsync_fence_full();
 
 	/* write the data */
-	*((uint8_t *) offset + FLASH_STM32_BASE_ADDRESS) = val;
+	*((uint8_t *)(uintptr_t)offset + FLASH_STM32_BASE_ADDRESS) = val;
 	/* flush the register write */
 	barrier_dsync_fence_full();
 
@@ -202,10 +202,10 @@ uint8_t flash_stm32_get_rdp_level(const struct device *dev)
 	return (regs->OPTCR & FLASH_OPTCR_RDP_Msk) >> FLASH_OPTCR_RDP_Pos;
 }
 
-void flash_stm32_set_rdp_level(const struct device *dev, uint8_t level)
+int flash_stm32_set_rdp_level(const struct device *dev, uint8_t level)
 {
-	flash_stm32_option_bytes_write(dev, FLASH_OPTCR_RDP_Msk,
-				       (uint32_t)level << FLASH_OPTCR_RDP_Pos);
+	return flash_stm32_option_bytes_write(dev, FLASH_OPTCR_RDP_Msk,
+					      (uint32_t)level << FLASH_OPTCR_RDP_Pos);
 }
 #endif /* CONFIG_FLASH_STM32_READOUT_PROTECTION */
 

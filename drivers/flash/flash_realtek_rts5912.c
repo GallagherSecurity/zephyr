@@ -5,7 +5,10 @@
  */
 
 #define DT_DRV_COMPAT     realtek_rts5912_flash_controller
-#define SOC_NV_FLASH_NODE DT_INST(0, soc_nv_flash)
+
+#include "flash_priv.h"
+
+#define SOC_NV_FLASH_NODE SOC_NV_FLASH_CHILD_NODE(0)
 
 #define FLASH_PAGE_SZ      256
 #define FLASH_WRITE_BLK_SZ DT_PROP(SOC_NV_FLASH_NODE, write_block_size)
@@ -669,7 +672,7 @@ static int flash_rts5912_erase(const struct device *dev, off_t offset, size_t le
 	for (; len > 0; len -= FLASH_ERASE_BLK_SZ) {
 		ret = flash_erase_sector(dev, offset);
 		if (ret < 0) {
-			LOG_ERR("erase @0x%08lx fail", offset);
+			LOG_ERR("erase @0x%08lx fail", (long)offset);
 		}
 		offset += FLASH_ERASE_BLK_SZ;
 	}

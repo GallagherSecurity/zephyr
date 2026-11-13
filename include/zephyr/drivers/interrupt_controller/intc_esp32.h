@@ -10,6 +10,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Interrupt allocation flags - These flags can be used to specify
  * which interrupt qualities the code calling esp_intr_alloc* needs.
@@ -75,8 +79,8 @@ typedef struct intr_handle_data_t intr_handle_data_t;
 typedef intr_handle_data_t *intr_handle_t;
 
 struct shared_vector_desc_t {
-	int disabled : 1;
-	int source : 8;
+	int disabled: 1;
+	int source: 16;
 	volatile uint32_t *statusreg;
 	uint32_t statusmask;
 	intr_handler_t isr;
@@ -86,11 +90,11 @@ struct shared_vector_desc_t {
 
 /* Pack using bitfields for better memory use */
 struct vector_desc_t {
-	int flags : 16;                                 /* OR of VECDESC_FLAG_* defines */
-	unsigned int cpu : 1;
-	unsigned int intno : 5;
-	int source : 8;                                 /* Int mux flags, used when not shared */
-	struct shared_vector_desc_t *shared_vec_info;   /* used when VECDESC_FL_SHARED */
+	int flags: 16; /* OR of VECDESC_FLAG_* defines */
+	unsigned int cpu: 1;
+	unsigned int intno: 5;
+	int source: 16;                               /* Int mux flags, used when not shared */
+	struct shared_vector_desc_t *shared_vec_info; /* used when VECDESC_FL_SHARED */
 	struct vector_desc_t *next;
 };
 
@@ -308,5 +312,9 @@ void esp_intr_noniram_disable(void);
  * @brief Re-enable interrupts disabled by esp_intr_noniram_disable
  */
 void esp_intr_noniram_enable(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* ZEPHYR_INCLUDE_DRIVERS_INTERRUPT_CONTROLLER_INTC_ESP32_H_ */

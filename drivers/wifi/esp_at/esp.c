@@ -29,6 +29,7 @@ LOG_MODULE_REGISTER(wifi_esp_at, CONFIG_WIFI_LOG_LEVEL);
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/net_offload.h>
 #include <zephyr/net/wifi_mgmt.h>
+#include <zephyr/net/wifi_utils.h>
 #include <zephyr/net/conn_mgr/connectivity_wifi_mgmt.h>
 
 #include "esp.h"
@@ -407,6 +408,7 @@ MODEM_CMD_DIRECT_DEFINE(on_cmd_cwlap)
 	}
 
 	res.channel = strtol(channel, NULL, 10);
+	res.band = wifi_utils_chan_to_band(res.channel);
 
 	if (dev->scan_cb) {
 		dev->scan_cb(dev->net_iface, 0, &res);
@@ -437,7 +439,6 @@ MODEM_CMD_DIRECT_DEFINE(on_cmd_cwjap_status)
 	char *str = &cwjap_buf[sizeof("+CWJAP:") - 1];
 	char *str_end = cwjap_buf + len;
 
-	status->band = WIFI_FREQ_BAND_2_4_GHZ;
 	status->iface_mode = WIFI_MODE_INFRA;
 
 	if (flags & EDF_STA_CONNECTED) {
@@ -478,6 +479,7 @@ MODEM_CMD_DIRECT_DEFINE(on_cmd_cwjap_status)
 	}
 
 	status->channel = strtol(channel, NULL, 10);
+	status->band = wifi_utils_chan_to_band(status->channel);
 	status->rssi = strtol(rssi, NULL, 10);
 
 	return str - cwjap_buf;
@@ -1074,6 +1076,7 @@ static void esp_mgmt_iface_status_work(struct k_work *work)
 }
 
 static int esp_mgmt_iface_status(const struct device *dev,
+				 struct net_if *iface,
 				 struct wifi_iface_status *status)
 {
 	struct esp_data *data = dev->data;
@@ -1087,7 +1090,7 @@ static int esp_mgmt_iface_status(const struct device *dev,
 	status->security = WIFI_SECURITY_TYPE_UNKNOWN;
 	status->mfp = WIFI_MFP_UNKNOWN;
 
-	if (!net_if_is_carrier_ok(data->net_iface)) {
+	if (!net_if_is_carrier_ok(iface)) {
 		status->state = WIFI_STATE_INTERFACE_DISABLED;
 		return 0;
 	}
@@ -1133,6 +1136,7 @@ out:
 }
 
 static int esp_mgmt_scan(const struct device *dev,
+			 struct net_if *iface,
 			 struct wifi_scan_params *params,
 			 scan_result_cb_t cb)
 {
@@ -1144,7 +1148,7 @@ static int esp_mgmt_scan(const struct device *dev,
 		return -EINPROGRESS;
 	}
 
-	if (!net_if_is_carrier_ok(data->net_iface)) {
+	if (!net_if_is_carrier_ok(iface)) {
 		return -EIO;
 	}
 
@@ -1272,14 +1276,15 @@ static int esp_conn_cmd_escape_and_append(struct esp_data *data, size_t *off,
 }
 
 static int esp_mgmt_connect(const struct device *dev,
+			    struct net_if *iface,
 			    struct wifi_connect_req_params *params)
 {
 	struct esp_data *data = dev->data;
 	size_t off = 0;
 	int err;
 
-	if (!net_if_is_carrier_ok(data->net_iface) ||
-	    !net_if_is_admin_up(data->net_iface)) {
+	if (!net_if_is_carrier_ok(iface) ||
+	    !net_if_is_admin_up(iface)) {
 		return -EIO;
 	}
 
@@ -1323,7 +1328,7 @@ static int esp_mgmt_connect(const struct device *dev,
 	return 0;
 }
 
-static int esp_mgmt_disconnect(const struct device *dev)
+static int esp_mgmt_disconnect(const struct device *dev, struct net_if *iface __unused)
 {
 	struct esp_data *data = dev->data;
 	int ret;
@@ -1334,6 +1339,7 @@ static int esp_mgmt_disconnect(const struct device *dev)
 }
 
 static int esp_mgmt_ap_enable(const struct device *dev,
+			      struct net_if *iface,
 			      struct wifi_connect_req_params *params)
 {
 	char cmd[sizeof("AT+"_CWSAP"=\"\",\"\",xx,x") + WIFI_SSID_MAX_LEN +
@@ -1365,17 +1371,17 @@ static int esp_mgmt_ap_enable(const struct device *dev,
 
 	ret = esp_cmd_send(data, NULL, 0, cmd, ESP_CMD_TIMEOUT);
 
-	net_if_dormant_off(data->net_iface);
+	net_if_dormant_off(iface);
 
 	return ret;
 }
 
-static int esp_mgmt_ap_disable(const struct device *dev)
+static int esp_mgmt_ap_disable(const struct device *dev, struct net_if *iface)
 {
 	struct esp_data *data = dev->data;
 
 	if (!esp_flags_are_set(data, EDF_STA_CONNECTED)) {
-		net_if_dormant_on(data->net_iface);
+		net_if_dormant_on(iface);
 	}
 
 	return esp_mode_flags_clear(data, EDF_AP_ENABLED);
@@ -1622,7 +1628,7 @@ static int esp_init(const struct device *dev)
 			   K_KERNEL_STACK_SIZEOF(esp_workq_stack),
 			   K_PRIO_COOP(CONFIG_WIFI_ESP_AT_WORKQ_THREAD_PRIORITY),
 			   NULL);
-	k_thread_name_set(&data->workq.thread, "esp_workq");
+	k_thread_name_set(data->workq.thread_id, "esp_workq");
 
 	/* cmd handler */
 	const struct modem_cmd_handler_config cmd_handler_config = {

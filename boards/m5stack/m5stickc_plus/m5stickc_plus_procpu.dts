@@ -5,12 +5,13 @@
  */
 /dts-v1/;
 
-#include <espressif/esp32/esp32_pico_d4.dtsi>
+#include <espressif/esp32/esp32.dtsi>
 #include "m5stickc_plus-pinctrl.dtsi"
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/dt-bindings/regulator/axp192.h>
 #include <zephyr/dt-bindings/mipi_dbi/mipi_dbi.h>
 #include <espressif/partitions_0x1000_amp.dtsi>
+#include <zephyr/dt-bindings/display/panel.h>
 
 / {
 	model = "M5StickC Plus PROCPU";
@@ -88,7 +89,7 @@
 			vdvs = <0x20>;
 			mdac = <0x00>;
 			gamma = <0x01>;
-			colmod = <0x55>;
+			pixel-format = <PANEL_PIXEL_FORMAT_RGB_565>;
 			lcm = <0x2c>;
 			porch-param = [0c 0c 00 33 33];
 			cmd2en-param = [5a 69 02 00];
@@ -102,6 +103,11 @@
 	};
 };
 
+&flash0 {
+	reg = <0x0 DT_SIZE_M(4)>;
+	ranges = <0x0 0x0 DT_SIZE_M(4)>;
+};
+
 &uart0 {
 	status = "okay";
 	current-speed = <115200>;
@@ -110,6 +116,7 @@
 };
 
 &gpio0 {
+	gpio-reserved-ranges = <6 3>, <11 1>, <16 2>, <20 1>, <24 1>, <28 4>;
 	status = "okay";
 };
 

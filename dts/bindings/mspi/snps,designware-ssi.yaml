@@ -23,6 +23,21 @@ properties:
     description: |
       Activates auxiliary register access that is needed on some platforms.
 
+  memmap-write-support:
+    type: boolean
+    description: |
+      Set when the DW SSI core is synthesized with SSIC_XIP_WRITE_REG_EN, i.e.
+      when the XIP-write register block at core offsets 0x140/0x144/0x148
+      (xip_write_incr_inst, xip_write_wrap_inst, xip_write_ctrl) is present.
+
+  concurrent-memmap-support:
+    type: boolean
+    description: |
+      Set when the DW SSI core is synthesized with SSIC_CONCURRENT_XIP_EN,
+      i.e. when master (non-memory-mapped) transfers can be issued while the
+      memory-mapped aperture is enabled. This property will enable the XIPSER
+      register which is needed by devices with this configuration.
+
   fifo-depth:
     required: true
     type: int
@@ -64,3 +79,13 @@ properties:
       is made by the receive logic. A request to receive is generated when the number of
       valid data entries in the receive FIFO is greater than this value. Lower values mean
       more frequent DMA triggers and higher values mean larger less frequent bursts. Range: 0-15
+
+  rx-sample-delay-initial:
+    type: int
+    min: 0
+    max: 255
+    description: |
+      Initial value for the RSD field of the RX_SAMPLE_DELAY register, in clock cycles of
+      the ssi_clk. Delays when the core samples RXD relative to the reference edge of the
+      serial clock, to compensate for round trip delay on the board. It can be changed at
+      runtime with mspi_timing_config() and MSPI_DW_RX_TIMING_CFG.

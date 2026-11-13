@@ -18,6 +18,7 @@
 #include <zephyr/pm/policy.h>
 #include <sl_i2c.h>
 #include <sli_i2c.h>
+#include <sl_hal_i2c.h>
 
 #define LOG_LEVEL CONFIG_I2C_LOG_LEVEL
 LOG_MODULE_REGISTER(silabs);
@@ -421,11 +422,6 @@ static int i2c_silabs_transfer_impl(const struct device *dev, struct i2c_msg *ms
 	struct i2c_silabs_dev_data *data = dev->data;
 	int ret = -EINVAL; /* Initialize ret to a default error value */
 
-	/* Check for invalid number of messages */
-	if (!num_msgs) {
-		return -EINVAL;
-	}
-
 	/* Check and set the address mode (7-bit or 10-bit) based on */
 	/* the provided address */
 	if (addr <= 0x7F) {
@@ -504,6 +500,7 @@ static int i2c_silabs_dev_transfer_cb(const struct device *dev, struct i2c_msg *
 static int i2c_silabs_pm_action(const struct device *dev, enum pm_device_action action)
 {
 	const struct i2c_silabs_dev_config *config = dev->config;
+	I2C_TypeDef *i2c = (I2C_TypeDef *)config->peripheral->base;
 	int ret;
 
 	switch (action) {
@@ -520,8 +517,10 @@ static int i2c_silabs_pm_action(const struct device *dev, enum pm_device_action 
 			return ret;
 		}
 
+		sl_hal_i2c_enable(i2c);
 		break;
 	case PM_DEVICE_ACTION_SUSPEND:
+		sl_hal_i2c_disable(i2c);
 
 		/* Apply low-power pin configuration */
 		ret = pinctrl_apply_state(config->pcfg, PINCTRL_STATE_SLEEP);

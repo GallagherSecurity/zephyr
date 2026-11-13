@@ -15,7 +15,7 @@ LOG_MODULE_REGISTER(spi_xmc4xxx);
 #include <zephyr/drivers/dma.h>
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/spi/rtio.h>
+#include "spi_rtio.h"
 
 #include <xmc_spi.h>
 #include <xmc_usic.h>
@@ -217,8 +217,8 @@ static int spi_xmc4xxx_configure(const struct device *dev, const struct spi_conf
 		return -ENOTSUP;
 	}
 
-	if (spi_cfg->operation & SPI_OP_MODE_SLAVE) {
-		LOG_ERR("Slave mode not supported");
+	if (spi_cfg->operation & SPI_OP_MODE_PERIPHERAL) {
+		LOG_ERR("Peripheral mode not supported");
 		return -ENOTSUP;
 	}
 

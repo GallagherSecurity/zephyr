@@ -6,6 +6,7 @@ zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 zephyr_library()
 zephyr_library_sources(cpu_freq.c)
+zephyr_library_sources_ifdef(CONFIG_CPU_FREQ_THERMAL_CAP thermal_cap.c)
 
 # Policy selection
 if(CONFIG_CPU_FREQ_POLICY_NONE)
@@ -14,4 +15,5 @@ endif()
 
 zephyr_sources_ifdef(CONFIG_CPU_FREQ_POLICY_ON_DEMAND policies/on_demand/on_demand.c)
 zephyr_sources_ifdef(CONFIG_CPU_FREQ_POLICY_PRESSURE policies/pressure/pressure.c)
+zephyr_sources_ifdef(CONFIG_CPU_FREQ_POLICY_TIMING_NOISE policies/timing_noise/timing_noise.c)
 zephyr_sources_ifdef(CONFIG_CPU_FREQ_PSTATE_SET_STUB cpu_freq_stub.c)

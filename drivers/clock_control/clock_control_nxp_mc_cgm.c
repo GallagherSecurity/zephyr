@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <zephyr/drivers/clock_control/nxp_clock_controller_sources.h>
 #include <zephyr/dt-bindings/clock/nxp_mc_cgm.h>
+#include <zephyr/sys/util.h>
 #include <fsl_clock.h>
 
 #define LOG_LEVEL CONFIG_CLOCK_CONTROL_LOG_LEVEL
@@ -40,366 +41,429 @@ const clock_pcfs_config_t pcfs_config = {.maxAllowableIDDchange = NXP_PLL_MAXIDO
 					 .clkSrcFreq = NXP_PLL_CLKSRCFREQ};
 #endif
 
-static int mc_cgm_clock_control_on(const struct device *dev, clock_control_subsys_t sub_system)
-{
-	uint32_t clock_name = (uint32_t)sub_system;
+#define MC_CGM_EMAC_NODE DT_NODELABEL(emac)
 
-	switch (clock_name) {
-#if defined(CONFIG_CAN_MCUX_FLEXCAN)
-	case MCUX_FLEXCAN0_CLK:
-		CLOCK_EnableClock(kCLOCK_Flexcan0);
-		break;
-	case MCUX_FLEXCAN1_CLK:
-		CLOCK_EnableClock(kCLOCK_Flexcan1);
-		break;
-	case MCUX_FLEXCAN2_CLK:
-		CLOCK_EnableClock(kCLOCK_Flexcan2);
-		break;
-#if defined(FSL_FEATURE_SOC_FLEXCAN_COUNT) && (FSL_FEATURE_SOC_FLEXCAN_COUNT > 3U)
-	case MCUX_FLEXCAN3_CLK:
-		CLOCK_EnableClock(kCLOCK_Flexcan3);
-		break;
-#endif /* FSL_FEATURE_SOC_FLEXCAN_COUNT > 3U */
-#if defined(FSL_FEATURE_SOC_FLEXCAN_COUNT) && (FSL_FEATURE_SOC_FLEXCAN_COUNT > 4U)
-	case MCUX_FLEXCAN4_CLK:
-		CLOCK_EnableClock(kCLOCK_Flexcan4);
-		break;
-#endif /* FSL_FEATURE_SOC_FLEXCAN_COUNT > 4U */
-#if defined(FSL_FEATURE_SOC_FLEXCAN_COUNT) && (FSL_FEATURE_SOC_FLEXCAN_COUNT > 5U)
-	case MCUX_FLEXCAN5_CLK:
-		CLOCK_EnableClock(kCLOCK_Flexcan5);
-		break;
-#endif /* FSL_FEATURE_SOC_FLEXCAN_COUNT > 5U */
-#endif /* defined(CONFIG_CAN_MCUX_FLEXCAN) */
+/*
+ * The EMAC RX/TX/TS source muxes have to be attached before the MAC leaves
+ * reset, and which receive and transmit sources are correct depends on the PHY
+ * interface selected in devicetree. Only set them up on SoCs that have an EMAC
+ * and only when it is actually enabled.
+ */
+#if defined(FSL_FEATURE_CLOCK_HAS_EMAC) && (FSL_FEATURE_CLOCK_HAS_EMAC != 0U) && \
+	DT_NODE_HAS_STATUS_OKAY(MC_CGM_EMAC_NODE)
+#define MC_CGM_HAS_EMAC 1
 
-#if defined(CONFIG_UART_MCUX_LPUART)
-	case MCUX_LPUART0_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart0);
-		break;
-	case MCUX_LPUART1_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart1);
-		break;
-	case MCUX_LPUART2_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart2);
-		break;
-	case MCUX_LPUART3_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart3);
-		break;
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 4U)
-	case MCUX_LPUART4_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart4);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 4U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 5U)
-	case MCUX_LPUART5_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart5);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 5U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 6U)
-	case MCUX_LPUART6_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart6);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 6U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 7U)
-	case MCUX_LPUART7_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart7);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 7U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 8U)
-	case MCUX_LPUART8_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart8);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 8U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 9U)
-	case MCUX_LPUART9_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart9);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 9U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 10U)
-	case MCUX_LPUART10_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart10);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 10U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 11U)
-	case MCUX_LPUART11_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart11);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 11U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 12U)
-	case MCUX_LPUART12_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart12);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 12U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 13U)
-	case MCUX_LPUART13_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart13);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 13U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 14U)
-	case MCUX_LPUART14_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart14);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 14U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 15U)
-	case MCUX_LPUART15_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpuart15);
-		break;
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 15U */
-#endif /* defined(CONFIG_UART_MCUX_LPUART) */
+/*
+ * Clock rates the PHY drives into the SoC, both fixed by IEEE 802.3: RMII
+ * supplies a single 50 MHz reference, MII separate transmit and receive clocks
+ * that run at 25 MHz for 100 Mbps.
+ */
+#define MC_CGM_EMAC_RMII_REF_CLK_HZ 50000000U
+#define MC_CGM_EMAC_MII_CLK_HZ      25000000U
 
-#if defined(CONFIG_SPI_NXP_LPSPI)
-	case MCUX_LPSPI0_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpspi0);
-		break;
-	case MCUX_LPSPI1_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpspi1);
-		break;
-	case MCUX_LPSPI2_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpspi2);
-		break;
-	case MCUX_LPSPI3_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpspi3);
-		break;
-#if defined(FSL_FEATURE_SOC_LPSPI_COUNT) && (FSL_FEATURE_SOC_LPSPI_COUNT > 4U)
-	case MCUX_LPSPI4_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpspi4);
-		break;
-#endif /* FSL_FEATURE_SOC_LPSPI_COUNT > 4U */
-#if defined(FSL_FEATURE_SOC_LPSPI_COUNT) && (FSL_FEATURE_SOC_LPSPI_COUNT > 5U)
-	case MCUX_LPSPI5_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpspi5);
-		break;
-#endif /* FSL_FEATURE_SOC_LPSPI_COUNT > 5U */
-#endif /* defined(CONFIG_SPI_NXP_LPSPI) */
-
-#if defined(CONFIG_I2C_MCUX_LPI2C)
-	case MCUX_LPI2C0_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpi2c0);
-		break;
-	case MCUX_LPI2C1_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpi2c1);
-		break;
-#endif /* defined(CONFIG_I2C_MCUX_LPI2C) */
-
-#if defined(CONFIG_COUNTER_MCUX_STM)
-	case MCUX_STM0_CLK:
-		CLOCK_EnableClock(kCLOCK_Stm0);
-		break;
-#if defined(FSL_FEATURE_SOC_STM_COUNT) && (FSL_FEATURE_SOC_STM_COUNT > 1U)
-	case MCUX_STM1_CLK:
-		CLOCK_EnableClock(kCLOCK_Stm1);
-		break;
-#endif /* FSL_FEATURE_SOC_STM_COUNT > 1U */
-#endif /* defined(CONFIG_COUNTER_MCUX_STM) */
-
-#ifdef CONFIG_COUNTER_NXP_PIT
-	case MCUX_PIT0_CLK:
-		CLOCK_EnableClock(kCLOCK_Pit0Clk);
-		break;
-	case MCUX_PIT1_CLK:
-		CLOCK_EnableClock(kCLOCK_Pit1Clk);
-		break;
-	case MCUX_PIT2_CLK:
-		CLOCK_EnableClock(kCLOCK_Pit2Clk);
-		break;
+#if DT_ENUM_HAS_VALUE(MC_CGM_EMAC_NODE, phy_connection_type, rmii)
+/*
+ * The one reference clock feeds the receive and transmit domains, and the MAC
+ * clocks its MII-side logic at half the RMII rate.
+ */
+#define MC_CGM_EMAC_TXPAD_CLK_HZ MC_CGM_EMAC_RMII_REF_CLK_HZ
+#define MC_CGM_EMAC_RXPAD_CLK_HZ 0U
+#define MC_CGM_EMAC_RX_ATTACH    kEMAC_RMII_TX_CLK_to_EMAC_RX
+#define MC_CGM_EMAC_RX_SRC       CLOCK_EMAC_RMII_TX_CLK
+#define MC_CGM_EMAC_CLK_DIV      2U
+#elif DT_ENUM_HAS_VALUE(MC_CGM_EMAC_NODE, phy_connection_type, mii)
+/*
+ * The PHY drives the transmit and receive clocks on separate pads, already at
+ * the MII-side rate.
+ */
+#define MC_CGM_EMAC_TXPAD_CLK_HZ MC_CGM_EMAC_MII_CLK_HZ
+#define MC_CGM_EMAC_RXPAD_CLK_HZ MC_CGM_EMAC_MII_CLK_HZ
+#define MC_CGM_EMAC_RX_ATTACH    kEMAC_RX_CLK_to_EMAC_RX
+#define MC_CGM_EMAC_RX_SRC       CLOCK_EMAC_RX_CLK
+#define MC_CGM_EMAC_CLK_DIV      1U
+#else
+#error "Unsupported PHY connection type for the MCXE Ethernet MAC"
 #endif
 
-#if defined(CONFIG_COMPARATOR_NXP_LPCMP)
-	case MCUX_CMP0_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpcmp0);
-		break;
-#if defined(FSL_FEATURE_SOC_LPCMP_COUNT) && (FSL_FEATURE_SOC_LPCMP_COUNT > 1U)
-	case MCUX_CMP1_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpcmp1);
-		break;
-#endif /* FSL_FEATURE_SOC_LPCMP_COUNT > 1U */
-#if defined(FSL_FEATURE_SOC_LPCMP_COUNT) && (FSL_FEATURE_SOC_LPCMP_COUNT > 2U)
-	case MCUX_CMP2_CLK:
-		CLOCK_EnableClock(kCLOCK_Lpcmp2);
-		break;
-#endif /* FSL_FEATURE_SOC_LPCMP_COUNT > 2U */
-#endif /* CONFIG_COMPARATOR_NXP_HSCMP */
+/* The transmit clock always comes off the same pad, in either mode. */
+#define MC_CGM_EMAC_TX_ATTACH kEMAC_RMII_TX_CLK_to_EMAC_TX
+#define MC_CGM_EMAC_TX_SRC    CLOCK_EMAC_RMII_TX_CLK
+#endif
 
-#if defined(CONFIG_ADC_NXP_SAR_ADC)
-	case MCUX_ADC0_CLK:
-		CLOCK_EnableClock(kCLOCK_Adc0);
-		break;
-	case MCUX_ADC1_CLK:
-		CLOCK_EnableClock(kCLOCK_Adc1);
-		break;
-#if defined(FSL_FEATURE_SOC_ADC_COUNT) && (FSL_FEATURE_SOC_ADC_COUNT > 2U)
-	case MCUX_ADC2_CLK:
-		CLOCK_EnableClock(kCLOCK_Adc2);
-		break;
-#endif /* FSL_FEATURE_SOC_ADC_COUNT > 2U */
-#endif /* CONFIG_ADC_NXP_SAR_ADC */
+/*
+ * SDK defines FSL_FEATURE_SOC_<IP>_COUNT as `(N)` with parentheses, which
+ * breaks Zephyr's LISTIFY (it token-pastes LEN into a macro name and needs
+ * a bare integer). Strip the parens before passing to LISTIFY.
+ */
+#define MC_CGM_UNWRAP(...) __VA_ARGS__
+#define MC_CGM_COUNT(n)   MC_CGM_UNWRAP n
 
-#if defined(CONFIG_NXP_TEMPSENSE)
-	case MCUX_TEMPSENSE_CLK:
-		CLOCK_EnableClock(kCLOCK_TempSensor);
-		break;
-#endif /* CONFIG_NXP_TEMPSENSE */
-	case MCUX_SIRC_CLK:
-		break;
-	default:
-		return -ENOTSUP;
+/*
+ * The SDK exposes peripheral clocks via two distinct enum namespaces:
+ *   - clock_ip_name_t (kCLOCK_Lpuart0)    feeds CLOCK_EnableClock() /
+ *                                         CLOCK_DisableClock() — the gate
+ *                                         path used by _on()/_off().
+ *   - clock_name_t   (kCLOCK_Lpuart0Clk)  feeds CLOCK_GetFreq() — the
+ *                                         clock-tree query used by
+ *                                         _get_rate().
+ * Keep two parallel tables so each entry carries the right typed enum,
+ * and let _on()/_off() share the gate table.
+ *
+ * `dt` is the DT-binding prefix (uppercase, e.g. LPUART -> MCUX_LPUART0_CLK);
+ * `sdk` is the SDK enum prefix (CamelCase, e.g. Lpuart -> kCLOCK_Lpuart0).
+ * LISTIFY iterates 0..(N-1) where N is FSL_FEATURE_SOC_<IP>_COUNT, so
+ * undefined SDK identifiers on derivative SoCs are never referenced.
+ */
+struct mc_cgm_gate_entry {
+	uint32_t subsys;
+	clock_ip_name_t sdk_enum;
+};
+
+struct mc_cgm_rate_entry {
+	uint32_t subsys;
+	clock_name_t sdk_enum;
+};
+
+#define MC_CGM_GATE_ENTRY(i, dt, sdk) \
+	{ MCUX_##dt##i##_CLK, kCLOCK_##sdk##i }
+
+#define MC_CGM_RATE_ENTRY(i, dt, sdk) \
+	{ MCUX_##dt##i##_CLK, kCLOCK_##sdk##i##Clk }
+
+static const struct mc_cgm_gate_entry mc_cgm_gate_map[] = {
+#if defined(CONFIG_CAN_MCUX_FLEXCAN) && defined(FSL_FEATURE_SOC_FLEXCAN_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_FLEXCAN_COUNT),
+		MC_CGM_GATE_ENTRY, (,), FLEXCAN, Flexcan),
+#endif
+#if defined(CONFIG_UART_MCUX_LPUART) && defined(FSL_FEATURE_SOC_LPUART_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_LPUART_COUNT),
+		MC_CGM_GATE_ENTRY, (,), LPUART, Lpuart),
+#endif
+#if defined(CONFIG_SPI_NXP_LPSPI) && defined(FSL_FEATURE_SOC_LPSPI_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_LPSPI_COUNT),
+		MC_CGM_GATE_ENTRY, (,), LPSPI, Lpspi),
+#endif
+#if defined(CONFIG_I2C_MCUX_LPI2C) && defined(FSL_FEATURE_SOC_LPI2C_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_LPI2C_COUNT),
+		MC_CGM_GATE_ENTRY, (,), LPI2C, Lpi2c),
+#endif
+#if (defined(CONFIG_COUNTER_MCUX_STM) || defined(CONFIG_MCUX_STM_TIMER)) && \
+	defined(FSL_FEATURE_SOC_STM_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_STM_COUNT),
+		MC_CGM_GATE_ENTRY, (,), STM, Stm),
+#endif
+#if defined(CONFIG_COUNTER_NXP_PIT) && defined(FSL_FEATURE_SOC_PIT_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_PIT_COUNT),
+		MC_CGM_GATE_ENTRY, (,), PIT, Pit),
+#endif
+#if defined(CONFIG_COMPARATOR_NXP_LPCMP) && defined(FSL_FEATURE_SOC_LPCMP_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_LPCMP_COUNT),
+		MC_CGM_GATE_ENTRY, (,), CMP, Lpcmp),
+#endif
+#if defined(CONFIG_ADC_NXP_SAR_ADC) && defined(FSL_FEATURE_SOC_ADC_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_ADC_COUNT),
+		MC_CGM_GATE_ENTRY, (,), ADC, Adc),
+#endif
+#if defined(CONFIG_PWM_NXP_EMIOS) && defined(FSL_FEATURE_SOC_EMIOS_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_EMIOS_COUNT),
+		MC_CGM_GATE_ENTRY, (,), EMIOS, Emios),
+#endif
+#if defined(CONFIG_I2S_MCUX_SAI) && defined(FSL_FEATURE_SOC_I2S_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_I2S_COUNT),
+		MC_CGM_GATE_ENTRY, (,), SAI, Sai),
+#endif
+#if defined(MC_CGM_HAS_EMAC)
+	{ MCUX_EMAC_CLK, kCLOCK_Emac },
+#endif
+#if defined(CONFIG_MSPI_NXP_QSPI)
+	{ MCUX_QSPISF_CLK, kCLOCK_Qspi },
+#endif
+};
+
+/*
+ * LPCMP: SDK naming is inconsistent between the two namespaces —
+ * clock_ip_name_t uses "Lpcmp" (kCLOCK_Lpcmp0), but clock_name_t
+ * drops the "Lp" (kCLOCK_Cmp0Clk). Pass "Cmp" as the SDK prefix
+ * here so CLOCK_GetFreq receives the right identifier.
+ *
+ * EMIOS: SDK provides per-instance clock gates (kCLOCK_Emios0/1/2)
+ * but only a single shared clock query enum (kCLOCK_EmiosClk), so
+ * EMIOS cannot use LISTIFY here. Frequency queries are handled via
+ * switch-case in mc_cgm_get_subsys_rate() instead.
+ */
+static const struct mc_cgm_rate_entry mc_cgm_rate_map[] = {
+#if defined(CONFIG_CAN_MCUX_FLEXCAN) && defined(FSL_FEATURE_SOC_FLEXCAN_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_FLEXCAN_COUNT),
+		MC_CGM_RATE_ENTRY, (,), FLEXCAN, Flexcan),
+#endif
+#if defined(CONFIG_UART_MCUX_LPUART) && defined(FSL_FEATURE_SOC_LPUART_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_LPUART_COUNT),
+		MC_CGM_RATE_ENTRY, (,), LPUART, Lpuart),
+#endif
+#if defined(CONFIG_SPI_NXP_LPSPI) && defined(FSL_FEATURE_SOC_LPSPI_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_LPSPI_COUNT),
+		MC_CGM_RATE_ENTRY, (,), LPSPI, Lpspi),
+#endif
+#if defined(CONFIG_I2C_MCUX_LPI2C) && defined(FSL_FEATURE_SOC_LPI2C_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_LPI2C_COUNT),
+		MC_CGM_RATE_ENTRY, (,), LPI2C, Lpi2c),
+#endif
+#if (defined(CONFIG_COUNTER_MCUX_STM) || defined(CONFIG_MCUX_STM_TIMER)) && \
+	defined(FSL_FEATURE_SOC_STM_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_STM_COUNT),
+		MC_CGM_RATE_ENTRY, (,), STM, Stm),
+#endif
+#if defined(CONFIG_COUNTER_NXP_PIT) && defined(FSL_FEATURE_SOC_PIT_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_PIT_COUNT),
+		MC_CGM_RATE_ENTRY, (,), PIT, Pit),
+#endif
+#if defined(CONFIG_COMPARATOR_NXP_LPCMP) && defined(FSL_FEATURE_SOC_LPCMP_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_LPCMP_COUNT),
+		MC_CGM_RATE_ENTRY, (,), CMP, Cmp),
+#endif
+#if defined(CONFIG_ADC_NXP_SAR_ADC) && defined(FSL_FEATURE_SOC_ADC_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_ADC_COUNT),
+		MC_CGM_RATE_ENTRY, (,), ADC, Adc),
+#endif
+#if defined(CONFIG_I2S_MCUX_SAI) && defined(FSL_FEATURE_SOC_I2S_COUNT)
+	LISTIFY(MC_CGM_COUNT(FSL_FEATURE_SOC_I2S_COUNT),
+		MC_CGM_RATE_ENTRY, (,), SAI, Sai),
+#endif
+#if defined(CONFIG_MSPI_NXP_QSPI)
+	{ MCUX_QSPISF_CLK, kCLOCK_QspiSfClk },
+#endif
+};
+
+static const struct mc_cgm_gate_entry *mc_cgm_lookup_gate(uint32_t subsys)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(mc_cgm_gate_map); i++) {
+		if (mc_cgm_gate_map[i].subsys == subsys) {
+			return &mc_cgm_gate_map[i];
+		}
+	}
+
+	return NULL;
+}
+
+static const struct mc_cgm_rate_entry *mc_cgm_lookup_rate(uint32_t subsys)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(mc_cgm_rate_map); i++) {
+		if (mc_cgm_rate_map[i].subsys == subsys) {
+			return &mc_cgm_rate_map[i];
+		}
+	}
+
+	return NULL;
+}
+
+#if defined(MC_CGM_HAS_EMAC)
+/*
+ * SELSTAT sits in the same bits of every mux status register, so one mask
+ * covers all three. Assert it rather than leaving it to chance.
+ */
+#define MC_CGM_EMAC_SELSTAT_MASK MC_CGM_MUX_7_CSS_SELSTAT_MASK
+BUILD_ASSERT(MC_CGM_MUX_8_CSS_SELSTAT_MASK == MC_CGM_EMAC_SELSTAT_MASK);
+BUILD_ASSERT(MC_CGM_MUX_9_CSS_SELSTAT_MASK == MC_CGM_EMAC_SELSTAT_MASK);
+
+/*
+ * The receive and transmit domains are derived from clocks the PHY drives into
+ * the SoC, so these must run only once the pads are muxed: the glitchless
+ * MC_CGM mux refuses to switch to a source that is not toggling and silently
+ * leaves the domain on FIRC, which is close enough to keep framing packets but
+ * far enough off to corrupt every one of them. CLOCK_AttachClk() reports
+ * success either way, so check the status register.
+ */
+struct mc_cgm_emac_clk {
+	volatile const uint32_t *css;
+	uint32_t src;
+	uint32_t div;
+	clock_attach_id_t attach;
+	clock_div_name_t div_name;
+};
+
+static const struct mc_cgm_emac_clk mc_cgm_emac_rx_clk = {
+	.attach = MC_CGM_EMAC_RX_ATTACH,
+	.div_name = kCLOCK_DivEmacRxClk,
+	.div = MC_CGM_EMAC_CLK_DIV,
+	.css = &MC_CGM->MUX_7_CSS,
+	.src = MC_CGM_EMAC_RX_SRC,
+};
+
+static const struct mc_cgm_emac_clk mc_cgm_emac_tx_clk = {
+	.attach = MC_CGM_EMAC_TX_ATTACH,
+	.div_name = kCLOCK_DivEmacTxClk,
+	.div = MC_CGM_EMAC_CLK_DIV,
+	.css = &MC_CGM->MUX_8_CSS,
+	.src = MC_CGM_EMAC_TX_SRC,
+};
+
+/*
+ * The timestamp unit runs from PLL_PHI0 instead: it is locked to the crystal,
+ * keeps running regardless of the PHY and the link speed, and undivided gives
+ * the finest time resolution. Self-test of the EMAC timestamp memory also
+ * needs this clock at 1.5 times AIPS_SLOW_CLK or more, which the PHY clocks
+ * cannot provide.
+ */
+static const struct mc_cgm_emac_clk mc_cgm_emac_ts_clk = {
+	.attach = kPLL_PHI0_CLK_to_EMAC_TS,
+	.div_name = kCLOCK_DivEmacTsClk,
+	.div = 1U,
+	.css = &MC_CGM->MUX_9_CSS,
+	.src = CLOCK_PLL_PHI0_CLK,
+};
+
+static int mc_cgm_emac_attach(const struct mc_cgm_emac_clk *clk)
+{
+	/* Tell the SDK what the PHY drives into the pads; software state only. */
+	CLOCK_SetEmacRmiiTxClkFreq(MC_CGM_EMAC_TXPAD_CLK_HZ);
+	if (MC_CGM_EMAC_RXPAD_CLK_HZ != 0U) {
+		CLOCK_SetEmacRxClkFreq(MC_CGM_EMAC_RXPAD_CLK_HZ);
+	}
+
+	if (CLOCK_AttachClk(clk->attach) != kStatus_Success) {
+		return -EIO;
+	}
+
+	if (FIELD_GET(MC_CGM_EMAC_SELSTAT_MASK, *clk->css) != clk->src) {
+		LOG_ERR("EMAC clock did not switch to source %u; "
+			"is the pin muxed and is the PHY driving it?", clk->src);
+		return -EIO;
+	}
+
+	if (CLOCK_SetClkDiv(clk->div_name, clk->div) != kStatus_Success) {
+		return -EIO;
 	}
 
 	return 0;
 }
+#endif /* defined(MC_CGM_HAS_EMAC) */
+
+static int mc_cgm_clock_control_on(const struct device *dev, clock_control_subsys_t sub_system)
+{
+	uint32_t clock_name = (uint32_t)sub_system;
+	const struct mc_cgm_gate_entry *entry = mc_cgm_lookup_gate(clock_name);
+
+	if (entry != NULL) {
+		CLOCK_EnableClock(entry->sdk_enum);
+		return 0;
+	}
+
+	switch (clock_name) {
+#if defined(CONFIG_MCUX_FLEXIO)
+	case MCUX_FLEXIO_CLK:
+		CLOCK_EnableClock(kCLOCK_Flexio);
+		return 0;
+#endif
+#if defined(CONFIG_NXP_TEMPSENSE)
+	case MCUX_TEMPSENSE_CLK:
+		CLOCK_EnableClock(kCLOCK_TempSensor);
+		return 0;
+#endif
+#if defined(MC_CGM_HAS_EMAC)
+	case MCUX_EMACRX_CLK:
+		return mc_cgm_emac_attach(&mc_cgm_emac_rx_clk);
+	case MCUX_EMACTX_CLK:
+		return mc_cgm_emac_attach(&mc_cgm_emac_tx_clk);
+	case MCUX_EMACTS_CLK:
+		return mc_cgm_emac_attach(&mc_cgm_emac_ts_clk);
+#endif
+	case MCUX_SIRC_CLK:
+		return 0;
+	default:
+		return -ENOTSUP;
+	}
+}
 
 static int mc_cgm_clock_control_off(const struct device *dev, clock_control_subsys_t sub_system)
 {
-	return 0;
+	uint32_t clock_name = (uint32_t)sub_system;
+	const struct mc_cgm_gate_entry *entry = mc_cgm_lookup_gate(clock_name);
+
+	if (entry != NULL) {
+		CLOCK_DisableClock(entry->sdk_enum);
+		return 0;
+	}
+
+	switch (clock_name) {
+#if defined(CONFIG_MCUX_FLEXIO)
+	case MCUX_FLEXIO_CLK:
+		CLOCK_DisableClock(kCLOCK_Flexio);
+		return 0;
+#endif
+#if defined(CONFIG_NXP_TEMPSENSE)
+	case MCUX_TEMPSENSE_CLK:
+		CLOCK_DisableClock(kCLOCK_TempSensor);
+		return 0;
+#endif
+#if defined(MC_CGM_HAS_EMAC)
+	case MCUX_EMACRX_CLK:
+	case MCUX_EMACTX_CLK:
+	case MCUX_EMACTS_CLK:
+		return 0;
+#endif
+	case MCUX_SIRC_CLK:
+		return 0;
+	default:
+		return -ENOTSUP;
+	}
 }
 
 static int mc_cgm_get_subsys_rate(const struct device *dev, clock_control_subsys_t sub_system,
 				  uint32_t *rate)
 {
 	uint32_t clock_name = (uint32_t)sub_system;
+	const struct mc_cgm_rate_entry *entry = mc_cgm_lookup_rate(clock_name);
+
+	if (entry != NULL) {
+		*rate = CLOCK_GetFreq(entry->sdk_enum);
+		return 0;
+	}
 
 	switch (clock_name) {
 	case MCUX_SIRC_CLK:
 		*rate = CLOCK_SIRC_CLK_FREQ;
-		break;
-#if defined(CONFIG_UART_MCUX_LPUART)
-	case MCUX_LPUART0_CLK:
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 8U)
-	case MCUX_LPUART8_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 8U */
-		*rate = CLOCK_GetAipsPlatClkFreq();
-		break;
-	case MCUX_LPUART1_CLK:
-	case MCUX_LPUART2_CLK:
-	case MCUX_LPUART3_CLK:
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 4U)
-	case MCUX_LPUART4_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 4U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 5U)
-	case MCUX_LPUART5_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 5U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 6U)
-	case MCUX_LPUART6_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 6U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 7U)
-	case MCUX_LPUART7_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 7U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 9U)
-	case MCUX_LPUART9_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 9U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 10U)
-	case MCUX_LPUART10_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 10U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 11U)
-	case MCUX_LPUART11_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 11U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 12U)
-	case MCUX_LPUART12_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 12U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 13U)
-	case MCUX_LPUART13_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 13U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 14U)
-	case MCUX_LPUART14_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 14U */
-#if defined(FSL_FEATURE_SOC_LPUART_COUNT) && (FSL_FEATURE_SOC_LPUART_COUNT > 15U)
-	case MCUX_LPUART15_CLK:
-#endif /* FSL_FEATURE_SOC_LPUART_COUNT > 15U */
-		*rate = CLOCK_GetAipsSlowClkFreq();
-		break;
-#endif /* defined(CONFIG_UART_MCUX_LPUART) */
-
-#if defined(CONFIG_SPI_NXP_LPSPI)
-	case MCUX_LPSPI0_CLK:
-		*rate = CLOCK_GetAipsPlatClkFreq();
-		break;
-	case MCUX_LPSPI1_CLK:
-	case MCUX_LPSPI2_CLK:
-	case MCUX_LPSPI3_CLK:
-#if defined(FSL_FEATURE_SOC_LPSPI_COUNT) && (FSL_FEATURE_SOC_LPSPI_COUNT > 4U)
-	case MCUX_LPSPI4_CLK:
-#endif /* FSL_FEATURE_SOC_LPSPI_COUNT > 4U */
-#if defined(FSL_FEATURE_SOC_LPSPI_COUNT) && (FSL_FEATURE_SOC_LPSPI_COUNT > 5U)
-	case MCUX_LPSPI5_CLK:
-#endif /* FSL_FEATURE_SOC_LPSPI_COUNT > 5U */
-		*rate = CLOCK_GetAipsSlowClkFreq();
-		break;
-#endif /* defined(CONFIG_SPI_NXP_LPSPI) */
-
-#if defined(CONFIG_I2C_MCUX_LPI2C)
-	case MCUX_LPI2C0_CLK:
-	case MCUX_LPI2C1_CLK:
-		*rate = CLOCK_GetAipsSlowClkFreq();
-		break;
-#endif /* defined(CONFIG_I2C_MCUX_LPI2C) */
-
-#if defined(CONFIG_CAN_MCUX_FLEXCAN)
-	case MCUX_FLEXCAN0_CLK:
-		*rate = CLOCK_GetFlexcanPeClkFreq(0);
-		break;
-	case MCUX_FLEXCAN1_CLK:
-		*rate = CLOCK_GetFlexcanPeClkFreq(1);
-		break;
-	case MCUX_FLEXCAN2_CLK:
-		*rate = CLOCK_GetFlexcanPeClkFreq(2);
-		break;
-#if defined(FSL_FEATURE_SOC_FLEXCAN_COUNT) && (FSL_FEATURE_SOC_FLEXCAN_COUNT > 3U)
-	case MCUX_FLEXCAN3_CLK:
-		*rate = CLOCK_GetFlexcanPeClkFreq(3);
-		break;
-#endif /* FSL_FEATURE_SOC_FLEXCAN_COUNT > 3U */
-#if defined(FSL_FEATURE_SOC_FLEXCAN_COUNT) && (FSL_FEATURE_SOC_FLEXCAN_COUNT > 4U)
-	case MCUX_FLEXCAN4_CLK:
-		*rate = CLOCK_GetFlexcanPeClkFreq(4);
-		break;
-#endif /* FSL_FEATURE_SOC_FLEXCAN_COUNT > 4U */
-#if defined(FSL_FEATURE_SOC_FLEXCAN_COUNT) && (FSL_FEATURE_SOC_FLEXCAN_COUNT > 5U)
-	case MCUX_FLEXCAN5_CLK:
-		*rate = CLOCK_GetFlexcanPeClkFreq(5);
-		break;
-#endif /* FSL_FEATURE_SOC_FLEXCAN_COUNT > 5U */
-#endif /* defined(CONFIG_CAN_MCUX_FLEXCAN) */
-
-#if defined(CONFIG_COUNTER_MCUX_STM)
-	case MCUX_STM0_CLK:
-		*rate = CLOCK_GetStmClkFreq(0);
-		break;
-#if defined(FSL_FEATURE_SOC_STM_COUNT) && (FSL_FEATURE_SOC_STM_COUNT > 1U)
-	case MCUX_STM1_CLK:
-		*rate = CLOCK_GetStmClkFreq(1);
-		break;
-#endif /* FSL_FEATURE_SOC_STM_COUNT > 1U */
-#endif /* defined(CONFIG_COUNTER_MCUX_STM) */
-
-#if defined(CONFIG_ADC_NXP_SAR_ADC)
-	case MCUX_ADC0_CLK:
-	case MCUX_ADC1_CLK:
-#if defined(FSL_FEATURE_SOC_ADC_COUNT) && (FSL_FEATURE_SOC_ADC_COUNT > 2U)
-	case MCUX_ADC2_CLK:
-#endif /* FSL_FEATURE_SOC_ADC_COUNT > 2U */
-		*rate = CLOCK_GetCoreClkFreq();
-		break;
-
-#endif /* CONFIG_ADC_NXP_SAR_ADC */
-
-#if defined(CONFIG_COUNTER_NXP_PIT)
-	case MCUX_PIT0_CLK:
-	case MCUX_PIT1_CLK:
-	case MCUX_PIT2_CLK:
-		*rate = CLOCK_GetAipsSlowClkFreq();
-		break;
-#endif /* defined(CONFIG_COUNTER_NXP_PIT) */
+		return 0;
+	case MCUX_FIRC_CLK:
+		*rate = CLOCK_GetFircClkFreq();
+		return 0;
+	case MCUX_FXOSC_CLK:
+		*rate = CLOCK_GetFxoscFreq();
+		return 0;
+	case MCUX_CORESYS_CLK:
 #if defined(CONFIG_MCUX_FLEXIO)
 	case MCUX_FLEXIO_CLK:
+#endif
+#if defined(CONFIG_PWM_NXP_EMIOS)
+	case MCUX_EMIOS0_CLK:
+	case MCUX_EMIOS1_CLK:
+	case MCUX_EMIOS2_CLK:
+#endif
 		*rate = CLOCK_GetCoreClkFreq();
-		break;
-#endif /* defined(CONFIG_MCUX_FLEXIO) */
-
+		return 0;
+	case MCUX_AIPSPLAT_CLK:
+#if defined(MC_CGM_HAS_EMAC)
+	/* The EMAC CSR (register) interface is clocked from AIPS_PLAT_CLK. */
+	case MCUX_EMAC_CLK:
+#endif
+		*rate = CLOCK_GetAipsPlatClkFreq();
+		return 0;
+#if defined(MC_CGM_HAS_EMAC)
+	case MCUX_EMACRX_CLK:
+		*rate = CLOCK_GetEmacRxClkFreq();
+		return 0;
+	case MCUX_EMACTX_CLK:
+		*rate = CLOCK_GetEmacTxClkFreq();
+		return 0;
+	case MCUX_EMACTS_CLK:
+		*rate = CLOCK_GetEmacTsClkFreq();
+		return 0;
+#endif
+	case MCUX_HSE_CLK:
+		*rate = CLOCK_GetHseClkFreq();
+		return 0;
 	default:
 		return -ENOTSUP;
 	}
-
-	return 0;
 }
 
 static int mc_cgm_init(const struct device *dev)
@@ -458,14 +522,21 @@ static int mc_cgm_init(const struct device *dev)
 #endif
 	CLOCK_CommonTriggerClkMux0DivUpdate();
 	CLOCK_ProgressiveClockFrequencySwitch(kPLL_PHI0_CLK_to_MUX0, &pcfs_config);
-#if defined(CONFIG_COUNTER_MCUX_STM)
+
+	/*
+	 * TODO(ZEP-5899): The peripheral clock source attachments below (STM,
+	 * FlexCAN) are hardcoded. A follow-up change will move them to
+	 * devicetree so customers can override clock sources from board
+	 * overlays without modifying the driver.
+	 */
+#if defined(CONFIG_COUNTER_MCUX_STM) || defined(CONFIG_MCUX_STM_TIMER)
 	CLOCK_SetClkDiv(kCLOCK_DivStm0Clk, NXP_PLL_MUX_1_DC_0_DIV);
 	CLOCK_AttachClk(kAIPS_PLAT_CLK_to_STM0);
 #if defined(FSL_FEATURE_SOC_STM_COUNT) && (FSL_FEATURE_SOC_STM_COUNT == 2U)
 	CLOCK_SetClkDiv(kCLOCK_DivStm1Clk, NXP_PLL_MUX_2_DC_0_DIV);
 	CLOCK_AttachClk(kAIPS_PLAT_CLK_to_STM1);
 #endif /* FSL_FEATURE_SOC_STM_COUNT == 2U */
-#endif /* defined(CONFIG_COUNTER_MCUX_STM) */
+#endif /* defined(CONFIG_COUNTER_MCUX_STM) || defined(CONFIG_MCUX_STM_TIMER) */
 #endif
 #if defined(CONFIG_CAN_MCUX_FLEXCAN)
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(flexcan_0)) || \
@@ -481,6 +552,11 @@ static int mc_cgm_init(const struct device *dev)
 		CLOCK_SetClkDiv(kCLOCK_DivFlexcan345PeClk, 1U);
 #endif
 #endif /* defined(CONFIG_CAN_MCUX_FLEXCAN) */
+
+#if DT_HAS_COMPAT_STATUS_OKAY(nxp_qspi)
+	CLOCK_SetClkDiv(kCLOCK_DivQspiSfckClk, NXP_PLL_MUX_10_DC_0_DIV);
+	CLOCK_AttachClk(kPLL_PHI1_CLK_to_QSPI_SFCK);
+#endif
 
 	/* Set SystemCoreClock variable. */
 	SystemCoreClockUpdate();

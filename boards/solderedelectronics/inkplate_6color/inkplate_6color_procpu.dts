@@ -5,10 +5,11 @@
  */
 /dts-v1/;
 
-#include <espressif/esp32/esp32_wrover_e_n4r8.dtsi>
+#include <espressif/esp32/esp32.dtsi>
 #include "inkplate_6color-pinctrl.dtsi"
 #include <espressif/partitions_0x1000_amp.dtsi>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/display/panel.h>
 
 / {
 	model = "Inkplate 6Color PROCPU";
@@ -54,7 +55,7 @@
 	vbatt: vbatt0 {
 		status = "okay";
 		compatible = "voltage-divider";
-		io-channels = <&adc1 7>;
+		io-channels = <&adc0 7>;
 		output-ohms = <100000>;
 		full-ohms = <(100000 + 100000)>;
 		power-gpios = <&pcal6416a 9 GPIO_ACTIVE_HIGH>;
@@ -62,7 +63,16 @@
 	};
 };
 
-&adc1 {
+&flash0 {
+	reg = <0x0 DT_SIZE_M(4)>;
+	ranges = <0x0 0x0 DT_SIZE_M(4)>;
+};
+
+&psram0 {
+	size = <DT_SIZE_M(8)>;
+};
+
+&adc0 {
 	status = "okay";
 
 	#address-cells = <1>;
@@ -198,15 +208,28 @@
 			width = <600>;
 			height = <448>;
 			busy-gpios = <&gpio1 0 GPIO_ACTIVE_HIGH>;  /* GPIO32 */
+
+			color-palette {
+				compatible = "zephyr,panel-color-palette";
+				colors = <ARGB8888(52, 50, 67, 255)     /* black   #343243 */
+					  ARGB8888(172, 172, 171, 255)  /* white   #ACACAB */
+					  ARGB8888(50, 104, 74, 255)    /* green   #32684A */
+					  ARGB8888(61, 67, 100, 255)    /* blue    #3D4364 */
+					  ARGB8888(139, 65, 70, 255)    /* red     #8B4146 */
+					  ARGB8888(173, 156, 65, 255)   /* yellow  #AD9C41 */
+					  ARGB8888(157, 92, 71, 255)    /* orange  #9D5C47 */>;
+			};
 		};
 	};
 };
 
 &gpio0 {
+	gpio-reserved-ranges = <6 6>, <16 2>, <20 1>, <24 1>, <28 4>;
 	status = "okay";
 };
 
 &gpio1 {
+	gpio-reserved-ranges = <5 2>;
 	status = "okay";
 };
 

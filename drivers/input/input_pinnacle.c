@@ -883,7 +883,8 @@ static int pinnacle_init(const struct device *dev)
 		.seq_read = pinnacle_seq_read_i2c,                                                 \
 	}
 
-#define PINNACLE_SPI_OP (SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB | SPI_MODE_CPHA | SPI_WORD_SET(8))
+#define PINNACLE_SPI_OP                                                                            \
+	(SPI_OP_MODE_CONTROLLER | SPI_TRANSFER_MSB | SPI_MODE_CPHA | SPI_WORD_SET(8))
 #define PINNACLE_CONFIG_BUS_SPI(inst)                                                              \
 	.bus = {                                                                                   \
 		.spi = SPI_DT_SPEC_INST_GET(inst, PINNACLE_SPI_OP),                                \
@@ -925,12 +926,6 @@ static int pinnacle_init(const struct device *dev)
 		     "active-range-x-min must be less than active-range-x-max");                   \
 	BUILD_ASSERT(DT_INST_PROP(inst, active_range_y_min) <                                      \
 			     DT_INST_PROP(inst, active_range_y_max),                               \
-		     "active_range-y-min must be less than active_range-y-max");                   \
-	BUILD_ASSERT(DT_INST_PROP(inst, scaling_x_resolution) > 0,                                 \
-		     "scaling-x-resolution must be positive");                                     \
-	BUILD_ASSERT(DT_INST_PROP(inst, scaling_y_resolution) > 0,                                 \
-		     "scaling-y-resolution must be positive");                                     \
-	BUILD_ASSERT(IN_RANGE(DT_INST_PROP(inst, idle_packets_count), 0, UINT8_MAX),               \
-		     "idle-packets-count must be in range [0:255]");
+		     "active_range-y-min must be less than active_range-y-max");
 
 DT_INST_FOREACH_STATUS_OKAY(PINNACLE_DEFINE)

@@ -5,11 +5,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef ZEPHYR_INCLUDE_ARCH_AARCH32_ARM_MMU_H_
-#define ZEPHYR_INCLUDE_ARCH_AARCH32_ARM_MMU_H_
+#ifndef ZEPHYR_INCLUDE_ARCH_ARM_MMU_ARM_MMU_H_
+#define ZEPHYR_INCLUDE_ARCH_ARM_MMU_ARM_MMU_H_
 
 #ifndef _ASMLANGUAGE
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -140,8 +141,8 @@ struct arm_mmu_config {
  */
 extern const struct arm_mmu_config mmu_config;
 
-int z_arm_mmu_init(void);
+int z_arm_mmu_init(bool is_primary_core);
 
 #endif /* _ASMLANGUAGE */
 
-#endif /* ZEPHYR_INCLUDE_ARCH_AARCH32_ARM_MMU_H_ */
+#endif /* ZEPHYR_INCLUDE_ARCH_ARM_MMU_ARM_MMU_H_ */

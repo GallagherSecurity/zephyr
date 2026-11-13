@@ -40,6 +40,8 @@ LOG_MODULE_REGISTER(flexspi_hyperflash, CONFIG_FLASH_LOG_LEVEL);
 
 #define HYPERFLASH_ERASE_VALUE                  (0xFF)
 
+#include "flash_priv.h"
+
 /* Hyper flash support SDR and DDR, from the FlexSPI controller point of view,
  * if DDR enabled, commands in LUT need to be DDR command and root clock is
  * double of Serial clock (clock output to flash).
@@ -400,7 +402,7 @@ static int flash_flexspi_hyperflash_page_program(const struct flash_flexspi_hype
 		.dataSize = len,
 	};
 
-	LOG_DBG("Page programming %d bytes to 0x%08lx", len, offset);
+	LOG_DBG("Page programming %d bytes to 0x%08lx", len, (unsigned long)offset);
 
 	return memc_flexspi_transfer(&data->controller, &transfer);
 }
@@ -568,7 +570,7 @@ static int flash_flexspi_hyperflash_erase(const struct device *dev, off_t offset
 			break;
 		}
 
-		LOG_DBG("Erasing sector at 0x%08lx", offset);
+		LOG_DBG("Erasing sector at 0x%08lx", (unsigned long)offset);
 
 		transfer.deviceAddress = offset;
 		transfer.port = data->port;
@@ -721,7 +723,9 @@ static DEVICE_API(flash, flash_flexspi_hyperflash_api) = {
 			.pages_size = SPI_HYPERFLASH_SECTOR_SIZE,	\
 		},))							\
 		.flash_parameters = {					\
-			.write_block_size = DT_INST_PROP(n, write_block_size), \
+			.write_block_size = DT_PROP(			\
+				SOC_NV_FLASH_CHILD_NODE(n),\
+				write_block_size),		\
 			.erase_value = HYPERFLASH_ERASE_VALUE,		\
 		},							\
 	};								\

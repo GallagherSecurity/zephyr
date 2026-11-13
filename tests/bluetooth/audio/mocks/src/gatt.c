@@ -22,9 +22,12 @@
 #include <zephyr/sys/iterable_sections.h>
 #include <zephyr/sys/slist.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/toolchain.h>
 #include <zephyr/types.h>
 #include <zephyr/ztest_test.h>
 #include <zephyr/ztest_assert.h>
+
+#include "host/att_internal.h"
 
 #include "gatt.h"
 #include "conn.h"
@@ -50,6 +53,12 @@ static sys_slist_t db;
 ssize_t bt_gatt_attr_read_service(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
 				  uint16_t len, uint16_t offset)
 {
+	ARG_UNUSED(conn);
+	ARG_UNUSED(attr);
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	ARG_UNUSED(offset);
+
 	zassert_unreachable("Unexpected call to '%s()' occurred", __func__);
 	return 0;
 }
@@ -57,6 +66,12 @@ ssize_t bt_gatt_attr_read_service(struct bt_conn *conn, const struct bt_gatt_att
 ssize_t bt_gatt_attr_read_chrc(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
 			       uint16_t len, uint16_t offset)
 {
+	ARG_UNUSED(conn);
+	ARG_UNUSED(attr);
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	ARG_UNUSED(offset);
+
 	zassert_unreachable("Unexpected call to '%s()' occurred", __func__);
 	return 0;
 }
@@ -64,6 +79,12 @@ ssize_t bt_gatt_attr_read_chrc(struct bt_conn *conn, const struct bt_gatt_attr *
 ssize_t bt_gatt_attr_read_ccc(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf,
 			      uint16_t len, uint16_t offset)
 {
+	ARG_UNUSED(conn);
+	ARG_UNUSED(attr);
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	ARG_UNUSED(offset);
+
 	zassert_unreachable("Unexpected call to '%s()' occurred", __func__);
 	return 0;
 }
@@ -71,6 +92,13 @@ ssize_t bt_gatt_attr_read_ccc(struct bt_conn *conn, const struct bt_gatt_attr *a
 ssize_t bt_gatt_attr_write_ccc(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			       const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
+	ARG_UNUSED(conn);
+	ARG_UNUSED(attr);
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	ARG_UNUSED(offset);
+	ARG_UNUSED(flags);
+
 	zassert_unreachable("Unexpected call to '%s()' occurred", __func__);
 	return 0;
 }
@@ -86,7 +114,7 @@ static void notify_params_deep_copy_destroy(struct bt_gatt_notify_params *params
 {
 	struct bt_gatt_notify_params *copy;
 
-	for (unsigned int i = 0; i < mock_bt_gatt_notify_cb_fake.call_count; i++) {
+	for (unsigned int i = 0U; i < mock_bt_gatt_notify_cb_fake.call_count; i++) {
 		copy = mock_bt_gatt_notify_cb_fake.arg1_history[i];
 		if (copy != params) {
 			continue;
@@ -109,7 +137,7 @@ static void notify_params_deep_copy_destroy_all(void)
 {
 	struct bt_gatt_notify_params *copy;
 
-	for (unsigned int i = 0; i < mock_bt_gatt_notify_cb_fake.call_count; i++) {
+	for (unsigned int i = 0U; i < mock_bt_gatt_notify_cb_fake.call_count; i++) {
 		copy = mock_bt_gatt_notify_cb_fake.arg1_history[i];
 		if (copy == NULL) {
 			continue;
@@ -262,7 +290,7 @@ static void foreach_attr_type_dyndb(uint16_t start_handle, uint16_t end_handle,
 			}
 		}
 
-		for (i = 0; i < svc->attr_count; i++) {
+		for (i = 0U; i < svc->attr_count; i++) {
 			struct bt_gatt_attr *attr = &svc->attrs[i];
 
 			if (gatt_foreach_iter(attr, attr->handle, start_handle, end_handle, uuid,
@@ -289,7 +317,7 @@ void bt_gatt_foreach_attr_type(uint16_t start_handle, uint16_t end_handle,
 	}
 
 	if (start_handle <= last_static_handle) {
-		uint16_t handle = 1;
+		uint16_t handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
 
 		STRUCT_SECTION_FOREACH(bt_gatt_service_static, static_svc) {
 			/* Skip ahead if start is not within service handles */
@@ -298,7 +326,7 @@ void bt_gatt_foreach_attr_type(uint16_t start_handle, uint16_t end_handle,
 				continue;
 			}
 
-			for (i = 0; i < static_svc->attr_count; i++, handle++) {
+			for (i = 0U; i < static_svc->attr_count; i++, handle++) {
 				if (gatt_foreach_iter(&static_svc->attrs[i],
 						      handle, start_handle,
 						      end_handle, uuid,
@@ -332,6 +360,8 @@ static uint8_t found_attr(const struct bt_gatt_attr *attr, uint16_t handle, void
 {
 	const struct bt_gatt_attr **found = user_data;
 
+	ARG_UNUSED(handle);
+
 	*found = attr;
 
 	return BT_GATT_ITER_STOP;
@@ -352,7 +382,7 @@ static void gatt_insert(struct bt_gatt_service *svc, uint16_t last_handle)
 {
 	struct bt_gatt_service *tmp, *prev = NULL;
 
-	if (last_handle == 0 || svc->attrs[0].handle > last_handle) {
+	if (last_handle == 0U || svc->attrs[0].handle > last_handle) {
 		sys_slist_append(&db, &svc->node);
 		return;
 	}
@@ -382,7 +412,7 @@ static int gatt_register(struct bt_gatt_service *svc)
 
 	if (sys_slist_is_empty(&db)) {
 		handle = last_static_handle;
-		last_handle = 0;
+		last_handle = 0U;
 		goto populate;
 	}
 
@@ -455,7 +485,7 @@ int bt_gatt_service_unregister(struct bt_gatt_service *svc)
 	__ASSERT(svc, "invalid parameters\n");
 
 	err = gatt_unregister(svc);
-	if (err) {
+	if (err != 0) {
 		return err;
 	}
 
@@ -468,6 +498,8 @@ ssize_t bt_gatt_attr_read(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 			  const void *value, uint16_t value_len)
 {
 	uint16_t len;
+
+	ARG_UNUSED(conn);
 
 	if (offset > value_len) {
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
@@ -541,7 +573,29 @@ int bt_gatt_discover(struct bt_conn *conn, struct bt_gatt_discover_params *param
 
 uint16_t bt_gatt_get_mtu(struct bt_conn *conn)
 {
+	ARG_UNUSED(conn);
+
 	return 64;
+}
+
+int bt_att_get_max_notify_size(struct bt_conn *conn, enum bt_att_chan_opt chan_opt)
+{
+	/* Opcode (1 octet) + attribute handle (2 octets) */
+	const uint16_t att_ntf_hdr_size = sizeof(struct bt_att_hdr) + sizeof(struct bt_att_notify);
+	uint16_t mtu;
+
+	ARG_UNUSED(chan_opt);
+
+	if (conn == NULL) {
+		return -EINVAL;
+	}
+
+	mtu = bt_gatt_get_mtu(conn);
+	if (mtu > att_ntf_hdr_size) {
+		return mtu - att_ntf_hdr_size;
+	}
+
+	return 0;
 }
 
 bool bt_gatt_is_subscribed(struct bt_conn *conn,
@@ -552,7 +606,7 @@ bool bt_gatt_is_subscribed(struct bt_conn *conn,
 
 uint16_t bt_gatt_attr_get_handle(const struct bt_gatt_attr *attr)
 {
-	uint16_t handle = 1;
+	uint16_t handle = BT_ATT_FIRST_ATTRIBUTE_HANDLE;
 
 	if (!attr) {
 		return 0;
@@ -565,12 +619,12 @@ uint16_t bt_gatt_attr_get_handle(const struct bt_gatt_attr *attr)
 	STRUCT_SECTION_FOREACH(bt_gatt_service_static, static_svc) {
 		/* Skip ahead if start is not within service attributes array */
 		if ((attr < &static_svc->attrs[0]) ||
-		    (attr > &static_svc->attrs[static_svc->attr_count - 1])) {
+		    (attr > &static_svc->attrs[static_svc->attr_count - 1U])) {
 			handle += static_svc->attr_count;
 			continue;
 		}
 
-		for (size_t i = 0; i < static_svc->attr_count; i++, handle++) {
+		for (size_t i = 0U; i < static_svc->attr_count; i++, handle++) {
 			if (attr == &static_svc->attrs[i]) {
 				return handle;
 			}
@@ -583,6 +637,8 @@ uint16_t bt_gatt_attr_get_handle(const struct bt_gatt_attr *attr)
 static uint8_t find_next(const struct bt_gatt_attr *attr, uint16_t handle, void *user_data)
 {
 	struct bt_gatt_attr **next = user_data;
+
+	ARG_UNUSED(handle);
 
 	*next = (struct bt_gatt_attr *)attr;
 

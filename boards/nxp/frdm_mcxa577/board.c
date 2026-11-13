@@ -8,6 +8,10 @@
 #include <fsl_clock.h>
 #include <fsl_spc.h>
 #include <soc.h>
+#if defined(CONFIG_UDC_NXP_EHCI)
+#define SCG_TRIM_UNLOCK_KEY     0x5a5a0001U
+#define BOARD_XTAL_FREQ_HZ      24000000U
+#endif
 
 /* Core clock frequency: 200MHz from PLL */
 #define CLOCK_INIT_CORE_CLOCK 200000000U
@@ -236,6 +240,19 @@ void board_early_init_hook(void)
 #endif
 #endif
 
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(i3c0))
+	CLOCK_AttachClk(kFRO_LF_DIV_to_I3C0FCLK);
+	CLOCK_SetClockDiv(kCLOCK_DivI3C0_FCLK, 1U);
+	RESET_ReleasePeripheralReset(kI3C0_RST_SHIFT_RSTn);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(lpcmp0))
+	CLOCK_AttachClk(kFRO_LF_DIV_to_CMP0);
+	CLOCK_SetClockDiv(kCLOCK_DivCMP0_FUNC, 1U);
+	CLOCK_EnableClock(kCLOCK_GateCMP0);
+	SPC_EnableActiveModeAnalogModules(SPC0, (kSPC_controlCmp0 | kSPC_controlCmp0Dac));
+#endif
+
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(ctimer0))
 	CLOCK_SetClockDiv(kCLOCK_DivCTIMER0, 1u);
 	CLOCK_AttachClk(kPll1ClkDiv_to_CTIMER0);
@@ -261,6 +278,10 @@ void board_early_init_hook(void)
 	CLOCK_AttachClk(kPll1ClkDiv_to_CTIMER4);
 #endif
 
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(os_timer))
+	CLOCK_AttachClk(kCLK_1M_to_OSTIMER);
+#endif
+
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(lptmr0))
 
 /*
@@ -278,6 +299,11 @@ void board_early_init_hook(void)
 	CLOCK_SetClockDiv(kCLOCK_DivLPTMR0, 1u);
 #endif /* DT_PROP(DT_NODELABEL(lptmr0), clk_source) */
 
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(espi0))
+	CLOCK_SetClockDiv(kCLOCK_DivESPI0, 1u);
+	CLOCK_AttachClk(kFRO_HF_to_ESPI);
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(edma0))
@@ -309,6 +335,12 @@ void board_early_init_hook(void)
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(enet))
 	CLOCK_AttachClk(kNONE_to_ENETRMII);
 	CLOCK_EnableClock(kCLOCK_GateENET0);
+#if defined(CONFIG_PTP_CLOCK_DWC_MAC)
+	/* Attach PLL1 (200 MHz) to the ENET QoS PTP reference clock. */
+	CLOCK_AttachClk(kPll1Clk_to_ENETPTPREF);
+	CLOCK_SetClockDiv(kCLOCK_DivE1588, 1u);
+	CLOCK_EnableClock(kCLOCK_GateE1588);
+#endif
 	RESET_PeripheralReset(kENET0_RST_SHIFT_RSTn);
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(t1s))
 	/* TENBASET_PHY needs 100 MHz clock */
@@ -322,6 +354,74 @@ void board_early_init_hook(void)
 	/* Connect ENET to external PHY over RMII */
 	SYSCON->ENET_CTRL = SYSCON_ENET_CTRL_PHY_SEL(0) | SYSCON_ENET_CTRL_PHY_INTF(1);
 #endif
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(flexcan0))
+	/* FRO_HF (192 MHz) / 3 = 64 MHz: allows exact 75% SP at 8 Mbps (8 TQ) */
+	CLOCK_SetClockDiv(kCLOCK_DivFLEXCAN0, 3U);
+	CLOCK_AttachClk(kFRO_HF_to_FLEXCAN0);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(flexspi))
+	/* FRO_HF (192 MHz) / 4 = 48 MHz FlexSPI root clock */
+	CLOCK_SetClockDiv(kCLOCK_DivFLEXSPI0, 4U);
+	CLOCK_AttachClk(kFRO_HF_to_FLEXSPI);
+	CLOCK_EnableClock(kCLOCK_GateFLEXSPI0);
+	RESET_ReleasePeripheralReset(kFLEXSPI0_RST_SHIFT_RSTn);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(flexio0))
+	CLOCK_SetClockDiv(kCLOCK_DivFLEXIO0, 1u);
+	CLOCK_AttachClk(kFRO_HF_to_FLEXIO0);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(ewm0))
+	RESET_ReleasePeripheralReset(kEWM0_RST_SHIFT_RSTn);
+	CLOCK_SetupFRO16KClocking(kCLKE_16K_SYSTEM | kCLKE_16K_COREMAIN | kCLKE_16K_VBAT);
+	CLOCK_EnableClock(kCLOCK_GateEWM0);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(dac0))
+	SPC_EnableActiveModeAnalogModules(SPC0, kSPC_controlDac0);
+	CLOCK_AttachClk(kFRO_LF_DIV_to_DAC0);
+	CLOCK_SetClockDiv(kCLOCK_DivDAC0, 1u);
+	CLOCK_EnableClock(kCLOCK_GateDAC0);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(rtc))
+	/* RTC uses the OSC32K (32.768 kHz) as its clock source */
+	CLOCK_SetupOsc32KClocking(kCLOCK_Osc32kToAll);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(tsi0))
+	CLOCK_SetupFRO16KClocking(kCLKE_16K_SYSTEM | kCLKE_16K_COREMAIN | kCLKE_16K_VBAT);
+	CLOCK_SetupOsc32KClocking(kCLOCK_Osc32kToAll);
+	CLOCK_AttachClk(kFRO_HF_DIV_to_TSI0);
+	CLOCK_SetClockDiv(kCLOCK_DivTSI0, 4);
+	CLOCK_EnableClock(kCLOCK_GateTSI0);
+#endif
+
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(usb0)) && defined(CONFIG_UDC_NXP_EHCI)
+	/* Voltage delay for USB LDO ramp-up */
+	SPC0->ACTIVE_VDELAY = 0x0500;
+	SPC0->ACTIVE_CFG |= SPC_ACTIVE_CFG_CORELDO_VDD_DS_MASK;
+	SPC0->ACTIVE_CFG |= SPC_ACTIVE_CFG_CORELDO_VDD_LVL(0x3);
+	while (SPC0->SC & SPC_SC_BUSY_MASK) {
+	};
+	/* Unlock SCG trim registers and enable LDO for USB PHY */
+	if (0u == (SCG0->LDOCSR & SCG_LDOCSR_LDOEN_MASK)) {
+		SCG0->TRIM_LOCK = SCG_TRIM_UNLOCK_KEY;
+		SCG0->LDOCSR |= SCG_LDOCSR_LDOEN_MASK;
+		while (0U == (SCG0->LDOCSR & SCG_LDOCSR_VOUT_OK_MASK)) {
+		};
+	}
+	CLOCK_AttachClk(kPHY_CLK_XTAL_to_USBHS);
+	CLOCK_AttachClk(kCLK_IN_to_USBHS_PHY);
+	CLOCK_EnableClock(kCLOCK_GateUSBHS);
+	CLOCK_EnableClock(kCLOCK_GateUSBHS_PHY);
+	CLOCK_SetClockDiv(kCLOCK_DivUSBHS_PHY, 1);
+	CLOCK_EnableUsbhsPhyPllClock(BOARD_XTAL_FREQ_HZ);
+	CLOCK_EnableUsbhsClock();
 #endif
 
 	/* Set SystemCoreClock variable. */

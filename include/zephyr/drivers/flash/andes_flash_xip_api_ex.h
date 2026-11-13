@@ -10,8 +10,8 @@
  * @ingroup andes_flash_xip_ex_op
  */
 
-#ifndef __ZEPHYR_INCLUDE_DRIVERS_ANDES_FLASH_XIP_API_EX_H__
-#define __ZEPHYR_INCLUDE_DRIVERS_ANDES_FLASH_XIP_API_EX_H__
+#ifndef ZEPHYR_INCLUDE_DRIVERS_FLASH_ANDES_FLASH_XIP_API_EX_H_
+#define ZEPHYR_INCLUDE_DRIVERS_FLASH_ANDES_FLASH_XIP_API_EX_H_
 
 /**
  * @brief Extended operations for Andes QSPI-NOR XIP flash.
@@ -118,6 +118,8 @@ struct andes_xip_ex_ops_set_in {
 	uint8_t regs[3];
 	/** Mask of status registers to change. */
 	uint8_t masks[3];
+	/** Use the volatile write. */
+	bool volatile_write;
 };
 
 /**
@@ -152,4 +154,4 @@ struct andes_xip_ex_ops_mem_read_cmd_in {
  * @}
  */
 
-#endif /* __ZEPHYR_INCLUDE_DRIVERS_ANDES_FLASH_XIP_API_EX_H__ */
+#endif /* ZEPHYR_INCLUDE_DRIVERS_FLASH_ANDES_FLASH_XIP_API_EX_H_ */

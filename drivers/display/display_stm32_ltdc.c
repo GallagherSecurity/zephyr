@@ -58,8 +58,23 @@ LOG_MODULE_REGISTER(display_stm32_ltdc, CONFIG_DISPLAY_LOG_LEVEL);
 #error "Invalid LTDC pixel format chosen"
 #endif
 
+/* The YUV to RGB converter is described by the HAL of the series that carry it */
+#if defined(LTDC_YUV2RGBCONVERTOR_BT601_REDUCED_RANGE)
+#define STM32_LTDC_HAS_YUV 1
+#endif
+
 #define STM32_LTDC_INIT_PIXEL_SIZE	DISPLAY_BITS_PER_PIXEL(DISPLAY_INIT_PIXEL_FORMAT) \
 					/ BITS_PER_BYTE
+
+struct stm32_ltdc_cb_data {
+	const struct device *dev;
+	display_event_cb_t cb_fn;
+	void *user_data;
+	uint32_t event_mask;
+	bool in_isr;
+	uint32_t out_reg_handle;
+	uint32_t user_line_number;
+};
 
 struct display_stm32_ltdc_data {
 	LTDC_HandleTypeDef hltdc;
@@ -70,6 +85,8 @@ struct display_stm32_ltdc_data {
 	const uint8_t *pend_buf;
 	const uint8_t *front_buf;
 	struct k_sem sem;
+	struct k_sem cb_sem;
+	struct stm32_ltdc_cb_data cb;
 };
 
 struct display_stm32_ltdc_config {
@@ -88,20 +105,133 @@ struct display_stm32_ltdc_config {
 static void stm32_ltdc_global_isr(const struct device *dev)
 {
 	struct display_stm32_ltdc_data *data = dev->data;
+	uint32_t current_line_number = data->hltdc.Instance->CPSR & 0xFFFF;
+	bool event_handled = false;
 
-	if (__HAL_LTDC_GET_FLAG(&data->hltdc, LTDC_FLAG_LI) &&
+	struct display_event_data event_data = {
+		.timestamp = k_cycle_get_64(),
+		.info.line = current_line_number,
+	};
+
+	if (!__HAL_LTDC_GET_FLAG(&data->hltdc, LTDC_FLAG_LI) &&
 	    __HAL_LTDC_GET_IT_SOURCE(&data->hltdc, LTDC_IT_LI)) {
-		if (data->front_buf != data->pend_buf) {
-			data->front_buf = data->pend_buf;
+		return;
+	}
 
-			LTDC_LAYER(&data->hltdc, LTDC_LAYER_1)->CFBAR = (uint32_t)data->front_buf;
-			__HAL_LTDC_RELOAD_IMMEDIATE_CONFIG(&data->hltdc);
+	if (current_line_number == 0) {
+		/* VSync event occurs at the beginning of the frame, line number = 0 */
 
-			k_sem_give(&data->sem);
+		/* Set next interrupt in case the user has programmed a line event */
+		HAL_LTDC_ProgramLineEvent(&data->hltdc, data->cb.user_line_number);
+
+		k_sem_take(&data->cb_sem, K_NO_WAIT);
+
+		if ((data->cb.dev != NULL) &&
+			(data->cb.event_mask & DISPLAY_EVENT_VSYNC)) {
+			event_handled = data->cb.cb_fn(data->cb.dev,
+				DISPLAY_EVENT_VSYNC, &event_data, data->cb.user_data);
+		}
+
+		k_sem_give(&data->cb_sem);
+
+		if (!event_handled) {
+			if (data->front_buf != data->pend_buf) {
+				data->front_buf = data->pend_buf;
+
+				LTDC_LAYER(&data->hltdc, LTDC_LAYER_1)->CFBAR =
+					(uint32_t)data->front_buf;
+
+				__HAL_LTDC_RELOAD_IMMEDIATE_CONFIG(&data->hltdc);
+
+				k_sem_give(&data->sem);
+			}
 		}
 
 		__HAL_LTDC_CLEAR_FLAG(&data->hltdc, LTDC_FLAG_LI);
+		return;
 	}
+
+	k_sem_take(&data->cb_sem, K_NO_WAIT);
+
+	if ((data->cb.dev != NULL) &&
+		(data->cb.event_mask & DISPLAY_EVENT_LINE_INT)) {
+		/*
+		 * There is no need to check event_handled return value
+		 * It is only intended for VSYNC
+		 */
+		data->cb.cb_fn(data->cb.dev, DISPLAY_EVENT_LINE_INT, &event_data,
+			data->cb.user_data);
+
+		/* Check if the user configured a new line event in the cb: */
+		uint32_t current_int_line = data->hltdc.Instance->LIPCR;
+
+		if (current_int_line != current_line_number) {
+			data->cb.user_line_number = current_int_line;
+			/*
+			 * Check if the new line number has been passed or not.
+			 * If it has been passed, it should be called after VSYNC
+			 */
+			if (current_int_line > current_line_number) {
+				HAL_LTDC_ProgramLineEvent(&data->hltdc, current_int_line);
+			} else {
+				HAL_LTDC_ProgramLineEvent(&data->hltdc, 0);
+			}
+		}
+	}
+
+	k_sem_give(&data->cb_sem);
+
+	__HAL_LTDC_CLEAR_FLAG(&data->hltdc, LTDC_FLAG_LI);
+}
+
+/*
+ * The controller converts to RGB during scanout, which costs the processor
+ * nothing. Only the packed 4:2:2 order is offered: erratum ES0620, section
+ * 2.7.1, says the planar YUV420 modes do not work.
+ */
+static int stm32_ltdc_set_yuv(const struct device *dev)
+{
+#if defined(STM32_LTDC_HAS_YUV)
+	struct display_stm32_ltdc_data *data = dev->data;
+	LTDC_LayerFlexYUVCoPlanarTypeDef cfg = {0};
+	const struct display_stm32_ltdc_config *config = dev->config;
+
+	/* An odd width would split a pair of pixels across two lines */
+	if ((config->width % 2U) != 0U) {
+		return -EINVAL;
+	}
+
+	cfg.Layer.WindowX0 = data->hltdc.LayerCfg[0].WindowX0;
+	cfg.Layer.WindowX1 = data->hltdc.LayerCfg[0].WindowX1;
+	cfg.Layer.WindowY0 = data->hltdc.LayerCfg[0].WindowY0;
+	cfg.Layer.WindowY1 = data->hltdc.LayerCfg[0].WindowY1;
+	cfg.Layer.Alpha = data->hltdc.LayerCfg[0].Alpha;
+	cfg.Layer.Alpha0 = data->hltdc.LayerCfg[0].Alpha0;
+	cfg.Layer.BlendingFactor1 = data->hltdc.LayerCfg[0].BlendingFactor1;
+	cfg.Layer.BlendingFactor2 = data->hltdc.LayerCfg[0].BlendingFactor2;
+	cfg.Layer.ImageWidth = config->width;
+	cfg.Layer.ImageHeight = config->height;
+	cfg.FlexYUV.YUVOrder = LTDC_YUV_ORDER_LUMINANCE_FIRST;
+	cfg.FlexYUV.LuminanceOrder = LTDC_YUV_LUMINANCE_ORDER_EVEN_FIRST;
+	cfg.FlexYUV.ChrominanceOrder = LTDC_YUV_CHROMIANCE_ORDER_U_FIRST;
+	cfg.FlexYUV.LuminanceRescale = LTDC_YUV_LUMINANCE_RESCALE_ENABLE;
+	cfg.YUVAddress = (uint32_t)data->front_buf;
+	cfg.ColorConverter = LTDC_YUV2RGBCONVERTOR_BT601_REDUCED_RANGE;
+
+	/* The layer cannot be reconfigured while the controller is scanning */
+	__HAL_LTDC_DISABLE(&data->hltdc);
+	if (HAL_LTDC_ConfigLayerFlexYUVCoPlanar(&data->hltdc, &cfg, LTDC_LAYER_1) != HAL_OK) {
+		__HAL_LTDC_ENABLE(&data->hltdc);
+		return -EIO;
+	}
+	__HAL_LTDC_ENABLE(&data->hltdc);
+
+	return 0;
+#else
+	ARG_UNUSED(dev);
+
+	return -ENOTSUP;
+#endif /* STM32_LTDC_HAS_YUV */
 }
 
 static int stm32_ltdc_set_pixel_format(const struct device *dev,
@@ -110,6 +240,20 @@ static int stm32_ltdc_set_pixel_format(const struct device *dev,
 	struct display_stm32_ltdc_data *data = dev->data;
 	HAL_StatusTypeDef hal_ret;
 	uint32_t ltdc_pix_fmt;
+
+	if (IS_ENABLED(STM32_LTDC_HAS_YUV) && format == PIXEL_FORMAT_YUYV) {
+		int ret = stm32_ltdc_set_yuv(dev);
+
+		if (ret != 0) {
+			return ret;
+		}
+
+		data->current_pixel_format = format;
+		data->current_pixel_size =
+			DISPLAY_BITS_PER_PIXEL(format) / BITS_PER_BYTE;
+
+		return 0;
+	}
 
 	if (format == PIXEL_FORMAT_RGB_565) {
 		ltdc_pix_fmt = LTDC_PIXEL_FORMAT_RGB565;
@@ -150,19 +294,19 @@ static void stm32_ltdc_get_capabilities(const struct device *dev,
 {
 	struct display_stm32_ltdc_data *data = dev->data;
 
-	memset(capabilities, 0, sizeof(struct display_capabilities));
-
 	capabilities->x_resolution = data->hltdc.LayerCfg[0].WindowX1 -
 				     data->hltdc.LayerCfg[0].WindowX0;
 	capabilities->y_resolution = data->hltdc.LayerCfg[0].WindowY1 -
 				     data->hltdc.LayerCfg[0].WindowY0;
 	capabilities->supported_pixel_formats = PIXEL_FORMAT_ARGB_8888 |
 					PIXEL_FORMAT_RGB_888 |
-					PIXEL_FORMAT_RGB_565;
+					PIXEL_FORMAT_RGB_565 |
+					(IS_ENABLED(STM32_LTDC_HAS_YUV) ? PIXEL_FORMAT_YUYV : 0);
 	capabilities->screen_info = 0;
 
 	capabilities->current_pixel_format = data->current_pixel_format;
 	capabilities->current_orientation = DISPLAY_ORIENTATION_NORMAL;
+	capabilities->supported_events = DISPLAY_EVENT_VSYNC | DISPLAY_EVENT_LINE_INT;
 }
 
 static void stm32_ltdc_partial_write(const struct device *dev,
@@ -207,7 +351,9 @@ static void stm32_ltdc_sync_frame(struct display_stm32_ltdc_data *data, const ui
 
 	k_sem_take(&data->sem, K_FOREVER);
 
-	__HAL_LTDC_DISABLE_IT(&data->hltdc, LTDC_IT_LI);
+	if (data->cb.dev == NULL) {
+		__HAL_LTDC_DISABLE_IT(&data->hltdc, LTDC_IT_LI);
+	}
 }
 
 static int stm32_ltdc_write(const struct device *dev, const uint16_t x,
@@ -222,6 +368,17 @@ static int stm32_ltdc_write(const struct device *dev, const uint16_t x,
 	/* Validate the given parameters */
 	if (x + desc->width > config->width || y + desc->height > config->height) {
 		LOG_ERR("Rectangle does not fit into the display");
+		return -EINVAL;
+	}
+
+	/*
+	 * A pair of pixels shares its chrominance, so a rectangle that starts
+	 * or ends inside one would pair every luminance with the wrong half.
+	 */
+	if (IS_ENABLED(STM32_LTDC_HAS_YUV) &&
+	    data->current_pixel_format == PIXEL_FORMAT_YUYV &&
+	    ((x | desc->width) & 1U) != 0U) {
+		LOG_ERR("Packed YUV rectangles start and end on even columns");
 		return -EINVAL;
 	}
 
@@ -242,7 +399,7 @@ static int stm32_ltdc_write(const struct device *dev, const uint16_t x,
 	}
 
 	/* Partial write is only possible if LTDC has its own framebuffer */
-	if (CONFIG_STM32_LTDC_FB_NUM == 0)  {
+	if (CONFIG_STM32_LTDC_FB_NUM == 0) {
 		LOG_ERR("Partial write requires internal frame buffer");
 		return -ENOTSUP;
 	}
@@ -374,6 +531,82 @@ static int stm32_ltdc_display_blanking_on(const struct device *dev)
 	return display_blanking_on(display_dev);
 }
 
+static int stm32_ltdc_display_register_event_cb(const struct device *dev, display_event_cb_t cb,
+	void *user_data, uint32_t event_mask, bool in_isr, uint32_t *out_reg_handle)
+{
+	struct display_stm32_ltdc_data *data = dev->data;
+
+	if (out_reg_handle == NULL) {
+		LOG_ERR("Registration failed: output handle pointer is NULL");
+		return -EINVAL;
+	}
+	if (data->cb.dev != NULL) {
+		LOG_ERR("Registration failed: a callback is already registered");
+		return -EBUSY;
+	}
+	if (!in_isr) {
+		LOG_ERR("Registration failed: only ISR context is supported for this driver");
+		return -ENOSYS;
+	}
+
+	/* VSync can only be detected by LTDC line interrupt,
+	 * so the line event is programmed accordingly
+	 */
+	if (event_mask & DISPLAY_EVENT_VSYNC) {
+		HAL_LTDC_ProgramLineEvent(&data->hltdc, 0);
+	}
+
+	*out_reg_handle = 1U;
+
+	data->cb.dev = dev;
+	data->cb.cb_fn = cb;
+	data->cb.user_data = user_data;
+	data->cb.event_mask = event_mask;
+	data->cb.in_isr = in_isr;
+	data->cb.out_reg_handle = *out_reg_handle;
+
+	/*
+	 * Set user_line_number if a line interrupt has already been set up,
+	 * and program it if it is before VSYNC
+	 */
+	if (data->hltdc.Instance->LIPCR != 0 &&
+	    data->hltdc.Instance->LIPCR < data->hltdc.Init.TotalHeigh) {
+		data->cb.user_line_number = data->hltdc.Instance->LIPCR;
+	} else {
+		data->cb.user_line_number = 0;
+	}
+
+	if (data->cb.user_line_number > (data->hltdc.Instance->CPSR & 0xFFFF)) {
+		HAL_LTDC_ProgramLineEvent(&data->hltdc, data->cb.user_line_number);
+	}
+
+	return 0;
+}
+
+static int stm32_ltdc_display_unregister_event_cb(const struct device *dev, uint32_t reg_handle)
+{
+	struct display_stm32_ltdc_data *data = dev->data;
+
+	k_sem_take(&data->cb_sem, K_FOREVER);
+
+	if (data->cb.dev != dev) {
+		LOG_ERR("Unregistration failed: device does not match");
+		k_sem_give(&data->cb_sem);
+		return -EINVAL;
+	}
+	if (reg_handle != 1U) {
+		LOG_ERR("Unregistration failed: invalid registration handle");
+		k_sem_give(&data->cb_sem);
+		return -EINVAL;
+	}
+
+	memset(&data->cb, 0, sizeof(data->cb));
+
+	k_sem_give(&data->cb_sem);
+
+	return 0;
+}
+
 /* This symbol takes the value 1 if one of the device instances */
 /* is configured in dts with a domain clock */
 #if STM32_DT_INST_DEV_DOMAIN_CLOCK_SUPPORT
@@ -441,6 +674,7 @@ static int stm32_ltdc_init(const struct device *dev)
 	data->current_pixel_size = STM32_LTDC_INIT_PIXEL_SIZE;
 
 	k_sem_init(&data->sem, 0, 1);
+	k_sem_init(&data->cb_sem, 1, 1);
 
 	config->irq_config_func(dev);
 
@@ -555,11 +789,13 @@ static DEVICE_API(display, stm32_ltdc_display_api) = {
 	.set_orientation = stm32_ltdc_set_orientation,
 	.blanking_off = stm32_ltdc_display_blanking_off,
 	.blanking_on = stm32_ltdc_display_blanking_on,
+	.register_event_cb = stm32_ltdc_display_register_event_cb,
+	.unregister_event_cb = stm32_ltdc_display_unregister_event_cb,
 };
 
 #if DT_INST_NODE_HAS_PROP(0, ext_sdram)
 #define FRAME_BUFFER_SECTION	\
-	Z_GENERIC_SECTION(LINKER_DT_NODE_REGION_NAME(DT_INST_PHANDLE(0, ext_sdram)))
+	Z_GENERIC_SECTION(LINKER_DT_NODE_REGION_NAME_TOKEN(DT_INST_PHANDLE(0, ext_sdram)))
 #else
 #define FRAME_BUFFER_SECTION
 #endif /* DT_INST_NODE_HAS_PROP(0, ext_sdram) */

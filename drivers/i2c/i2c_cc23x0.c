@@ -179,10 +179,6 @@ static int i2c_cc23x0_transfer(const struct device *dev, struct i2c_msg *msgs, u
 	const struct i2c_cc23x0_config *config = dev->config;
 	int ret = 0;
 
-	if (num_msgs == 0) {
-		return 0;
-	}
-
 	k_sem_take(&data->lock, K_FOREVER);
 
 	i2c_cc23x0_pm_policy_state_lock_get();
@@ -234,9 +230,9 @@ static int i2c_cc23x0_configure(const struct device *dev, uint32_t dev_config)
 		return -EIO;
 	}
 
-	/* Support for slave mode has not been implemented */
+	/* Support for target mode has not been implemented */
 	if (!(dev_config & I2C_MODE_CONTROLLER)) {
-		LOG_ERR("Slave mode is not supported");
+		LOG_ERR("Target mode is not supported");
 		return -EIO;
 	}
 
@@ -246,7 +242,7 @@ static int i2c_cc23x0_configure(const struct device *dev, uint32_t dev_config)
 		return -EIO;
 	}
 
-	/* Enables and configures I2C master */
+	/* Enables and configures I2C controller */
 	I2CControllerInitExpClk(config->base, fast);
 
 	CLKCTLEnable(CLKCTL_BASE, CLKCTL_I2C0);

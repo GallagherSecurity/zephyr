@@ -6,7 +6,7 @@ Interrupts
 An :dfn:`interrupt service routine` (ISR) is a function that executes
 asynchronously in response to a hardware or software interrupt.
 An ISR normally preempts the execution of the current thread,
-allowing the response to occur with very low overhead.
+allowing the response to occur with very low latency.
 Thread execution resumes only once all ISR work has been completed.
 
 .. contents::
@@ -80,17 +80,24 @@ illustrated and explained below:
 
 .. code-block:: none
 
-                 9             2   0
-           _ _ _ _ _ _ _ _ _ _ _ _ _         (LEVEL 1)
-         5       |         A   |
-       _ _ _ _ _ _ _         _ _ _ _ _ _ _   (LEVEL 2)
-         |   C                       B
-       _ _ _ _ _ _ _                         (LEVEL 3)
-               D
+              9                           2       0
+    ┌───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┐
+    │   │   │ ╷ │   │   │   │   │ A │   │ ╷ │   │   │               (LEVEL 1)
+    └───┴───┴─│─┴───┴───┴───┴───┴───┴───┴─│─┴───┴───┘
+              └─────────────────┐         └─────────────────────┐
+          5                     v                               v
+    ┌───┬───┬───┬───┬───┬───┬───┐   ┌───┬───┬───┬───┬───┬───┬───┐
+    │   │ ╷ │   │ C │   │   │   │   │   │   │   │   │ B │   │   │   (LEVEL 2)
+    └───┴─│─┴───┴───┴───┴───┴───┘   └───┴───┴───┴───┴───┴───┴───┘
+          └─────────────────────┐
+                                v
+    ┌───┬───┬───┬───┬───┬───┬───┐
+    │   │   │   │   │ D │   │   │                                   (LEVEL 3)
+    └───┴───┴───┴───┴───┴───┴───┘
 
 There are three interrupt levels shown here.
 
-* '-' means interrupt line and is numbered from 0 (right most).
+* A cell represents an interrupt line and is numbered from 0 (right most).
 * LEVEL 1 has 12 interrupt lines, with two lines (2 and 9) connected
   to nested controllers and one device 'A' on line 4.
 * One of the LEVEL 2 controllers has interrupt line 5 connected to
@@ -133,26 +140,8 @@ before interrupts can be once again processed by the kernel while the thread
 is running.
 
 .. important::
-    The IRQ lock is thread-specific. If thread A locks out interrupts
-    then performs an operation that puts itself to sleep (e.g. sleeping
-    for N milliseconds), the thread's IRQ lock no longer applies once
-    thread A is swapped out and the next ready thread B starts to
-    run.
-
-    This means that interrupts can be processed while thread B is
-    running unless thread B has also locked out interrupts using its own
-    IRQ lock.  (Whether interrupts can be processed while the kernel is
-    switching between two threads that are using the IRQ lock is
-    architecture-specific.)
-
-    When thread A eventually becomes the current thread once again, the kernel
-    re-establishes thread A's IRQ lock. This ensures thread A won't be
-    interrupted until it has explicitly unlocked its IRQ lock.
-
-    If thread A does not sleep but does make a higher-priority thread B
-    ready, the IRQ lock will inhibit any preemption that would otherwise
-    occur.  Thread B will not run until the next :ref:`reschedule point
-    <scheduling_v2>` reached after releasing the IRQ lock.
+    A thread is not allowed to :ref:`sleep <thread_sleeping>` while holding
+    an IRQ lock; only :ref:`isr-ok <api_term_isr-ok>` functions may be called.
 
 Alternatively, a thread may temporarily **disable** a specified IRQ
 so its associated ISR does not execute when the IRQ is signaled.
@@ -191,6 +180,16 @@ APIs inside a zero-latency interrupt context is responsible for directly
 verifying correct behavior). Zero-latency interrupts may not modify any data
 inspected by kernel APIs invoked from normal Zephyr contexts and shall not
 generate exceptions that need to be handled synchronously (e.g. kernel panic).
+
+When system power management keeps interrupts locked across PM resume, a
+zero-latency interrupt is outside the locked-resume ordering and may be
+dispatched during PM suspend/resume logic, before PM resume bookkeeping and
+SoC/device hardware restore have completed. Such an ISR must be PM-wake-safe, or
+the interrupt source must be masked or disabled while the system state does not
+allow the ISR to execute. See :ref:`device power policy constraints
+<pm-device-constraint>` for one way to keep unsafe states out of policy
+selection while a device path that can produce a zero-latency interrupt is
+active.
 
 .. important::
     Zero-latency interrupts are supported on an architecture-specific basis.
@@ -265,6 +264,12 @@ Defining a regular ISR
 
 An ISR is defined at runtime by calling :c:macro:`IRQ_CONNECT`. It must
 then be enabled by calling :c:func:`irq_enable`.
+
+.. note::
+    The unprefixed interrupt control APIs such as :c:func:`irq_enable` and
+    :c:func:`irq_lock` are the legacy spelling. New code should use their
+    namespaced equivalents, :c:func:`k_irq_enable`, :c:func:`k_irq_lock` and
+    so on. The unprefixed names remain fully supported.
 
 .. important::
     IRQ_CONNECT() is not a C function and does some inline assembly magic
@@ -344,6 +349,11 @@ Zephyr supports so-called 'direct' interrupts, which are installed via
 :c:macro:`ISR_DIRECT_DECLARE`. These direct interrupts have some special
 implementation requirements and a reduced feature set; see the definitions
 of :c:macro:`IRQ_DIRECT_CONNECT` and :c:macro:`ISR_DIRECT_DECLARE` for details.
+
+Direct interrupts are only available on architectures selecting
+:kconfig:option:`CONFIG_ARCH_HAS_DIRECT_INTERRUPTS`. Using
+:c:macro:`IRQ_DIRECT_CONNECT` or :c:macro:`ISR_DIRECT_DECLARE` on any other
+architecture fails the build.
 
 The following code demonstrates a direct ISR:
 
@@ -503,17 +513,18 @@ The limitation of this parser is the fact that after the arrays are generated
 it is expected for the code not to relocate.
 Any relocation on this stage may lead to the situation where the entry in the interrupt array
 is no longer pointing to the function that was expected.
-It means that this parser, being more compatible is limiting us from using Link Time Optimization.
+It means that this parser, being more compatible, is limiting us from using Link Time Optimization.
 
-The local isr declaration parser uses different approach to construct
-the same arrays at binary level.
+The local ISR declaration parser uses a different approach to construct
+the same arrays at the binary level.
 All the entries to the arrays are declared and defined locally,
 directly in the file where :c:macro:`IRQ_CONNECT` is used.
-They are placed in a section with the unique, synthesized name.
-The name of the section is then placed in .intList section and it is used to create linker script
-to properly place the created entry in the right place in the memory.
-This parser is now limited to the supported architectures and toolchains but in reward it keeps
-the information about object relations for linker thus allowing the Link Time Optimization.
+They are placed in a section with a unique, synthesized name.
+The name of that section is then placed in the .intList section, which is used to
+generate a linker script fragment placing the entry at the right address.
+This parser is currently limited to the supported architectures and toolchains,
+but in return, it preserves the information about object relations for the linker,
+thus enabling Link Time Optimization.
 
 Implementation using C arrays
 -----------------------------
@@ -624,7 +635,7 @@ Implementation using linker script
 ----------------------------------
 
 This way of prepare and parse .isrList section to implement interrupt vectors arrays
-is called local isr declaration.
+is called local ISR declaration.
 The name comes from the fact that all the entries to the arrays that would create
 interrupt vectors are created locally in place of invocation of :c:macro:`IRQ_CONNECT` macro.
 Then automatically generated linker scripts are used to place it in the right place in the memory.

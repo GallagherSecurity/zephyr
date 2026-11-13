@@ -15,6 +15,7 @@
 		flash-controller@40022000 {
 			flash0: flash@8000000 {
 				reg = <0x08000000 DT_SIZE_K(256)>;
+				ranges = <0 0x8000000 DT_SIZE_K(256)>;
 			};
 		};
 
@@ -86,7 +87,7 @@
 			#dma-cells = <2>;
 			reg = <0x40020400 0x400>;
 			clocks = <&rcc STM32_CLOCK(AHB1, 1)>;
-			interrupts = <56 0 57 0 58 0 59 0 60 0>;
+			interrupts = <56 0>, <57 0>, <58 0>, <59 0>, <60 0>;
 			status = "disabled";
 		};
 
@@ -105,6 +106,15 @@
 				#gpio-cells = <2>;
 				reg = <0x48001000 0x400>;
 				clocks = <&rcc STM32_CLOCK(AHB1, 21)>;
+			};
+		};
+
+		adc12_common: adc@50000000 {
+			adc2: adc@50000100 {
+				reg = <0x50000100 0x100>;
+				interrupts = <18 0>;
+				#io-channel-cells = <1>;
+				status = "disabled";
 			};
 		};
 	};

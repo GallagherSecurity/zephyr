@@ -116,13 +116,17 @@ static int adxl355_decode_stream(const uint8_t *buffer, struct sensor_chan_spec 
 	struct sensor_three_axis_data *data = (struct sensor_three_axis_data *)data_out;
 
 	memset(data, 0, sizeof(struct sensor_three_axis_sample_data));
-	data->header.base_timestamp_ns = enc_data->timestamp;
-	data->header.reading_count = 1;
 	data->shift = 11;
 
 	buffer += sizeof(struct adxl355_fifo_data);
 	uint8_t sample_set_size = enc_data->sample_set_size * 3;
 	uint64_t period_ns = accel_period_ns[enc_data->accel_odr];
+	uint16_t total_samples = sample_set_size > 0
+				 ? enc_data->fifo_byte_count / sample_set_size : 0;
+
+	data->header.base_timestamp_ns =
+		enc_data->timestamp -
+		(total_samples > 0 ? (total_samples - 1) : 0) * period_ns;
 
 	/* Calculate which sample is decoded. */
 	if ((uint8_t *)*fit >= buffer) {
@@ -181,6 +185,7 @@ static int adxl355_decode_stream(const uint8_t *buffer, struct sensor_chan_spec 
 		buffer = sample_end;
 		*fit = (uintptr_t)sample_end;
 	}
+	data->header.reading_count = count;
 	return count;
 }
 #endif /* CONFIG_ADXL355_STREAM */
@@ -286,7 +291,7 @@ static int adxl355_get_size_info(struct sensor_chan_spec channel, size_t *base_s
  */
 static bool adxl355_decoder_has_trigger(const uint8_t *buffer, enum sensor_trigger_type trigger)
 {
-#ifdef CONFIG_ADXL355_STREAM
+#ifndef CONFIG_ADXL355_STREAM
 	return false;
 #endif
 	const struct adxl355_fifo_data *fifo_data = (const struct adxl355_fifo_data *)buffer;

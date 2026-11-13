@@ -25,6 +25,7 @@
 #include "userchan_bottom.h"
 
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/buf.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/drivers/bluetooth.h>
 
@@ -35,8 +36,9 @@ LOG_MODULE_REGISTER(bt_driver);
 #define DT_DRV_COMPAT zephyr_bt_hci_userchan
 
 struct uc_data {
+	/* bt_hci_driver_data must be first */
+	struct bt_hci_driver_data common;
 	int           fd;
-	bt_hci_recv_t recv;
 };
 
 static K_KERNEL_STACK_DEFINE(rx_thread_stack,
@@ -47,6 +49,12 @@ static unsigned short bt_dev_index;
 
 #define TCP_ADDR_BUFF_SIZE 16
 #define UNIX_ADDR_BUFF_SIZE 4096
+
+/* Fit the largest packet the host can receive. BT_BUF_RX_SIZE covers the H4
+ * type octet and the maximum of the ACL, event and ISO receive-buffer sizes,
+ * so it holds every packet type get_rx() accepts, including ISO.
+ */
+#define RX_FRAME_SIZE BT_BUF_RX_SIZE
 enum hci_connection_type {
 	HCI_USERCHAN,
 	HCI_TCP,
@@ -76,10 +84,10 @@ static bool is_hci_event_discardable(const struct bt_hci_evt_hdr *evt)
 		case BT_HCI_EVT_LE_EXT_ADVERTISING_REPORT: {
 			const struct bt_hci_evt_le_ext_advertising_report *ext_adv =
 				(const void *)meta_evt->data;
+			uint16_t adv_evt_type = sys_le16_to_cpu(ext_adv->adv_info[0].evt_type);
 
 			return (ext_adv->num_reports == 1) &&
-			       ((ext_adv->adv_info[0].evt_type & BT_HCI_LE_ADV_EVT_TYPE_LEGACY) !=
-				0);
+			       ((adv_evt_type & BT_HCI_LE_ADV_EVT_TYPE_LEGACY) != 0);
 		}
 #endif
 		default:
@@ -255,7 +263,7 @@ static void rx_thread(void *p1, void *p2, void *p3)
 	long frame_size = 0;
 
 	while (1) {
-		static uint8_t frame[512];
+		static uint8_t frame[RX_FRAME_SIZE];
 		struct net_buf *buf;
 		size_t buf_tailroom;
 		size_t buf_add_len;
@@ -331,9 +339,9 @@ static void rx_thread(void *p1, void *p2, void *p3)
 
 			net_buf_add_mem(buf, buf_add, buf_add_len);
 
-			LOG_DBG("Calling bt_recv(%p)", buf);
+			LOG_DBG("Calling bt_hci_recv(%p)", buf);
 
-			uc->recv(dev, buf);
+			bt_hci_recv(dev, buf);
 		}
 
 		k_yield();
@@ -359,7 +367,7 @@ static int uc_send(const struct device *dev, struct net_buf *buf)
 	return 0;
 }
 
-static int uc_open(const struct device *dev, bt_hci_recv_t recv)
+static int uc_open(const struct device *dev)
 {
 	struct uc_data *uc = dev->data;
 
@@ -380,8 +388,6 @@ static int uc_open(const struct device *dev, bt_hci_recv_t recv)
 	if (uc->fd < 0) {
 		return -nsi_errno_from_mid(-uc->fd);
 	}
-
-	uc->recv = recv;
 
 	LOG_DBG("User Channel opened as fd %d", uc->fd);
 
@@ -438,7 +444,9 @@ static int uc_init(const struct device *dev)
 	static struct uc_data uc_data_##inst = { \
 		.fd = -1, \
 	}; \
-	DEVICE_DT_INST_DEFINE(inst, uc_init, NULL, &uc_data_##inst, NULL, \
+	static const struct bt_hci_driver_config uc_config_##inst = \
+		BT_DT_HCI_DRIVER_CONFIG_INST_GET(inst); \
+	DEVICE_DT_INST_DEFINE(inst, uc_init, NULL, &uc_data_##inst, &uc_config_##inst, \
 			      POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE, &uc_drv_api)
 
 DT_INST_FOREACH_STATUS_OKAY(UC_DEVICE_INIT)

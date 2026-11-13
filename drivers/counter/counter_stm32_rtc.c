@@ -15,6 +15,7 @@
 
 #include <zephyr/drivers/clock_control/stm32_clock_control.h>
 #include <zephyr/drivers/clock_control.h>
+#include <zephyr/drivers/interrupt_controller/intc_exti_stm32.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/kernel.h>
 #include <soc.h>
@@ -85,28 +86,9 @@ LOG_MODULE_REGISTER(counter_rtc_stm32, CONFIG_COUNTER_LOG_LEVEL);
 /* Seconds from 1970-01-01T00:00:00 to 2000-01-01T00:00:00 */
 #define T_TIME_OFFSET 946684800
 
-#if defined(CONFIG_SOC_SERIES_STM32L4X)
-#define RTC_EXTI_LINE	LL_EXTI_LINE_18
-#elif defined(CONFIG_SOC_SERIES_STM32C0X) \
-	|| defined(CONFIG_SOC_SERIES_STM32G0X)
-#define RTC_EXTI_LINE	LL_EXTI_LINE_19
-#elif defined(CONFIG_SOC_SERIES_STM32F4X) \
-	|| defined(CONFIG_SOC_SERIES_STM32C5X) \
-	|| defined(CONFIG_SOC_SERIES_STM32F0X) \
-	|| defined(CONFIG_SOC_SERIES_STM32F1X) \
-	|| defined(CONFIG_SOC_SERIES_STM32F2X) \
-	|| defined(CONFIG_SOC_SERIES_STM32F3X) \
-	|| defined(CONFIG_SOC_SERIES_STM32F7X) \
-	|| defined(CONFIG_SOC_SERIES_STM32WBX) \
-	|| defined(CONFIG_SOC_SERIES_STM32G4X) \
-	|| defined(CONFIG_SOC_SERIES_STM32L0X) \
-	|| defined(CONFIG_SOC_SERIES_STM32L1X) \
-	|| defined(CONFIG_SOC_SERIES_STM32L5X) \
-	|| defined(CONFIG_SOC_SERIES_STM32H7X) \
-	|| defined(CONFIG_SOC_SERIES_STM32H5X) \
-	|| defined(CONFIG_SOC_SERIES_STM32WLX)
-#define RTC_EXTI_LINE	LL_EXTI_LINE_17
-#endif
+#if DT_INST_NODE_HAS_PROP(0, alrm_exti_line)
+#define RTC_EXTI_LINE_NUM DT_INST_PROP(0, alrm_exti_line)
+#endif /* DT_INST_NODE_HAS_PROP(0, alrm_exti_line) */
 
 #if defined(CONFIG_SOC_SERIES_STM32F1X)
 #define COUNTER_NO_DATE
@@ -407,12 +389,7 @@ static int rtc_stm32_start(const struct device *dev)
 
 	z_stm32_hsem_lock(CFG_HW_RCC_SEMID, HSEM_LOCK_DEFAULT_RETRY);
 	stm32_backup_domain_enable_access();
-#ifdef CONFIG_SOC_SERIES_STM32U3X
-	/* STM32U3 series uses LL_RCC_RTC_ClockEnable instead of LL_RCC_EnableRTC */
-	LL_RCC_RTC_ClockEnable();
-#else
 	LL_RCC_EnableRTC();
-#endif /* CONFIG_SOC_SERIES_STM32U3X */
 	stm32_backup_domain_disable_access();
 	z_stm32_hsem_unlock(CFG_HW_RCC_SEMID);
 #endif /* CONFIG_SOC_SERIES_STM32WBAX || CONFIG_SOC_SERIES_STM32U5X */
@@ -437,12 +414,7 @@ static int rtc_stm32_stop(const struct device *dev)
 
 	z_stm32_hsem_lock(CFG_HW_RCC_SEMID, HSEM_LOCK_DEFAULT_RETRY);
 	stm32_backup_domain_enable_access();
-#ifdef CONFIG_SOC_SERIES_STM32U3X
-	/* STM32U3 series uses LL_RCC_RTC_ClockDisable instead of LL_RCC_DisableRTC */
-	LL_RCC_RTC_ClockDisable();
-#else
 	LL_RCC_DisableRTC();
-#endif /* CONFIG_SOC_SERIES_STM32U3X */
 	stm32_backup_domain_disable_access();
 	z_stm32_hsem_unlock(CFG_HW_RCC_SEMID);
 #endif /* CONFIG_SOC_SERIES_STM32WBAX || CONFIG_SOC_SERIES_STM32U5X */
@@ -543,7 +515,7 @@ static int rtc_stm32_get_value_64(const struct device *dev, uint64_t *ticks)
 #ifdef CONFIG_COUNTER_RTC_STM32_SUBSECONDS
 static void rtc_stm32_set_int_pending(void)
 {
-	NVIC_SetPendingIRQ(DT_INST_IRQN(0));
+	k_irq_set_pending(DT_INST_IRQN(0));
 }
 #endif /* CONFIG_COUNTER_RTC_STM32_SUBSECONDS */
 
@@ -761,21 +733,9 @@ void rtc_stm32_isr(const struct device *dev)
 		}
 	}
 
-#if defined(CONFIG_SOC_SERIES_STM32H7X) && defined(CONFIG_CPU_CORTEX_M4)
-	LL_C2_EXTI_ClearFlag_0_31(RTC_EXTI_LINE);
-#elif defined(CONFIG_SOC_SERIES_STM32C0X) \
-	|| defined(CONFIG_SOC_SERIES_STM32C5X) \
-	|| defined(CONFIG_SOC_SERIES_STM32G0X) \
-	|| defined(CONFIG_SOC_SERIES_STM32L5X) \
-	|| defined(CONFIG_SOC_SERIES_STM32H5X)
-	LL_EXTI_ClearRisingFlag_0_31(RTC_EXTI_LINE);
-#elif defined(CONFIG_SOC_SERIES_STM32U3X) \
-	|| defined(CONFIG_SOC_SERIES_STM32U5X) \
-	|| defined(CONFIG_SOC_SERIES_STM32WBAX)
-	/* RTC is not connected to EXTI for these SoC series */
-#else
-	LL_EXTI_ClearFlag_0_31(RTC_EXTI_LINE);
-#endif
+#if defined(RTC_EXTI_LINE_NUM)
+	stm32_exti_clear_pending(RTC_EXTI_LINE_NUM);
+#endif /* defined(RTC_EXTI_LINE_NUM) */
 }
 
 
@@ -813,12 +773,7 @@ static int rtc_stm32_init(const struct device *dev)
 	}
 
 #if !defined(CONFIG_SOC_SERIES_STM32WBAX)
-#ifdef CONFIG_SOC_SERIES_STM32U3X
-	/* STM32U3 series uses LL_RCC_RTC_ClockEnable instead of LL_RCC_EnableRTC */
-	LL_RCC_RTC_ClockEnable();
-#else
 	LL_RCC_EnableRTC();
-#endif /* CONFIG_SOC_SERIES_STM32U3X */
 #endif /* !CONFIG_SOC_SERIES_STM32WBAX */
 
 	z_stm32_hsem_unlock(CFG_HW_RCC_SEMID);
@@ -843,16 +798,16 @@ static int rtc_stm32_init(const struct device *dev)
 	LL_RTC_EnableWriteProtection(STM32_ARG(RTC));
 #endif /* RTC_CR_BYPSHAD */
 
-#if defined(CONFIG_SOC_SERIES_STM32H7X) && defined(CONFIG_CPU_CORTEX_M4)
-	LL_C2_EXTI_EnableIT_0_31(RTC_EXTI_LINE);
-	LL_EXTI_EnableRisingTrig_0_31(RTC_EXTI_LINE);
-#elif defined(CONFIG_SOC_SERIES_STM32U3X) || defined(CONFIG_SOC_SERIES_STM32U5X) || \
-	  defined(CONFIG_SOC_SERIES_STM32WBAX)
-	/* RTC is not connected to EXTI for these SoC series */
-#else
-	LL_EXTI_EnableIT_0_31(RTC_EXTI_LINE);
-	LL_EXTI_EnableRisingTrig_0_31(RTC_EXTI_LINE);
-#endif
+#if defined(RTC_EXTI_LINE_NUM)
+	/* Trigger NVIC IRQ on RTC EXTI line rising edge */
+	ret = stm32_exti_enable(RTC_EXTI_LINE_NUM,
+				STM32_EXTI_TRIG_RISING,
+				STM32_EXTI_MODE_IT);
+	if (ret < 0) {
+		LOG_ERR("Failed to enable RTC EXTI line");
+		goto out_disable_bkup_access;
+	}
+#endif /* defined(RTC_EXTI_LINE_NUM) */
 
 out_disable_bkup_access:
 	stm32_backup_domain_disable_access();
@@ -906,7 +861,7 @@ static const struct rtc_stm32_config rtc_config = {
 	.sync_prescaler = DT_INST_PROP_OR(0, sync_prescaler, RTC_SYNCPRE),
 #endif /* !CONFIG_SOC_SERIES_STM32F1X */
 #elif DT_INST_CLOCKS_CELL_BY_IDX(0, 1, bus) == STM32_SRC_HSE
-	.async_prescaler = DT_INST_PROP_OR(0, async_prescaler, _HSE_ASYNC_PRESCALER - 1),
+	.async_prescaler = DT_INST_PROP_OR(0, async_prescaler, RTC_HSE_ASYNC_PRESCALER - 1),
 #if !defined(CONFIG_SOC_SERIES_STM32F1X)
 	.sync_prescaler = DT_INST_PROP_OR(0, hse_prescaler, RTC_HSE_SYNC_PRESCALER - 1),
 #endif /* !CONFIG_SOC_SERIES_STM32F1X */

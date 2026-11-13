@@ -10,6 +10,11 @@ if(CONFIG_CMSIS_NN)
 
   zephyr_library_compile_options($<TARGET_PROPERTY:compiler,optimization_fast>)
 
+  if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    # Upstream CMSIS-NN uses GCC-only function attributes in some source files.
+    zephyr_library_compile_options(-Wno-unknown-attributes)
+  endif()
+
   zephyr_include_directories(${CMSIS_NN_DIR}/Include)
 
   zephyr_library_include_directories(${cmsis_glue_path}/CMSIS/Core/Include)
@@ -23,12 +28,13 @@ if(CONFIG_CMSIS_NN)
   endif()
 
   if(CONFIG_CMSIS_NN_BASICMATH)
-    file(GLOB SRC "${CMSIS_NN_DIR}/Source/BasicMathFunctions/*_*.c")
-    zephyr_library_sources(${SRC})
+    file(GLOB SRC "${CMSIS_NN_DIR}/Source/BasicMathFunctions/*_s8*.c")
+    file(GLOB SRC_S16 "${CMSIS_NN_DIR}/Source/BasicMathFunctions/*_s16*.c")
+    zephyr_library_sources(${SRC} ${SRC_S16})
   endif()
 
   if(CONFIG_CMSIS_NN_CONCATENATION)
-    file(GLOB SRC "${CMSIS_NN_DIR}/Source/ConcatenationFunctions/*_*.c")
+    file(GLOB SRC "${CMSIS_NN_DIR}/Source/ConcatenationFunctions/*_s8*.c")
     zephyr_library_sources(${SRC})
   endif()
 
@@ -63,8 +69,7 @@ if(CONFIG_CMSIS_NN)
   endif()
 
   if(CONFIG_CMSIS_NN_RESHAPE)
-    file(GLOB SRC "${CMSIS_NN_DIR}/Source/ReshapeFunctions/*_*.c")
-    zephyr_library_sources(${SRC})
+    zephyr_library_sources(${CMSIS_NN_DIR}/Source/ReshapeFunctions/arm_reshape_s8.c)
   endif()
 
   if(CONFIG_CMSIS_NN_SOFTMAX)

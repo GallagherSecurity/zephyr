@@ -5,13 +5,14 @@
  */
 
 #include <arm/armv6-m.dtsi>
-#include <zephyr/dt-bindings/i2c/i2c.h>
 #include <zephyr/dt-bindings/adc/adc.h>
-#include <zephyr/dt-bindings/pwm/pwm.h>
-#include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/clock/stm32wb0_clock.h>
-#include <zephyr/dt-bindings/reset/stm32wb0_reset.h>
 #include <zephyr/dt-bindings/dma/stm32_dma.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+#include <zephyr/dt-bindings/reset/stm32wb0_reset.h>
+#include <zephyr/dt-bindings/sensor/qdec_stm32.h>
 #include <freq.h>
 #include <mem.h>
 
@@ -45,8 +46,8 @@
 				power-state-name = "suspend-to-ram";
 				substate-id = <0>;
 
-				/* One millisecond seems reasonable for now. */
-				min-residency-us = <1000>;
+				/* 1.5ms seems to be a sufficient margin. */
+				min-residency-us = <1500>;
 
 				/* exit-latency-us property is not needed
 				 * since the same concept is applied by the hardware automatically.
@@ -131,6 +132,7 @@
 
 			#address-cells = <1>;
 			#size-cells = <1>;
+			ranges;
 
 			st_nvm_user_otp: flash@10001800 {
 				compatible = "st,stm32-nvm-otp";
@@ -158,6 +160,8 @@
 
 			flash0: flash@10040000 {
 				compatible = "st,stm32-nv-flash", "soc-nv-flash";
+				#address-cells = <1>;
+				#size-cells = <1>;
 				write-block-size = <4>;
 				erase-block-size = <2048>;
 				/* maximum erase time(ms) for a page (2K) */
@@ -203,6 +207,7 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			reg = <0x48000000 DT_SIZE_M(2)>;
+			ranges;
 
 			gpioa: gpio@48000000 {
 				compatible = "st,stm32-gpio";
@@ -292,7 +297,7 @@
 			#dma-cells = <2>;
 			reg = <0x48700000 256>;
 			clocks = <&rcc STM32_CLOCK(AHB0, 0)>;
-			interrupts = <17 0 17 0 17 0 17 0 17 0 17 0 17 0 17 0>;
+			interrupts = <17 0>, <17 0>, <17 0>, <17 0>, <17 0>, <17 0>, <17 0>, <17 0>;
 			dma-requests = <8>;
 			dma-offset = <0>;
 			status = "disabled";

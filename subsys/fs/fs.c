@@ -15,6 +15,7 @@
 #include <zephyr/fs/fs.h>
 #include <zephyr/fs/fs_sys.h>
 #include <zephyr/sys/check.h>
+#include <zephyr/sys/minmax.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(fs, CONFIG_FS_LOG_LEVEL);
@@ -195,6 +196,19 @@ int fs_open(struct fs_file_t *zfp, const char *file_name, fs_mode_t flags)
 		rc = mp->fs->truncate(zfp, 0);
 		if (rc < 0) {
 			LOG_ERR("file truncation failed (%d)", rc);
+			/* The backend file was opened successfully above, so we
+			 * must close it here to avoid leaking the backend file
+			 * handle and any associated resources. fs_close() cannot
+			 * do this for the caller because we clear zfp->mp below.
+			 */
+			if (mp->fs->close != NULL) {
+				int close_rc = mp->fs->close(zfp);
+
+				if (close_rc < 0) {
+					LOG_ERR("failed file close after truncate failure (%d)",
+						close_rc);
+				}
+			}
 			zfp->mp = NULL;
 			return rc;
 		}
@@ -678,6 +692,70 @@ int fs_statvfs(const char *abs_path, struct fs_statvfs *stat)
 	return rc;
 }
 
+int fs_normalize_path(const char *path, char *buf, size_t len)
+{
+	size_t dst_len = 0;
+	size_t src = 0;
+
+	if ((path == NULL) || (path[0] != '/') || (buf == NULL) || (len == 0)) {
+		LOG_ERR("invalid path or output buffer!!");
+		return -EINVAL;
+	}
+
+	while (path[src] != '\0') {
+		size_t seg_start;
+		size_t seg_len;
+		size_t i;
+
+		/* Skipping sequence of /, like /// */
+		if (path[src] == '/') {
+			++src;
+			continue;
+		}
+
+		seg_start = src;
+		while ((path[src] != '\0') && (path[src] != '/')) {
+			src++;
+		}
+		seg_len = src - seg_start;
+
+		if ((seg_len == 1) && (path[seg_start] == '.')) {
+			continue;
+		}
+
+		if ((seg_len == 2) && (path[seg_start] == '.') && (path[seg_start + 1] == '.')) {
+			while ((dst_len > 0) && (buf[dst_len - 1] != '/')) {
+				dst_len--;
+			}
+			if (dst_len > 0) {
+				dst_len--;
+			}
+			continue;
+		}
+
+		if ((dst_len + 1 + seg_len + 1) > len) {
+			return -ENAMETOOLONG;
+		}
+
+		buf[dst_len] = '/';
+		for (i = 0; i < seg_len; i++) {
+			buf[dst_len + 1 + i] = path[seg_start + i];
+		}
+		dst_len += 1 + seg_len;
+	}
+
+	if (dst_len == 0) {
+		if (len < 2) {
+			return -ENAMETOOLONG;
+		}
+		buf[dst_len] = '/';
+		dst_len++;
+	}
+	buf[dst_len] = '\0';
+
+	return 0;
+}
+
 #if defined(CONFIG_FILE_SYSTEM_GC)
 
 int fs_gc(struct fs_mount_t *mp)
@@ -731,15 +809,22 @@ int fs_mount(struct fs_mount_t *mp)
 	/* Check if mount point already exists */
 	SYS_DLIST_FOR_EACH_NODE(&fs_mnt_list, node) {
 		itr = CONTAINER_OF(node, struct fs_mount_t, node);
-		/* continue if length does not match */
-		if (len != itr->mountp_len) {
-			continue;
-		}
 
-		CHECKIF(mp->fs_data == itr->fs_data) {
+		/* A file system's private state may only be owned by a single
+		 * mount point, no matter how the mount point strings compare,
+		 * fs_data may still be NULL here for file systems that
+		 * allocate their state while mounting, such as ext2, and NULL
+		 * must not be treated as a collision.
+		 */
+		if ((mp->fs_data != NULL) && (mp->fs_data == itr->fs_data)) {
 			LOG_ERR("file system already mounted!!");
 			rc = -EBUSY;
 			goto mount_err;
+		}
+
+		/* continue if length does not match */
+		if (len != itr->mountp_len) {
+			continue;
 		}
 
 		if (strncmp(mp->mnt_point, itr->mnt_point, len) == 0) {

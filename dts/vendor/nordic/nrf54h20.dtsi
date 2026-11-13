@@ -51,6 +51,7 @@
 			riscv,isa-base = "rv32e";
 			riscv,isa-extensions = "e", "m", "c", "zicsr";
 			nordic,bus-width = <32>;
+			nordic,vpr-ready-event = <15>;
 
 			cpuppr_vevif_rx: mailbox {
 				compatible = "nordic,nrf-vevif-task-rx";
@@ -201,7 +202,7 @@
 		};
 
 		lfclk: lfclk {
-			compatible = "nordic,nrf-lfclk";
+			compatible = "nordic,nrfs-lfclk";
 			status = "disabled";
 			#clock-cells = <0>;
 			clock-frequency = <32768>;
@@ -264,6 +265,11 @@
 		#power-domain-cells = <0>;
 	};
 
+	usbhs_phy: usbhs_phy {
+		compatible = "nordic,nrf-usbhs-phy-type1";
+		status = "reserved";
+	};
+
 	soc {
 		#address-cells = <1>;
 		#size-cells = <1>;
@@ -283,6 +289,14 @@
 				write-block-size = <16>;
 				#address-cells = <1>;
 				#size-cells = <1>;
+
+				mram10: mram-bank@0 {
+					reg = <0 DT_SIZE_K(1024)>;
+				};
+
+				mram11: mram-bank@100000 {
+					reg = <DT_SIZE_K(1024) DT_SIZE_K(1024)>;
+				};
 			};
 		};
 
@@ -673,6 +687,17 @@
 				ghwcfg1 = <0xaa555000>;
 				ghwcfg2 = <0x22abfc72>;
 				ghwcfg4 = <0x1e10aa60>;
+				/* 3050 locations available, GRXFSIZ is 548,
+				 * GNPTXFSIZ and DIEPTXFn are 512. The default
+				 * values (upper bounds) sum up above the limit.
+				 * Allow High-Bandwidth only on TxFIFO 1 and 2.
+				 * Use maximum possible for RxFIFO and allocate
+				 * everything remaining for TxFIFO 0.
+				 */
+				g-rx-fifo-size = <548>;
+				g-np-tx-fifo-size = <198>;
+				g-tx-fifo-size = <512 512 256 256 256 256 256>;
+				phy = <&usbhs_phy>;
 				status = "disabled";
 			};
 
@@ -686,6 +711,7 @@
 				clock-frequency = <DT_FREQ_M(400)>;
 				packet-data-limit = <65536>;
 				fifo-depth = <32>;
+				memmap-write-support;
 				status = "disabled";
 			};
 
@@ -765,7 +791,7 @@
 				interrupts = <216 NRF_DEFAULT_IRQ_PRIORITY>;
 				clocks = <&canpll>, <&hsfll120>;
 				clock-names = "auxpll", "hsfll";
-				bosch,mram-cfg = <0x0 28 8 3 3 0 1 1>;
+				bosch,mram-cfg = <0x0 28 8 6 0 0 1 1>;
 				status = "disabled";
 			};
 
@@ -875,6 +901,7 @@
 				reg = <0x8ef000 0x1000>;
 				status = "disabled";
 				channels = <8>;
+				offset = <16>;
 			};
 
 			cpuppr_vpr: vpr@908000 {
@@ -891,6 +918,7 @@
 					status = "disabled";
 					#mbox-cells = <1>;
 					nordic,tasks = <16>;
+					nordic,vpr-ready-event = <15>;
 					nordic,tasks-mask = <0xfffffff0>;
 				};
 			};
@@ -1058,6 +1086,8 @@
 			adc: adc@982000 {
 				compatible = "nordic,nrf-saadc";
 				reg = <0x982000 0x1000>;
+				#address-cells = <1>;
+				#size-cells = <0>;
 				interrupts = <386 NRF_DEFAULT_IRQ_PRIORITY>;
 				status = "disabled";
 				#io-channel-cells = <1>;
@@ -1797,6 +1827,18 @@
 
 	temp_nrfs: temp {
 		compatible = "nordic,nrf-temp-nrfs";
+		status = "disabled";
+	};
+
+	cpuapp_gswdt: cpuapp_gswdt {
+		compatible = "nordic,nrf-gswdt";
+		mbox = <&cpuapp_cpusys_gswdt_mbox>;
+		status = "disabled";
+	};
+
+	cpurad_gswdt: cpurad_gswdt {
+		compatible = "nordic,nrf-gswdt";
+		mbox = <&cpurad_cpusys_gswdt_mbox>;
 		status = "disabled";
 	};
 };

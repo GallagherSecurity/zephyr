@@ -237,6 +237,7 @@ static void nrf_wifi_net_iface_work_handler(struct k_work *work)
 	struct nrf_wifi_vif_ctx_zep *vif_ctx_zep = CONTAINER_OF(work,
 								struct nrf_wifi_vif_ctx_zep,
 								nrf_wifi_net_iface_work);
+	bool operational;
 
 	if (!vif_ctx_zep) {
 		LOG_ERR("%s: vif_ctx_zep is NULL", __func__);
@@ -248,9 +249,18 @@ static void nrf_wifi_net_iface_work_handler(struct k_work *work)
 		return;
 	}
 
-	if (vif_ctx_zep->if_carr_state == NRF_WIFI_FMAC_IF_CARR_STATE_ON) {
+	/* The FMAC device context this reads through is freed under vif_lock,
+	 * so hold it for the decision. Release it before touching the net_if:
+	 * net_if_down() holds the iface lock across nrf_wifi_if_stop_zep(),
+	 * which takes vif_lock, so keeping both here would invert that order.
+	 */
+	k_mutex_lock(&vif_ctx_zep->vif_lock, K_FOREVER);
+	operational = nrf_wifi_iface_operational(vif_ctx_zep);
+	k_mutex_unlock(&vif_ctx_zep->vif_lock);
+
+	if (operational) {
 		net_if_dormant_off(vif_ctx_zep->zep_net_if_ctx);
-	} else if (vif_ctx_zep->if_carr_state == NRF_WIFI_FMAC_IF_CARR_STATE_OFF) {
+	} else {
 		net_if_dormant_on(vif_ctx_zep->zep_net_if_ctx);
 	}
 }
@@ -304,7 +314,7 @@ enum nrf_wifi_status nrf_wifi_if_carr_state_chg(void *os_vif_ctx,
 
 	LOG_DBG("%s: Carrier state: %d", __func__, carr_state);
 
-	k_work_submit(&vif_ctx_zep->nrf_wifi_net_iface_work);
+	nrf_wifi_refresh_oper_state(vif_ctx_zep);
 
 	status = NRF_WIFI_STATUS_SUCCESS;
 
@@ -357,7 +367,8 @@ void nrf_wifi_if_sniffer_rx_frm(void *os_vif_ctx, void *frm,
 }
 #endif /* CONFIG_NRF70_RAW_DATA_RX || CONFIG_NRF70_PROMISC_DATA_RX */
 
-enum ethernet_hw_caps nrf_wifi_if_caps_get(const struct device *dev)
+enum ethernet_hw_caps nrf_wifi_if_caps_get(const struct device *dev __unused,
+					   struct net_if *iface __unused)
 {
 	enum ethernet_hw_caps caps = (ETHERNET_LINK_10BASE |
 			ETHERNET_LINK_100BASE | ETHERNET_LINK_1000BASE);
@@ -509,6 +520,129 @@ unlock:
 #endif /* CONFIG_NRF70_DATA_TX */
 
 out:
+	return ret;
+}
+
+int nrf_wifi_wpa_tx_control_port(void *if_priv, const unsigned char *dest, unsigned short proto,
+				 const unsigned char *buf, size_t len, int no_encrypt)
+{
+	int ret = -EINVAL;
+#ifdef CONFIG_NRF70_DATA_TX
+	struct nrf_wifi_vif_ctx_zep *vif_ctx_zep = if_priv;
+	struct nrf_wifi_ctx_zep *rpu_ctx_zep = NULL;
+	struct nrf_wifi_sys_fmac_dev_ctx *sys_dev_ctx = NULL;
+	struct rpu_host_stats *host_stats = NULL;
+	struct net_linkaddr *link_addr = NULL;
+	struct net_if *iface = NULL;
+	struct net_eth_hdr eth_hdr;
+	struct net_pkt *pkt = NULL;
+	void *nbuf = NULL;
+	bool locked = false;
+
+	ARG_UNUSED(no_encrypt);
+
+	if (!vif_ctx_zep || !dest || !buf) {
+		LOG_ERR("%s: Invalid params", __func__);
+		goto out;
+	}
+
+	iface = vif_ctx_zep->zep_net_if_ctx;
+	if (!iface) {
+		LOG_ERR("%s: iface is NULL", __func__);
+		goto out;
+	}
+
+	link_addr = net_if_get_link_addr(iface);
+
+	/* Build the Ethernet frame carrying the EAPOL payload and hand it straight
+	 * to the driver TX path. This bypasses the networking stack so that the
+	 * handshake is not gated by the interface operational state (the interface
+	 * is held dormant until the controlled port is authorized).
+	 */
+	pkt = net_pkt_alloc_with_buffer(iface, sizeof(struct net_eth_hdr) + len,
+					NET_AF_UNSPEC, 0, K_MSEC(100));
+	if (!pkt) {
+		LOG_ERR("%s: Failed to allocate net_pkt", __func__);
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	memcpy(eth_hdr.dst.addr, dest, sizeof(eth_hdr.dst.addr));
+	memcpy(eth_hdr.src.addr, link_addr->addr, sizeof(eth_hdr.src.addr));
+	eth_hdr.type = net_htons(proto);
+
+	if (net_pkt_write(pkt, &eth_hdr, sizeof(eth_hdr)) ||
+	    net_pkt_write(pkt, buf, len)) {
+		LOG_ERR("%s: Failed to write EAPOL frame", __func__);
+		net_pkt_unref(pkt);
+		ret = -ENOBUFS;
+		goto out;
+	}
+
+	net_pkt_cursor_init(pkt);
+
+	nbuf = net_pkt_to_nbuf(pkt);
+	net_pkt_unref(pkt);
+	if (!nbuf) {
+		LOG_ERR("%s: nbuf allocation failed", __func__);
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	ret = k_mutex_lock(&vif_ctx_zep->vif_lock, K_FOREVER);
+	if (ret != 0) {
+		LOG_ERR("%s: Failed to lock vif_lock", __func__);
+		goto drop;
+	}
+	locked = true;
+
+	rpu_ctx_zep = vif_ctx_zep->rpu_ctx_zep;
+	if (!rpu_ctx_zep || !rpu_ctx_zep->rpu_ctx) {
+		ret = -ENODEV;
+		goto drop;
+	}
+
+	sys_dev_ctx = wifi_dev_priv(rpu_ctx_zep->rpu_ctx);
+	host_stats = &sys_dev_ctx->host_stats;
+
+	if (vif_ctx_zep->if_carr_state != NRF_WIFI_FMAC_IF_CARR_STATE_ON) {
+		LOG_DBG("%s: Carrier not ON, dropping EAPOL frame", __func__);
+		ret = -ENETDOWN;
+		goto drop;
+	}
+
+	ret = nrf_wifi_fmac_start_xmit(rpu_ctx_zep->rpu_ctx, vif_ctx_zep->vif_idx, nbuf);
+	/* FMAC owns the nbuf from here on (and frees it on failure) */
+	nbuf = NULL;
+	if (ret == NRF_WIFI_STATUS_FAIL) {
+		host_stats->total_tx_drop_pkts++;
+		ret = -ENOBUFS;
+		goto unlock;
+	}
+
+	ret = 0;
+	goto unlock;
+drop:
+	if (host_stats != NULL) {
+		host_stats->total_tx_drop_pkts++;
+	}
+	if (nbuf != NULL) {
+		nrf_wifi_osal_nbuf_free(nbuf);
+	}
+unlock:
+	if (locked) {
+		k_mutex_unlock(&vif_ctx_zep->vif_lock);
+	}
+out:
+#else
+	ARG_UNUSED(if_priv);
+	ARG_UNUSED(dest);
+	ARG_UNUSED(proto);
+	ARG_UNUSED(buf);
+	ARG_UNUSED(len);
+	ARG_UNUSED(no_encrypt);
+#endif /* CONFIG_NRF70_DATA_TX */
+
 	return ret;
 }
 
@@ -683,7 +817,6 @@ void nrf_wifi_if_init_zep(struct net_if *iface)
 	const struct device *dev = NULL;
 	struct nrf_wifi_vif_ctx_zep *vif_ctx_zep = NULL;
 	struct nrf_wifi_ctx_zep *rpu_ctx_zep = NULL;
-	struct ethernet_context *eth_ctx = net_if_l2_data(iface);
 
 	if (!iface) {
 		LOG_ERR("%s: Invalid parameters",
@@ -707,6 +840,12 @@ void nrf_wifi_if_init_zep(struct net_if *iface)
 		return;
 	}
 
+	/* Initialise vif_lock once, here rather than in nrf_wifi_if_start_zep():
+	 * re-initialising it while it is held drops both the ownership and any
+	 * thread already pending on it.
+	 */
+	k_mutex_init(&vif_ctx_zep->vif_lock);
+
 	rpu_ctx_zep = vif_ctx_zep->rpu_ctx_zep;
 
 	if (!rpu_ctx_zep) {
@@ -718,7 +857,7 @@ void nrf_wifi_if_init_zep(struct net_if *iface)
 	vif_ctx_zep->zep_net_if_ctx = iface;
 	vif_ctx_zep->zep_dev_ctx = dev;
 
-	eth_ctx->eth_if_type = L2_ETH_IF_TYPE_WIFI;
+	net_eth_set_if_type_wifi(iface);
 	ethernet_init(iface);
 	net_eth_carrier_on(iface);
 	net_if_dormant_on(iface);
@@ -763,7 +902,7 @@ __weak int nrf_wifi_if_zep_stop_board(const struct device *dev)
 	return 0;
 }
 
-int nrf_wifi_if_start_zep(const struct device *dev)
+int nrf_wifi_if_start_zep(const struct device *dev, struct net_if *iface)
 {
 	enum nrf_wifi_status status = NRF_WIFI_STATUS_FAIL;
 	struct nrf_wifi_vif_ctx_zep *vif_ctx_zep = NULL;
@@ -825,7 +964,7 @@ int nrf_wifi_if_start_zep(const struct device *dev)
 			LOG_ERR("%s: nrf_wifi_fmac_dev_add_zep failed",
 				__func__);
 			ret = -EIO;
-			goto out;
+			goto unlock;
 		}
 		fmac_dev_added = true;
 		LOG_DBG("%s: FMAC device added", __func__);
@@ -854,14 +993,15 @@ int nrf_wifi_if_start_zep(const struct device *dev)
 		goto dev_rem;
 	}
 
-	k_mutex_init(&vif_ctx_zep->vif_lock);
 	vif_ctx_zep->if_type = add_vif_info.iftype;
+
+	nrf_wifi_clear_session_state(vif_ctx_zep);
 
 	/* Check if user has provided a valid MAC address, if not
 	 * fetch it from OTP.
 	 */
-	mac_addr = net_if_get_link_addr(vif_ctx_zep->zep_net_if_ctx)->addr;
-	mac_addr_len = net_if_get_link_addr(vif_ctx_zep->zep_net_if_ctx)->len;
+	mac_addr = net_if_get_link_addr(iface)->addr;
+	mac_addr_len = net_if_get_link_addr(iface)->len;
 
 	if (!nrf_wifi_utils_is_mac_addr_valid(mac_addr)) {
 		status = nrf_wifi_get_mac_addr(vif_ctx_zep);
@@ -871,7 +1011,7 @@ int nrf_wifi_if_start_zep(const struct device *dev)
 			ret = -EIO;
 			goto del_vif;
 		}
-		net_if_set_link_addr(vif_ctx_zep->zep_net_if_ctx,
+		net_if_set_link_addr(iface,
 					vif_ctx_zep->mac_addr.addr,
 					WIFI_MAC_ADDR_LEN,
 					NET_LINK_ETHERNET);
@@ -933,7 +1073,7 @@ int nrf_wifi_if_start_zep(const struct device *dev)
 
 	ret = 0;
 
-	goto out;
+	goto unlock;
 del_vif:
 	status = nrf_wifi_sys_fmac_del_vif(rpu_ctx_zep->rpu_ctx, vif_ctx_zep->vif_idx);
 	if (status != NRF_WIFI_STATUS_SUCCESS) {
@@ -945,13 +1085,15 @@ dev_rem:
 	if (fmac_dev_added) {
 		nrf_wifi_fmac_dev_rem_zep(&rpu_drv_priv_zep);
 	}
-out:
+unlock:
 	k_mutex_unlock(&vif_ctx_zep->vif_lock);
+	nrf_wifi_refresh_oper_state(vif_ctx_zep);
+out:
 	return ret;
 }
 
 
-int nrf_wifi_if_stop_zep(const struct device *dev)
+int nrf_wifi_if_stop_zep(const struct device *dev, struct net_if *iface __unused)
 {
 	enum nrf_wifi_status status = NRF_WIFI_STATUS_FAIL;
 	struct nrf_wifi_vif_ctx_zep *vif_ctx_zep = NULL;
@@ -976,8 +1118,10 @@ int nrf_wifi_if_stop_zep(const struct device *dev)
 	ret = k_mutex_lock(&vif_ctx_zep->vif_lock, K_FOREVER);
 	if (ret != 0) {
 		LOG_ERR("%s: Failed to lock vif_lock", __func__);
-		goto unlock;
+		goto out;
 	}
+
+	nrf_wifi_clear_session_state(vif_ctx_zep);
 
 	rpu_ctx_zep = vif_ctx_zep->rpu_ctx_zep;
 	if (!rpu_ctx_zep || !rpu_ctx_zep->rpu_ctx) {
@@ -1029,6 +1173,7 @@ int nrf_wifi_if_stop_zep(const struct device *dev)
 	ret = 0;
 unlock:
 	k_mutex_unlock(&vif_ctx_zep->vif_lock);
+	nrf_wifi_refresh_oper_state(vif_ctx_zep);
 
 	ret = nrf_wifi_if_zep_stop_board(dev);
 	if (ret) {
@@ -1040,6 +1185,7 @@ out:
 }
 
 int nrf_wifi_if_get_config_zep(const struct device *dev,
+			       struct net_if *iface __unused,
 			       enum ethernet_config_type type,
 			       struct ethernet_config *config)
 {
@@ -1114,6 +1260,7 @@ out:
 }
 
 int nrf_wifi_if_set_config_zep(const struct device *dev,
+			       struct net_if *iface __unused,
 			       enum ethernet_config_type type,
 			       const struct ethernet_config *config)
 {
@@ -1180,6 +1327,7 @@ int nrf_wifi_if_set_config_zep(const struct device *dev,
 		    config->txinjection_mode) {
 			LOG_INF("%s: Driver TX injection setting is same as configured setting",
 				__func__);
+			ret = 0;
 			goto unlock;
 		}
 		/**
@@ -1203,6 +1351,12 @@ int nrf_wifi_if_set_config_zep(const struct device *dev,
 			LOG_ERR("%s: Mode set operation failed", __func__);
 			goto unlock;
 		}
+
+		sys_dev_ctx->vif_ctx[vif_ctx_zep->vif_idx]->txinjection_mode =
+			config->txinjection_mode;
+		nrf_wifi_refresh_oper_state(vif_ctx_zep);
+		ret = 0;
+		goto unlock;
 	}
 #endif
 #ifdef CONFIG_NRF70_PROMISC_DATA_RX
@@ -1213,7 +1367,7 @@ int nrf_wifi_if_set_config_zep(const struct device *dev,
 		    config->promisc_mode) {
 			LOG_ERR("%s: Driver promisc mode setting is same as configured setting",
 				__func__);
-			goto out;
+			goto unlock;
 		}
 
 		if (config->promisc_mode) {
@@ -1229,7 +1383,7 @@ int nrf_wifi_if_set_config_zep(const struct device *dev,
 
 		if (ret != NRF_WIFI_STATUS_SUCCESS) {
 			LOG_ERR("%s: mode set operation failed", __func__);
-			goto out;
+			goto unlock;
 		}
 	}
 #endif
@@ -1242,6 +1396,7 @@ out:
 
 #ifdef CONFIG_NET_STATISTICS_ETHERNET
 struct net_stats_eth *nrf_wifi_eth_stats_get_type(const struct device *dev,
+						  struct net_if *iface __unused,
 						   uint32_t type)
 {
 	struct nrf_wifi_vif_ctx_zep *vif_ctx_zep = NULL;
@@ -1332,7 +1487,9 @@ err:
 #endif /* CONFIG_NET_STATISTICS_ETHERNET */
 
 #ifdef CONFIG_NET_STATISTICS_WIFI
-int nrf_wifi_stats_get(const struct device *dev, struct net_stats_wifi *zstats)
+int nrf_wifi_stats_get(const struct device *dev,
+		       struct net_if *iface __unused,
+		       struct net_stats_wifi *zstats)
 {
 	enum nrf_wifi_status status = NRF_WIFI_STATUS_FAIL;
 	struct nrf_wifi_ctx_zep *rpu_ctx_zep = NULL;
@@ -1385,9 +1542,6 @@ int nrf_wifi_stats_get(const struct device *dev, struct net_stats_wifi *zstats)
 	zstats->errors.rx = stats.host.total_rx_drop_pkts +
 			stats.fw.umac.interface_data_stats.rx_checksum_error_count;
 	zstats->overrun_count = stats.host.total_tx_drop_pkts + stats.host.total_rx_drop_pkts;
-#ifdef CONFIG_NRF70_RAW_DATA_TX
-	zstats->errors.tx += sys_dev_ctx->raw_pkt_stats.raw_pkt_send_failure;
-#endif /* CONFIG_NRF70_RAW_DATA_TX */
 
 	/* FMAC statistics */
 	status = nrf_wifi_sys_fmac_stats_get(rpu_ctx_zep->rpu_ctx,
@@ -1420,7 +1574,8 @@ out:
 	return ret;
 }
 
-int nrf_wifi_stats_reset(const struct device *dev)
+int nrf_wifi_stats_reset(const struct device *dev,
+			 struct net_if *iface __unused)
 {
 	enum nrf_wifi_status status = NRF_WIFI_STATUS_FAIL;
 	struct nrf_wifi_ctx_zep *rpu_ctx_zep = NULL;

@@ -163,7 +163,8 @@ static int gptp_set_md_sync_receive(int port,
 
 	sync_rcv->upstream_tx_time -= delay_asymmetry_rated;
 
-	sync_rcv->rate_ratio = net_ntohl(fup->tlv.cumulative_scaled_rate_offset);
+	sync_rcv->rate_ratio =
+		(double)(int32_t)net_ntohl((uint32_t)fup->tlv.cumulative_scaled_rate_offset);
 	sync_rcv->rate_ratio /= GPTP_POW2_41;
 	sync_rcv->rate_ratio += 1;
 
@@ -174,7 +175,7 @@ static int gptp_set_md_sync_receive(int port,
 	sync_rcv->last_gm_phase_change.low =
 		net_ntohll(fup->tlv.last_gm_phase_change.low);
 	sync_rcv->last_gm_freq_change =
-		net_ntohl(fup->tlv.scaled_last_gm_freq_change);
+		(double)(int32_t)net_ntohl((uint32_t)fup->tlv.scaled_last_gm_freq_change);
 
 	return 0;
 }
@@ -184,7 +185,7 @@ static void gptp_md_pdelay_reset(int port)
 	struct gptp_pdelay_req_state *state;
 	struct gptp_port_ds *port_ds;
 
-	NET_WARN("Reset Pdelay requests");
+	NET_DBG("Reset Pdelay requests");
 
 	state = &GPTP_PORT_STATE(port)->pdelay_req;
 	port_ds = GPTP_PORT_DS(port);
@@ -460,7 +461,7 @@ static void gptp_md_pdelay_req_timeout(struct k_timer *timer)
 	struct gptp_pdelay_req_state *state;
 	int port;
 
-	for (port = GPTP_PORT_START; port < GPTP_PORT_END; port++) {
+	for (port = GPTP_PORT_START; port <= GPTP_PORT_END; port++) {
 		state = &GPTP_PORT_STATE(port)->pdelay_req;
 		if (timer == &state->pdelay_timer) {
 			state->pdelay_timer_expired = true;
@@ -495,7 +496,7 @@ static void gptp_md_follow_up_receipt_timeout(struct k_timer *timer)
 	struct gptp_sync_rcv_state *state;
 	int port;
 
-	for (port = GPTP_PORT_START; port < GPTP_PORT_END; port++) {
+	for (port = GPTP_PORT_START; port <= GPTP_PORT_END; port++) {
 		state = &GPTP_PORT_STATE(port)->sync_rcv;
 		if (timer == &state->follow_up_discard_timer) {
 			NET_WARN("No %s received after %s message",
@@ -577,7 +578,7 @@ void gptp_md_init_state_machine(void)
 {
 	int port;
 
-	for (port = GPTP_PORT_START; port < GPTP_PORT_END; port++) {
+	for (port = GPTP_PORT_START; port <= GPTP_PORT_END; port++) {
 		gptp_md_init_pdelay_req_state_machine(port);
 		gptp_md_init_pdelay_resp_state_machine(port);
 		gptp_md_init_sync_rcv_state_machine(port);
@@ -855,6 +856,19 @@ static void gptp_md_sync_send_state_machine(int port)
 	port_ds = GPTP_PORT_DS(port);
 
 	if ((!port_ds->ptt_port_enabled) || !port_ds->as_capable) {
+		/* A Sync waiting here for a transmit timestamp will never be
+		 * given one: the port that was to produce it is down or no
+		 * longer capable. Unregister the callback before dropping
+		 * the packet reference so a late timestamp cannot match the
+		 * packet, then release it, or its reference and the stale
+		 * callback are leaked.
+		 */
+		gptp_sync_timestamp_cb_unregister(port);
+
+		net_pkt_unref(state->sync_ptr);
+		state->sync_ptr = NULL;
+
+		state->md_sync_timestamp_avail = false;
 		state->rcvd_md_sync = false;
 		state->state = GPTP_SYNC_SEND_INITIALIZING;
 
@@ -918,6 +932,21 @@ void gptp_md_state_machines(int port)
 {
 	gptp_md_pdelay_req_state_machine(port);
 	gptp_md_pdelay_resp_state_machine(port);
+
+#if defined(CONFIG_NET_GPTP_STATIC_TIME_RECEIVER)
+	/* A static time receiver takes part in synchronization regardless
+	 * of the Pdelay measurement outcome, the upstream bridge is not
+	 * required to answer Pdelay requests. Pin asCapable right after
+	 * the Pdelay state machines, which are its only writers, so the
+	 * Sync receive path never sees it deasserted and never resets.
+	 * Pinning pttPortEnabled is defensive as nothing clears it today,
+	 * but a future portEnabled or link state implementation must not
+	 * silently take down a statically configured time receiver.
+	 */
+	GPTP_PORT_DS(port)->ptt_port_enabled = true;
+	GPTP_PORT_DS(port)->as_capable = true;
+#endif
+
 	gptp_md_sync_receive_state_machine(port);
 	gptp_md_sync_send_state_machine(port);
 }
