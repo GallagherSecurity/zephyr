@@ -19,7 +19,14 @@ LOG_MODULE_REGISTER(intc_ite_it51xxx, LOG_LEVEL_DBG);
 #define INTC_GRPNIER(n)    (4 * ((n) + INTC_REG_OFFSET(n)) + 1)
 #define INTC_GRPNIELMR(n)  (4 * ((n) + INTC_REG_OFFSET(n)) + 2)
 #define INTC_GRPNIPOLR(n)  (4 * ((n) + INTC_REG_OFFSET(n)) + 3)
-#define INTC_IVECT         0x10
+
+#define INTC_IVECT                 0x10
+#define INTERRUPT_VECTOR_2_BYTE(x) FIELD_GET(GENMASK(8, 0), (x))
+
+#if CONFIG_ITE_IT51XXX_INTC_VECTOR_LOADING_CTRL_SUPPORTED
+#define INTC_IVCTCR              0x12
+#define INTC_VECTOR_LOADING_CTRL BIT(7)
+#endif /* CONFIG_ITE_IT51XXX_INTC_VECTOR_LOADING_CTRL_SUPPORTED */
 
 #define II51XXX_INTC_GROUP_COUNT 29
 #define MAX_REGISR_IRQ_NUM       8
@@ -27,7 +34,7 @@ LOG_MODULE_REGISTER(intc_ite_it51xxx, LOG_LEVEL_DBG);
 
 static mm_reg_t intc_base = DT_REG_ADDR(DT_NODELABEL(intc));
 /* Interrupt number of INTC module */
-static uint8_t intc_irq;
+static unsigned long intc_irq;
 static uint8_t ier_setting[II51XXX_INTC_GROUP_COUNT];
 
 void ite_intc_save_and_disable_interrupts(void)
@@ -72,7 +79,7 @@ void ite_intc_isr_clear(unsigned int irq)
 {
 	uint32_t g, i;
 
-	if (irq > CONFIG_NUM_IRQS) {
+	if (irq >= CONFIG_NUM_IRQS) {
 		return;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
@@ -86,7 +93,7 @@ void ite_intc_irq_enable(unsigned int irq)
 	uint32_t g, i;
 	uint8_t en;
 
-	if (irq > CONFIG_NUM_IRQS) {
+	if (irq >= CONFIG_NUM_IRQS) {
 		return;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
@@ -108,7 +115,7 @@ void ite_intc_irq_disable(unsigned int irq)
 
 	volatile uint8_t _ier __unused;
 
-	if (irq > CONFIG_NUM_IRQS) {
+	if (irq >= CONFIG_NUM_IRQS) {
 		return;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
@@ -133,21 +140,21 @@ void ite_intc_irq_polarity_set(unsigned int irq, unsigned int flags)
 	uint32_t g, i;
 	uint8_t tri;
 
-	if ((irq > CONFIG_NUM_IRQS) || ((flags & IRQ_TYPE_EDGE_BOTH) == IRQ_TYPE_EDGE_BOTH)) {
+	if ((irq >= CONFIG_NUM_IRQS) || ((flags & IRQ_TYPE_EDGE_BOTH) == IRQ_TYPE_EDGE_BOTH)) {
 		return;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
 	i = irq % MAX_REGISR_IRQ_NUM;
 
 	tri = sys_read8(intc_base + INTC_GRPNIPOLR(g));
-	if ((flags & IRQ_TYPE_LEVEL_HIGH) || (flags & IRQ_TYPE_EDGE_RISING)) {
+	if (flags & (IRQ_TYPE_LEVEL_HIGH | IRQ_TYPE_EDGE_RISING)) {
 		sys_write8(tri & ~BIT(i), intc_base + INTC_GRPNIPOLR(g));
 	} else {
 		sys_write8(tri | BIT(i), intc_base + INTC_GRPNIPOLR(g));
 	}
 
 	tri = sys_read8(intc_base + INTC_GRPNIELMR(g));
-	if ((flags & IRQ_TYPE_LEVEL_LOW) || (flags & IRQ_TYPE_LEVEL_HIGH)) {
+	if (flags & (IRQ_TYPE_LEVEL_LOW | IRQ_TYPE_LEVEL_HIGH)) {
 		sys_write8(tri & ~BIT(i), intc_base + INTC_GRPNIELMR(g));
 	} else {
 		sys_write8(tri | BIT(i), intc_base + INTC_GRPNIELMR(g));
@@ -162,7 +169,7 @@ int ite_intc_irq_is_enable(unsigned int irq)
 	uint32_t g, i;
 	uint8_t en;
 
-	if (irq > CONFIG_NUM_IRQS) {
+	if (irq >= CONFIG_NUM_IRQS) {
 		return 0;
 	}
 	g = irq / MAX_REGISR_IRQ_NUM;
@@ -173,9 +180,22 @@ int ite_intc_irq_is_enable(unsigned int irq)
 	return (en & BIT(i));
 }
 
-uint8_t ite_intc_get_irq_num(void)
+ite_irq_t ite_intc_get_irq_num(void)
 {
 	return intc_irq;
+}
+
+static inline ite_irq_t ite_get_interrupt_vector(void)
+{
+#if CONFIG_NUM_IRQS <= 255
+	return sys_read8(intc_base + INTC_IVECT);
+#else
+#if CONFIG_ITE_IT51XXX_INTC_VECTOR_LOADING_CTRL_SUPPORTED
+	sys_write8(sys_read8(intc_base + INTC_IVCTCR) | INTC_VECTOR_LOADING_CTRL,
+		   intc_base + INTC_IVCTCR);
+#endif /* CONFIG_ITE_IT51XXX_INTC_VECTOR_LOADING_CTRL_SUPPORTED */
+	return INTERRUPT_VECTOR_2_BYTE(sys_read16(intc_base + INTC_IVECT));
+#endif /* CONFIG_NUM_IRQS <= 255 */
 }
 
 unsigned long __soc_handle_irq(unsigned long arg)
@@ -184,13 +204,13 @@ unsigned long __soc_handle_irq(unsigned long arg)
 	/* wait until two equal interrupt values are read */
 	do {
 		/* Read interrupt number from interrupt vector register */
-		intc_irq = sys_read8(intc_base + INTC_IVECT);
+		intc_irq = ite_get_interrupt_vector();
 		/*
 		 * WORKAROUND: when the interrupt vector register (INTC_VECT)
 		 * isn't latched in a load operation, we read it again to make
 		 * sure the value we got is the correct value.
 		 */
-	} while (intc_irq != sys_read8(intc_base + INTC_IVECT));
+	} while (intc_irq != ite_get_interrupt_vector());
 	/* determine interrupt number */
 	intc_irq -= IVECT_OFFSET_WITH_IRQ;
 	/* clear interrupt status */

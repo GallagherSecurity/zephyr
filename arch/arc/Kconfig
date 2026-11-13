@@ -17,11 +17,29 @@ config CPU_ARCEM
 
 config CPU_ARCHS
 	bool
-	select ATOMIC_OPERATIONS_BUILTIN
-	select BARRIER_OPERATIONS_BUILTIN
+	select ATOMIC_OPERATIONS_ARCH if ARC_MWDT_MEM_ORDERING_WORKAROUND
+	select ATOMIC_OPERATIONS_BUILTIN if !ARC_MWDT_MEM_ORDERING_WORKAROUND
+	select BARRIER_OPERATIONS_ARCH if ARC_MWDT_MEM_ORDERING_WORKAROUND
+	select BARRIER_OPERATIONS_BUILTIN if !ARC_MWDT_MEM_ORDERING_WORKAROUND
 	help
 	  This option signifies the use of an ARC HS CPU
 
+config ARC_MWDT_MEM_ORDERING_WORKAROUND
+	bool
+	default y if "$(ZEPHYR_TOOLCHAIN_VARIANT)" = "arcmwdt"
+	help
+	  Route the atomic and barrier APIs through the ARC backends in
+	  include/zephyr/arch/arc/ instead of the compiler builtins.
+
+	  MWDT lowers every __atomic_* operation to a barrier-free llock/scond
+	  library routine, drops the memory-order argument, and implements
+	  __sync_synchronize() as a bare return, so the builtins provide
+	  atomicity without the ordering that Zephyr's APIs promise. ARC GNU
+	  GCC emits the required dmb instructions itself and is unaffected.
+
+	  This is a temporary workaround. Once MWDT implements memory ordering
+	  for the atomic builtins, revert this symbol together with the two
+	  ARC backend headers so that ARC HS goes back to the builtins.
 
 choice
 	prompt "ARC Instruction Set"
@@ -32,6 +50,7 @@ config ISA_ARCV2
 	select ARCH_HAS_STACK_PROTECTION if ARC_HAS_STACK_CHECKING || (ARC_MPU && ARC_MPU_VER !=2)
 	select ARCH_HAS_USERSPACE if ARC_MPU
 	select ARCH_HAS_SINGLE_THREAD_SUPPORT if !SMP
+	select ARCH_HAS_NOCACHE_MEMORY_SUPPORT if ARC_MPU && CPU_HAS_DCACHE && (ARC_MPU_VER = 6)
 	select USE_SWITCH
 	select USE_SWITCH_SUPPORTED
 	help
@@ -78,6 +97,8 @@ config CPU_EM6
 	select CPU_ARCEM
 	select CPU_HAS_DCACHE
 	select CPU_HAS_ICACHE
+	select DCACHE_LINE_SIZE_DETECT_SUPPORT
+	select ICACHE_LINE_SIZE_DETECT_SUPPORT
 	help
 	  If y, the SoC uses an ARC EM6 CPU
 
@@ -86,6 +107,8 @@ config CPU_HS3X
 	select CPU_ARCHS
 	select CPU_HAS_DCACHE
 	select CPU_HAS_ICACHE
+	select DCACHE_LINE_SIZE_DETECT_SUPPORT
+	select ICACHE_LINE_SIZE_DETECT_SUPPORT
 	help
 	  If y, the SoC uses an ARC HS3x CPU
 
@@ -94,6 +117,8 @@ config CPU_HS4X
 	select CPU_ARCHS
 	select CPU_HAS_DCACHE
 	select CPU_HAS_ICACHE
+	select DCACHE_LINE_SIZE_DETECT_SUPPORT
+	select ICACHE_LINE_SIZE_DETECT_SUPPORT
 	help
 	  If y, the SoC uses an HS4X CPU
 
@@ -106,6 +131,8 @@ config CPU_HS5X
 	select CPU_ARCHS
 	select CPU_HAS_DCACHE
 	select CPU_HAS_ICACHE
+	select DCACHE_LINE_SIZE_DETECT_SUPPORT
+	select ICACHE_LINE_SIZE_DETECT_SUPPORT
 	help
 	  If y, the SoC uses an ARC HS6x CPU
 
@@ -115,6 +142,8 @@ config CPU_HS6X
 	select 64BIT
 	select CPU_HAS_DCACHE
 	select CPU_HAS_ICACHE
+	select DCACHE_LINE_SIZE_DETECT_SUPPORT
+	select ICACHE_LINE_SIZE_DETECT_SUPPORT
 	help
 	  If y, the SoC uses an ARC HS6x CPU
 
@@ -217,7 +246,7 @@ config ARC_HAS_STACK_CHECKING
 
 config ARC_CONNECT
 	bool "ARC has ARC connect"
-	select SCHED_IPI_SUPPORTED
+	select SCHED_IPI_SUPPORTED if SMP
 	help
 	  ARC is configured with ARC CONNECT which is a hardware for connecting
 	  multi cores.
@@ -367,8 +396,8 @@ source "arch/arc/core/mpu/Kconfig"
 
 endmenu
 
-config DCACHE_LINE_SIZE
-	default 32
+configdefault DCACHE_LINE_SIZE
+	default 32 if !$(dt_node_has_prop,/cpus/cpu@0,d-cache-line-size)
 
 config ARC_DCACHE_REGION_OPERATIONS
 	bool "DCACHE region operations"

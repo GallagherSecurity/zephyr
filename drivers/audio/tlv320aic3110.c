@@ -316,7 +316,7 @@ static int codec_configure_clocks(const struct device *dev, struct audio_codec_c
 				i2s->frame_clk_freq * i2s->word_size * 2U, cfg->mclk_freq);
 			return -EINVAL;
 		}
-		LOG_DBG("I2S Master BCLKDIV: %u", bclk_div);
+		LOG_DBG("I2S controller BCLKDIV: %u", bclk_div);
 		codec_write_reg(dev, BCLK_DIV_ADDR, BCLK_DIV_POWER_UP | BCLK_DIV(bclk_div));
 	}
 
@@ -555,7 +555,7 @@ static void codec_read_all_regs(const struct device *dev)
 }
 #endif
 
-static const struct audio_codec_api codec_driver_api = {
+static DEVICE_API(audio_codec, codec_driver_api) = {
 	.configure = codec_configure,
 	.start_output = codec_start_output,
 	.stop_output = codec_stop_output,

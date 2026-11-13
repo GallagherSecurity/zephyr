@@ -113,6 +113,8 @@
 &i2c1 {
 	pinctrl-0 = <&i2c1_scl_pb8 &i2c1_sda_pb9>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 8 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 9 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 	clock-frequency = <I2C_BITRATE_FAST>;
 };
@@ -120,6 +122,8 @@
 &i2c2 {
 	pinctrl-0 = <&i2c2_scl_pa11 &i2c2_sda_pa12>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpioa 11 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpioa 12 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 	clock-frequency = <I2C_BITRATE_FAST>;
 };
@@ -138,13 +142,16 @@
 	status = "okay";
 };
 
-&adc1 {
-	pinctrl-0 = <&adc1_in0_pa0 &adc1_in1_pa1>;
-	pinctrl-names = "default";
+&adc1_common {
 	st,adc-clock-source = "SYNC";
 	st,adc-prescaler = <4>;
 	status = "okay";
-	vref-mv = <3300>;
+};
+
+&adc1 {
+	pinctrl-0 = <&adc1_in0_pa0 &adc1_in1_pa1>;
+	pinctrl-names = "default";
+	status = "okay";
 };
 
 &die_temp {
@@ -153,12 +160,13 @@
 
 &flash0 {
 	partitions {
-		compatible = "fixed-partitions";
 		#address-cells = <1>;
 		#size-cells = <1>;
+		ranges;
 
 		/* Set 4KB of storage at the end of 128KB flash */
 		storage_partition: partition@1f000 {
+			compatible = "zephyr,mapped-partition";
 			label = "storage";
 			reg = <0x0001f000 DT_SIZE_K(4)>;
 		};

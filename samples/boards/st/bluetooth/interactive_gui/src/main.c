@@ -21,14 +21,13 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/bluetooth/hci_driver_bluenrg.h>
 #include <zephyr/bluetooth/hci_types.h>
-#include <zephyr/usb/usb_device.h>
 #include <zephyr/net_buf.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/l2cap.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/bluetooth/buf.h>
 #include <zephyr/bluetooth/hci_raw.h>
-#include <version.h>
+#include <zephyr/version.h>
 
 #define LOG_MODULE_NAME gui_hci_uart
 LOG_MODULE_REGISTER(LOG_MODULE_NAME);

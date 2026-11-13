@@ -422,9 +422,9 @@ static int ad2s1210_channel_get(const struct device *dev, enum sensor_channel ch
 	case SENSOR_CHAN_RPM: {
 		/* Get max range from lookup table */
 		int32_t range = table_velocity_range_rpm[data->resolution][data->clock];
-		/* Convert raw velocity to RPM */
-		int rpm = ((int32_t)data->velocity * range) /
-			  ((1 << (AD2S1210_MAX_RESOLUTION_BITS - 1)) - 1);
+		/* The product overflows 32 bits in the fastest ranges */
+		int rpm = (int)(((int64_t)data->velocity * range) /
+				((1 << (AD2S1210_MAX_RESOLUTION_BITS - 1)) - 1));
 
 		val->val1 = rpm;
 		val->val2 = 0;
@@ -706,20 +706,20 @@ static int ad2s1210_init(const struct device *dev) /* cppcheck-suppress unusedFu
 
 	/* Check if SPI bus is ready */
 	if (!spi_is_ready_dt(&config->spi)) {
-		LOG_ERR("SPI bus not ready");
+		LOG_ERR_DEVICE_NOT_READY(config->spi.bus);
 		return -ENODEV;
 	}
 
 	/* Check if sample GPIO port is ready */
 	if (!gpio_is_ready_dt(&config->sample_gpio)) {
-		LOG_ERR("Sample GPIO port not ready");
+		LOG_ERR_DEVICE_NOT_READY(config->sample_gpio.port);
 		return -ENODEV;
 	}
 
 	/* Check if mode GPIO ports are ready (required) */
 	for (uint8_t idx = 0; idx < (uint8_t)AD2S1210_MODE_PIN_MAX_VAL; idx++) {
 		if (!gpio_is_ready_dt(&config->mode_gpios[idx])) {
-			LOG_ERR("Mode GPIO %d port not ready", idx);
+			LOG_ERR_DEVICE_NOT_READY(config->mode_gpios[idx].port);
 			return -ENODEV;
 		}
 	}
@@ -729,7 +729,7 @@ static int ad2s1210_init(const struct device *dev) /* cppcheck-suppress unusedFu
 	if (config->have_resolution_pins) {
 		for (uint8_t idx = 0; idx < (uint8_t)AD2S1210_RES_PIN_MAX_VAL; idx++) {
 			if (!gpio_is_ready_dt(&config->resolution_gpios[idx])) {
-				LOG_ERR("Resolution GPIO %d port not ready", idx);
+				LOG_ERR_DEVICE_NOT_READY(config->resolution_gpios[idx].port);
 				return -ENODEV;
 			}
 		}
@@ -737,14 +737,14 @@ static int ad2s1210_init(const struct device *dev) /* cppcheck-suppress unusedFu
 
 	/* Check if reset GPIO port is ready */
 	if (config->reset_gpio.port && !gpio_is_ready_dt(&config->reset_gpio)) {
-		LOG_ERR("Reset GPIO port not ready");
+		LOG_ERR_DEVICE_NOT_READY(config->reset_gpio.port);
 		return -ENODEV;
 	}
 
 	/* Check if fault GPIO ports are ready */
 	for (uint8_t idx = 0; idx < (uint8_t)AD2S1210_FAULT_PIN_MAX_VAL; idx++) {
 		if (config->fault_gpios[idx].port && !gpio_is_ready_dt(&config->fault_gpios[idx])) {
-			LOG_ERR("Fault GPIO %d port not ready", idx);
+			LOG_ERR_DEVICE_NOT_READY(config->fault_gpios[idx].port);
 			return -ENODEV;
 		}
 	}
@@ -865,6 +865,14 @@ static int ad2s1210_init(const struct device *dev) /* cppcheck-suppress unusedFu
 
 /** Macro used to initialize one ad2s1210 driver instance */
 #define AD2S1210_INIT(i)                                                                           \
+	BUILD_ASSERT(DT_INST_PROP_LEN_OR(i, resolution_gpios, AD2S1210_RES_PIN_MAX_VAL) ==         \
+			     AD2S1210_RES_PIN_MAX_VAL,                                             \
+		     "ad2s1210: resolution-gpios must be exactly RES0 and RES1");                  \
+	BUILD_ASSERT(!DT_INST_NODE_HAS_PROP(i, resolution_gpios) ||                                \
+			     (DT_INST_PROP_HAS_IDX(i, resolution_gpios, 0) &&                      \
+			      DT_INST_PROP_HAS_IDX(i, resolution_gpios, 1)),                       \
+		     "ad2s1210: resolution-gpios needs a GPIO for RES0 and RES1");                 \
+                                                                                                   \
 	static struct ad2s1210_data ad2s1210_data_##i;                                             \
                                                                                                    \
 	static const struct ad2s1210_config ad2s1210_config_##i = {                                \

@@ -10,7 +10,6 @@ zephyr_library_sources_ifdef(CONFIG_BT_HCI_RAW          hci_raw.c hci_common.c)
 zephyr_library_sources_ifdef(CONFIG_BT_MONITOR          monitor.c)
 zephyr_library_sources_ifdef(CONFIG_BT_SETTINGS         settings.c)
 zephyr_library_sources_ifdef(CONFIG_BT_HOST_CCM         aes_ccm.c)
-zephyr_library_sources_ifdef(CONFIG_BT_LONG_WQ          long_wq.c)
 
 if(CONFIG_BT_HCI_HOST)
   zephyr_library_sources(
@@ -91,12 +90,6 @@ if(CONFIG_BT_SMP_LOG_LEVEL_DBG OR CONFIG_BT_KEYS_LOG_LEVEL_DBG OR CONFIG_BT_LOG_
   production."
     )
 endif()
-if(CONFIG_BT_FIXED_PASSKEY)
-  message(WARNING "CONFIG_BT_FIXED_PASSKEY is enabled
-  A fixed passkey is easy to deduce during the pairing procedure, do not use in
-  production."
-    )
-endif()
 if(CONFIG_BT_OOB_DATA_FIXED)
   message(WARNING "CONFIG_BT_OOB_DATA_FIXED is enabled.
   A hardcoded OOB data set will be stored in the image, do not use in
@@ -119,7 +112,7 @@ if(CONFIG_BT_CONN_DISABLE_SECURITY)
     )
 endif()
 
-zephyr_library_link_libraries_ifdef(CONFIG_MBEDTLS mbedTLS)
+zephyr_library_link_libraries_ifdef(CONFIG_MBEDTLS_BUILTIN mbedtls_iface)
 zephyr_library_include_directories_ifdef(CONFIG_BUILD_WITH_TFM
   $<TARGET_PROPERTY:tfm,TFM_BINARY_DIR>/api_ns/interface/include
 )
@@ -128,5 +121,5 @@ zephyr_library_include_directories_ifdef(CONFIG_BUILD_WITH_TFM
 # In order to compile Bsim tests with these test features
 # and PSA enabled, the libraries must be linked.
 if(CONFIG_BT_MESH AND CONFIG_BT_TESTING)
-  zephyr_library_link_libraries_ifdef(CONFIG_MBEDTLS mbedTLS)
+  zephyr_library_link_libraries_ifdef(CONFIG_MBEDTLS_BUILTIN mbedtls_iface)
 endif()

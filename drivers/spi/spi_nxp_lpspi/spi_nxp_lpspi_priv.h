@@ -8,12 +8,13 @@
 #define ZEPHYR_DRIVERS_SPI_SPI_NXP_LPSPI_PRIV_H_
 
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/spi/rtio.h>
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/clock_control.h>
+#include <zephyr/drivers/reset.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/irq.h>
 
+#include "../spi_rtio.h"
 #include "../spi_context.h"
 
 #if CONFIG_NXP_LP_FLEXCOMM
@@ -41,6 +42,7 @@ struct lpspi_config {
 	uint32_t sck_pcs_delay;
 	uint32_t transfer_delay;
 	const struct pinctrl_dev_config *pincfg;
+	struct reset_dt_spec reset;
 	uint8_t data_pin_config;
 	bool tristate_output;
 	uint8_t tx_fifo_size;
@@ -56,6 +58,63 @@ struct lpspi_data {
 	uint8_t major_version;
 	uint32_t clock_freq;
 };
+
+/* Common helper function to enable or disable the LPSPI module while
+ * taking into account ERR051472
+ */
+static inline void lpspi_enable(LPSPI_Type *base, bool enable)
+{
+	if (enable) {
+		base->CR |= LPSPI_CR_MEN_MASK;
+	} else {
+		base->CR &= ~LPSPI_CR_MEN_MASK;
+		while ((base->CR & LPSPI_CR_MEN_MASK) != 0) {
+			/* According to datasheet, should wait for this MEN bit
+			 * to clear once idle.
+			 */
+		}
+	}
+#if defined(FSL_FEATURE_LPSPI_HAS_ERRATA_051472) && FSL_FEATURE_LPSPI_HAS_ERRATA_051472
+	/*
+	 * ERR051472: The SR[REF] would assert if software disables the LPSPI module
+	 * after receiving some data and then enabled the LPSPI again without performing
+	 * a software reset.
+	 * Workaround: Clear SR[REF] flag after LPSPI module enabled
+	 */
+	if ((base->SR & LPSPI_SR_REF_MASK) != 0U) {
+		base->SR = LPSPI_SR_REF_MASK;
+	}
+#endif /* FSL_FEATURE_LPSPI_HAS_ERRATA_051472 */
+}
+
+/*
+ * Avoid register reading problems: Reading the Transmit Command Register will return
+ * the current state of the command register. Reading the Transmit Command Register at the
+ * same time that the Transmit Command Register is loaded from the transmit FIFO, can
+ * return an incorrect Transmit Command Register value. It is recommended:
+ * - to either read the Transmit Command Register when the transmit FIFO is empty,
+ * - or to read the Transmit Command Register more than once and then compare the
+ *   returned values.
+ */
+static inline uint32_t lpspi_read_tcr(LPSPI_Type *base)
+{
+	uint32_t tcr_values[2];
+	uint32_t i = 0u;
+
+	tcr_values[0] = base->TCR;
+	do {
+		i = (i + 1u) % 2u;
+		/* ERR050606 LPSPI: TCR value does not get resampled when polling the
+		 * register.
+		 * Workaround: After reading the Transmit Command Register must always
+		 * access a different register in between subsequent reads from TCR.
+		 */
+		(void)base->SR;
+		tcr_values[i] = base->TCR;
+	} while (tcr_values[0] != tcr_values[1]);
+
+	return tcr_values[0];
+}
 
 /* Common helper functions used to interact with LPSPI FIFOs (TX and RX) when dealing
  * with cpu-based implementation.
@@ -117,6 +176,7 @@ int lpspi_wait_tx_fifo_empty(const struct device *dev);
 		.sck_pcs_delay = DT_INST_PROP_OR(n, sck_pcs_delay, 0),                             \
 		.transfer_delay = DT_INST_PROP_OR(n, transfer_delay, 0),                           \
 		.pincfg = PINCTRL_DT_INST_DEV_CONFIG_GET(n),                                       \
+		.reset = RESET_DT_SPEC_INST_GET_OR(n, {0}),                                        \
 		.data_pin_config = (uint8_t)DT_INST_ENUM_IDX(n, data_pin_config),                  \
 		.tristate_output = DT_INST_PROP(n, tristate_output),                               \
 		.rx_fifo_size = (uint8_t)DT_INST_PROP(n, rx_fifo_size),                            \

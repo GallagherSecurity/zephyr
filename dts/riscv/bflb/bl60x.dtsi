@@ -21,6 +21,17 @@
 	#address-cells = <1>;
 	#size-cells = <1>;
 
+	bt_hci_bflb: bt-hci {
+		compatible = "bflb,bt-hci";
+		status = "disabled";
+	};
+
+	tsen: tsen {
+		compatible = "bflb,tsen";
+		io-channels = <&adc0 0>;
+		status = "disabled";
+	};
+
 	clocks {
 		clk_rc32m: clk-rc32m {
 			#clock-cells = <0>;
@@ -90,10 +101,6 @@
 		};
 	};
 
-	chosen {
-		zephyr,flash-controller = &flashctrl;
-	};
-
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
@@ -104,7 +111,13 @@
 			compatible = "sifive,e24", "riscv";
 			reg = <0>;
 			riscv,isa-base = "rv32i";
-			riscv,isa-extensions = "i", "m", "a", "f", "c", "zicsr", "zifencei";
+			/* The E24 implements the A extension but only supports
+			 * atomics in its tightly-integrated memories -- an AMO
+			 * to OCRAM bus-faults.  Omit "a" so the build uses the
+			 * AMO-free multilib (the kernel uses
+			 * ATOMIC_OPERATIONS_C on this SoC).
+			 */
+			riscv,isa-extensions = "i", "m", "f", "c", "zicsr", "zifencei";
 			hardware-exec-breakpoint-count = <4>;
 			status = "okay";
 
@@ -326,15 +339,24 @@
 			interrupt-parent = <&clic>;
 		};
 
-		flashctrl: flash-controller@4000b000 {
-			compatible = "bflb,flash-controller";
+		sf_ctrl: sf@4000b000 {
+			compatible = "bflb,sf-controller";
 			reg = <0x4000b000 0x1000>;
+			ranges;
 			#address-cells = <1>;
 			#size-cells = <1>;
 			status = "okay";
 
 			interrupts = <39 0>;
 			interrupt-parent = <&clic>;
+
+			sf_bank1: flash-controller@23000000 {
+				compatible = "bflb,sf-bank";
+				reg = <0x23000000 DT_SIZE_M(16)>;
+				ranges = <0x0 0x23000000 DT_SIZE_M(16)>;
+				#address-cells = <1>;
+				#size-cells = <1>;
+			};
 		};
 
 		dma0: dma@4000c000 {
@@ -383,25 +405,67 @@
 		};
 
 		retram: memory@40010000 {
-			compatible = "mmio-sram";
+			compatible = "zephyr,memory-region", "mmio-sram";
 			reg = <0x40010000 DT_SIZE_K(4)>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0x0 0x40010000 DT_SIZE_K(4)>;
+			zephyr,memory-region = "RETRAM";
 		};
 
 		itcm: itcm@22010000 {
-			compatible = "zephyr,memory-region", "sifive,dtim0";
+			compatible = "zephyr,memory-region", "mmio-sram";
 			reg = <0x22010000 DT_SIZE_K(16)>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0x0 0x22010000 DT_SIZE_K(16)>;
 			zephyr,memory-region = "ITCM";
 		};
 
-		dtcm: dtcm@42014000 {
-			compatible = "zephyr,memory-region", "sifive,dtim0";
-			reg = <0x42014000 DT_SIZE_K(48)>;
-			zephyr,memory-region = "DTCM";
+		/* All contiguous fast RAM
+		 * DTCM is tightly coupled, but the SRAM is not, this can be a problem when clocks
+		 * are being changed.
+		 */
+		all_ram: memory@42014000 {
+			compatible = "mmio-sram";
+			reg = <0x42014000 DT_SIZE_K(224)>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0x0 0x42014000 DT_SIZE_K(224)>;
+
+			/* DTCM is significantly faster than the SRAM */
+			dtcm: dtcm@0 {
+				compatible = "zephyr,memory-region", "sifive,dtim0";
+				reg = <0x0 DT_SIZE_K(48)>;
+				#address-cells = <1>;
+				#size-cells = <1>;
+				ranges = <0x0 0x0 DT_SIZE_K(48)>;
+				zephyr,memory-region = "DTCM";
+				status = "disabled";
+			};
+
+			/* SRAM goes through the system bus and is cached via L1C */
+			sram0: memory@c000 {
+				compatible = "mmio-sram";
+				reg = <0xc000 DT_SIZE_K(176)>;
+				#address-cells = <1>;
+				#size-cells = <1>;
+				ranges = <0x0 0xc000 DT_SIZE_K(176)>;
+				status = "disabled";
+			};
 		};
 
-		sram0: memory@42020000 {
-			compatible = "mmio-sram";
-			reg = <0x42020000 DT_SIZE_K(176)>;
+		wifi0: wifi@44000000 {
+			compatible = "bflb,wifi4";
+			reg = <0x44000000 0x1000>;
+			interrupts = <70 1>, <79 1>, <21 1>, <22 1>;
+			interrupt-names = "wifi", "wifi-ipc", "rf-top0", "rf-top1";
+			interrupt-parent = <&clic>;
+			status = "disabled";
+
+			pwr-table-11b = <20 20 20 18>;
+			pwr-table-11g = <18 18 18 18 18 18 14 14>;
+			pwr-table-11n = <18 18 18 18 18 16 14 14>;
 		};
 	};
 };

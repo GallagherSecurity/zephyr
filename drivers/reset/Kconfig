@@ -28,6 +28,7 @@ config RESET_INIT_PRIORITY
 comment "Reset controller Drivers"
 
 # zephyr-keep-sorted-start
+rsource "Kconfig.arm_scmi"
 rsource "Kconfig.aspeed"
 rsource "Kconfig.focaltech"
 rsource "Kconfig.gd32"
@@ -40,11 +41,13 @@ rsource "Kconfig.npcx"
 rsource "Kconfig.numaker"
 rsource "Kconfig.nxp_mrcc"
 rsource "Kconfig.nxp_rstctl"
+rsource "Kconfig.rockchip"
 rsource "Kconfig.rpi_pico"
 rsource "Kconfig.rts5817"
 rsource "Kconfig.sf32lb"
 rsource "Kconfig.stm32"
 rsource "Kconfig.syna_sr100"
+rsource "Kconfig.wch"
 # zephyr-keep-sorted-stop
 
 endif # RESET

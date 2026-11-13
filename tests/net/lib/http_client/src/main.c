@@ -31,6 +31,7 @@ HTTP_RESOURCE_DEFINE(static_resource, test_http_service, "/static",
 
 static uint8_t dynamic_buf[TEST_BUF_SIZE];
 static size_t dynamic_len;
+static int dynamic_status;
 
 static int dynamic_cb(struct http_client_ctx *client, enum http_transaction_status status,
 		      const struct http_request_ctx *request_ctx,
@@ -46,6 +47,7 @@ static int dynamic_cb(struct http_client_ctx *client, enum http_transaction_stat
 
 	switch (client->method) {
 	case HTTP_GET:
+		response_ctx->status = dynamic_status;
 		response_ctx->body = dynamic_buf;
 		response_ctx->body_len = dynamic_len;
 		response_ctx->final_chunk = true;
@@ -135,6 +137,7 @@ static int client_fd = -1;
 static uint8_t recv_buf[64];
 static uint8_t response_buf[TEST_BUF_SIZE];
 static size_t resp_offset;
+static int response_status_code;
 
 static void common_request_init(struct http_request *req)
 {
@@ -190,6 +193,7 @@ int test_common_cb(struct http_parser *parser, const char *at, size_t length)
 	memcpy(response_buf + resp_offset, at, length);
 	resp_offset += length;
 
+	response_status_code = parser->status_code;
 	return 0;
 }
 
@@ -213,6 +217,29 @@ ZTEST(http_client, test_http1_client_get_body_cb)
 	test_http1_client_get_cb_common(&http_cb);
 
 	zassert_str_equal(response_buf, LOREM_IPSUM_SHORT, "Wrong body payload");
+}
+
+ZTEST(http_client, test_http1_client_get_body_cb_error_500)
+{
+	struct http_parser_settings http_cb = {
+		.on_body = test_common_cb,
+	};
+	struct http_request req = { 0 };
+	int ret;
+
+	common_request_init(&req);
+	req.method = HTTP_GET;
+	req.url = "/dynamic";
+	req.http_cb = &http_cb;
+
+	dynamic_len = LOREM_IPSUM_STRLEN;
+	memcpy(dynamic_buf, LOREM_IPSUM, LOREM_IPSUM_STRLEN);
+	dynamic_status = 500;
+
+	ret = http_client_req(client_fd, &req, -1, NULL);
+	zassert_true(ret > 0, "http_client_req() failed (%d)", ret);
+	zassert_str_equal(response_buf, LOREM_IPSUM, "Wrong body payload");
+	zassert_equal(response_status_code, 500, "Unexpected HTTP status code");
 }
 
 static bool test_on_header_field;
@@ -355,9 +382,9 @@ ZTEST(http_client, test_http1_client_post_payload_cb)
 	zassert_true(ctx.final, "No final event received");
 	zassert_equal(ctx.status, 200, "Unexpected HTTP status code");
 	zassert_equal(dynamic_len, LOREM_IPSUM_SHORT_STRLEN,
-		      "Invalid payload length uploaded %d", dynamic_len);
+		      "Invalid payload length uploaded %zu", dynamic_len);
 	zassert_mem_equal(dynamic_buf, LOREM_IPSUM_SHORT, dynamic_len,
-			  "Invalid payload uploaded %d", dynamic_len);
+			  "Invalid payload uploaded %zu", dynamic_len);
 }
 
 static void client_tests_before(void *fixture)
@@ -438,7 +465,31 @@ static const char chunked_te_response[] =
 	"0\r\n"
 	"\r\n";
 
-static K_THREAD_STACK_DEFINE(chunked_srv_stack, 1024);
+/* Three chunks delivered in one recv call. Before every chunk was reported,
+ * only the last fragment reached the application.
+ */
+#define MULTI_CHUNKED_BODY_SIZE 32
+
+static const char multi_chunked_te_response[] =
+	"HTTP/1.1 200 OK\r\n"
+	"Transfer-Encoding: chunked\r\n"
+	"\r\n"
+	"10\r\n"
+	"AAAAAAAAAAAAAAAA"
+	"\r\n"
+	"a\r\n"
+	"BBBBBBBBBB"
+	"\r\n"
+	"6\r\n"
+	"CCCCCC"
+	"\r\n"
+	"0\r\n"
+	"\r\n";
+
+static const char *chunked_srv_response;
+static size_t chunked_srv_response_len;
+
+static K_THREAD_STACK_DEFINE(chunked_srv_stack, 2048 + CONFIG_TEST_EXTRA_STACK_SIZE);
 static struct k_thread chunked_srv_thread;
 static K_SEM_DEFINE(chunked_srv_ready, 0, 1);
 
@@ -477,8 +528,7 @@ static void chunked_srv_fn(void *p1, void *p2, void *p3)
 	conn = zsock_accept(srv, NULL, NULL);
 	if (conn >= 0) {
 		(void)zsock_recv(conn, req_buf, sizeof(req_buf) - 1, 0);
-		(void)zsock_send(conn, chunked_te_response,
-				 sizeof(chunked_te_response) - 1, 0);
+		(void)zsock_send(conn, chunked_srv_response, chunked_srv_response_len, 0);
 		zsock_close(conn);
 	}
 
@@ -498,6 +548,8 @@ static void chunked_tests_before(void *fixture)
 
 	memset(chunked_recv_buf, 0, sizeof(chunked_recv_buf));
 	memset(chunked_response_buf, 0, sizeof(chunked_response_buf));
+	chunked_srv_response = chunked_te_response;
+	chunked_srv_response_len = sizeof(chunked_te_response) - 1;
 
 	k_thread_create(&chunked_srv_thread, chunked_srv_stack,
 			K_THREAD_STACK_SIZEOF(chunked_srv_stack),
@@ -558,6 +610,58 @@ ZTEST(http_client_chunked_te, test_body_frag_len_chunked_te)
 		      ctx.offset, CHUNKED_BODY_SIZE);
 	zassert_mem_equal(chunked_response_buf, "AAAAAAAAAAAAAAAA",
 			  CHUNKED_BODY_SIZE, "Body content mismatch");
+}
+
+static void multi_chunked_request_init(struct http_request *req)
+{
+	req->method = HTTP_GET;
+	req->url = "/firmware/app.bin";
+	req->host = SERVER_IPV6_ADDR;
+	req->protocol = "HTTP/1.1";
+	req->response = response_cb;
+	req->recv_buf = chunked_recv_buf;
+	req->recv_buf_len = sizeof(chunked_recv_buf);
+
+	chunked_srv_response = multi_chunked_te_response;
+	chunked_srv_response_len = sizeof(multi_chunked_te_response) - 1;
+}
+
+ZTEST(http_client_chunked_te, test_body_multi_chunk_single_recv)
+{
+	struct http_request req = { 0 };
+	struct test_ctx ctx = { 0 };
+	int ret;
+
+	multi_chunked_request_init(&req);
+
+	ctx.buf = chunked_response_buf;
+	ctx.buflen = sizeof(chunked_response_buf);
+
+	ret = http_client_req(chunked_client_fd, &req, -1, &ctx);
+	zassert_true(ret > 0, "http_client_req() failed (%d)", ret);
+	zassert_true(ctx.final, "No final event received");
+	zassert_equal(ctx.status, 200, "Unexpected HTTP status code");
+
+	zassert_equal(ctx.offset, MULTI_CHUNKED_BODY_SIZE,
+		      "body length mismatch: got %zu, expected %d",
+		      ctx.offset, MULTI_CHUNKED_BODY_SIZE);
+	zassert_mem_equal(chunked_response_buf, "AAAAAAAAAAAAAAAABBBBBBBBBBCCCCCC",
+			  MULTI_CHUNKED_BODY_SIZE, "Body content mismatch");
+}
+
+ZTEST(http_client_chunked_te, test_abort_multi_chunk_single_recv)
+{
+	struct http_request req = { 0 };
+	struct test_ctx ctx = { 0 };
+	int ret;
+
+	multi_chunked_request_init(&req);
+
+	ctx.abort = true;
+
+	ret = http_client_req(chunked_client_fd, &req, -1, &ctx);
+	zassert_equal(ret, -ECONNABORTED,
+		      "http_client_req() should've reported abort (%d)", ret);
 }
 
 ZTEST_SUITE(http_client_chunked_te, NULL, NULL,

@@ -115,14 +115,12 @@ typedef struct {
 /** @} */
 
 /** @cond INTERNAL_HIDDEN */
-#define Z_TIMEOUT_NO_WAIT_INIT {0}
-#define Z_TIMEOUT_NO_WAIT      ((k_timeout_t)Z_TIMEOUT_NO_WAIT_INIT)
+#define Z_TIMEOUT_NO_WAIT ((k_timeout_t) {0})
 #if defined(__cplusplus) && ((__cplusplus - 0) < 202002L)
-#define Z_TIMEOUT_TICKS_INIT(t) {(t)}
+#define Z_TIMEOUT_TICKS(t) ((k_timeout_t) { (t) })
 #else
-#define Z_TIMEOUT_TICKS_INIT(t) {.ticks = (t)}
+#define Z_TIMEOUT_TICKS(t) ((k_timeout_t) { .ticks = (t) })
 #endif
-#define Z_TIMEOUT_TICKS(t) ((k_timeout_t)Z_TIMEOUT_TICKS_INIT(t))
 #define Z_FOREVER          Z_TIMEOUT_TICKS(K_TICKS_FOREVER)
 
 #ifdef CONFIG_TIMEOUT_64BIT
@@ -155,7 +153,7 @@ typedef struct {
  * timeouts, except -1 which is reserved for K_TIMEOUT_FOREVER. 0 is K_NO_WAIT,
  * which is historically considered a relative timeout.
  * K_TIMEOUT_FOREVER is not considered a relative timeout and neither is it
- * considerd an absolute timeouts (so !Z_IS_TIMEOUT_RELATIVE() does not
+ * considered an absolute timeouts (so !Z_IS_TIMEOUT_RELATIVE() does not
  * necessarily mean it is an absolute timeout if ticks == -1);
  */
 #define Z_IS_TIMEOUT_RELATIVE(timeout) (((timeout).ticks) >= 0)

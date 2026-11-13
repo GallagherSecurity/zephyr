@@ -28,7 +28,7 @@ LOG_MODULE_REGISTER(espi, CONFIG_ESPI_LOG_LEVEL);
 #include <zephyr/pm/device.h>
 #include <zephyr/pm/policy.h>
 #include "reg/reg_system.h"
-#include "zephyr/drivers/gpio/gpio_rts5912.h"
+#include <zephyr/drivers/gpio/gpio_rts5912.h>
 #endif
 
 BUILD_ASSERT(DT_NUM_INST_STATUS_OKAY(DT_DRV_COMPAT) == 1, "support only one espi compatible node");
@@ -833,6 +833,38 @@ struct espi_vw_tx_cached {
 static struct espi_vw_ch_cached espi_vw_ch_cached_data;
 static struct espi_vw_tx_cached espi_vw_tx_cached_data;
 
+#ifdef CONFIG_ESPI_RTS5912_PRESERVED_DATA_HOOKS
+static struct {
+	/** If true, the payload struct contains valid data */
+	bool valid;
+	struct {
+		/** Internal-use version counter in case the number of fields
+		 *  below grows. If the struct size ever increases, use
+		 *  `version` to infer the size/format and adjust the size
+		 *  checks in espi_rts5912_set_preserved_data().
+		 *
+		 *  The firmware binary restoring the data may not be the same
+		 *  as the firmware binary that saved them. Ensure forward-
+		 *  and backward-compatibility for future changes.
+		 */
+		uint8_t version;
+		/* Use scalar values so we can control the packing of this
+		 * payload struct carefully. It needs to remain consistent
+		 * across different toolchains, images, or user FW versions
+		 */
+		uint8_t espi_vw_tx_cached_idx4;
+		uint8_t espi_vw_tx_cached_idx5;
+		uint8_t espi_vw_tx_cached_idx6;
+		uint8_t espi_vw_tx_cached_idx40;
+		/* End version=1 fields */
+
+		/* Append new values to end of struct. Increment value being
+		 * written to version.
+		 */
+	} __packed payload;
+} preserved_data;
+#endif /* CONFIG_ESPI_RTS5912_PRESERVED_DATA_HOOKS */
+
 static int espi_rts5912_send_vwire(const struct device *dev, enum espi_vwire_signal signal,
 				   uint8_t level);
 static int espi_rts5912_receive_vwire(const struct device *dev, enum espi_vwire_signal signal,
@@ -856,7 +888,7 @@ static void vw_sus_slp_a_handler(const struct device *dev);
 static void vw_slp_lan_handler(const struct device *dev);
 static void vw_slp_wlan_handler(const struct device *dev);
 static void vw_host_c10_handler(const struct device *dev);
-static void espi_vw_ch_setup(const struct device *dev);
+static void espi_vw_ch_setup(const struct device *dev, bool first_init);
 static void espi_vw_ch_isr(const struct device *dev);
 #ifdef CONFIG_ESPI_AUTOMATIC_BOOT_DONE_ACKNOWLEDGE
 static void send_target_bootdone(const struct device *dev);
@@ -895,27 +927,55 @@ static const struct espi_vw_signal_t vw_idx2_signals[] = {
 	{ESPI_VWIRE_SIGNAL_SLP_S5, vw_slp5_handler},
 };
 
-static void espi_vw_idx2_isr(const struct device *dev)
-{
-	const struct espi_rts5912_config *const espi_config = dev->config;
-	volatile struct espi_reg *const espi_reg = espi_config->espi_reg;
-	uint8_t cur_idx_data = espi_reg->EVIDX2;
-	uint8_t updated_bit = cur_idx_data ^ espi_vw_ch_cached_data.idx2;
+struct vw_idx2_msg {
+	const struct device *dev;
+	uint8_t data;
+};
 
-	if (espi_reg->EVSTS & ESPI_EVSTS_IDX2CHG) {
-		espi_vw_ch_cached_data.idx2 = cur_idx_data;
+/* using quesu to store vw status */
+K_MSGQ_DEFINE(espi_vw_idx2_msgq, sizeof(struct vw_idx2_msg), 8, 4);
+
+static void espi_vw_idx2_thread(void *p1, void *p2, void *p3)
+{
+	struct vw_idx2_msg msg;
+	uint8_t updated_bit;
+
+	while (1) {
+
+		k_msgq_get(&espi_vw_idx2_msgq, &msg, K_FOREVER);
+
+		updated_bit = msg.data ^ espi_vw_ch_cached_data.idx2;
+		espi_vw_ch_cached_data.idx2 = msg.data;
 
 		for (int i = 0; i < ARRAY_SIZE(vw_idx2_signals); i++) {
 			enum espi_vwire_signal vw_signal = vw_idx2_signals[i].signal;
 
-			if (updated_bit & vw_channel_list[vw_signal].level_mask &&
-			    vw_idx2_signals[i].vw_signal_callback != NULL) {
-				vw_idx2_signals[i].vw_signal_callback(dev);
+			if ((updated_bit & vw_channel_list[vw_signal].level_mask) &&
+			    (vw_idx2_signals[i].vw_signal_callback != NULL)) {
+				vw_idx2_signals[i].vw_signal_callback(msg.dev);
 			}
 		}
-		if (espi_vw_ch_cached_data.idx2 == espi_reg->EVIDX2) {
-			espi_reg->EVSTS = ESPI_EVSTS_IDX2CHG;
-		}
+	}
+}
+
+K_THREAD_DEFINE(vw_idx2_thread_id, 384, espi_vw_idx2_thread, NULL, NULL, NULL,
+		K_PRIO_COOP(5), 0, 0);
+
+static void espi_vw_idx2_isr(const struct device *dev)
+{
+	const struct espi_rts5912_config *const espi_config = dev->config;
+	volatile struct espi_reg *const espi_reg = espi_config->espi_reg;
+
+	if (espi_reg->EVSTS & ESPI_EVSTS_IDX2CHG) {
+		uint8_t cur_idx_data = espi_reg->EVIDX2;
+
+		espi_reg->EVSTS = ESPI_EVSTS_IDX2CHG;
+
+		struct vw_idx2_msg msg = {
+			.dev = dev,
+			.data = cur_idx_data
+		};
+		k_msgq_put(&espi_vw_idx2_msgq, &msg, K_NO_WAIT);
 	}
 }
 
@@ -1389,6 +1449,7 @@ static int espi_rts5912_send_vwire(const struct device *dev, enum espi_vwire_sig
 
 	espi_reg->EVTXDAT = tx_data;
 
+	k_busy_wait(10);
 	WAIT_FOR(!(espi_reg->EVSTS & ESPI_EVSTS_TXFULL), VW_TIMEOUT_US, k_busy_wait(10));
 
 	switch (vw_idx) {
@@ -1489,7 +1550,7 @@ static int espi_rts5912_receive_vwire(const struct device *dev, enum espi_vwire_
 	return 0;
 }
 
-static void espi_vw_ch_setup(const struct device *dev)
+static void espi_vw_ch_setup(const struct device *dev, bool first_init)
 {
 	const struct espi_rts5912_config *const espi_config = dev->config;
 	volatile struct espi_reg *const espi_reg = espi_config->espi_reg;
@@ -1512,6 +1573,28 @@ static void espi_vw_ch_setup(const struct device *dev)
 	espi_vw_tx_cached_data.idx5 = 0;
 	espi_vw_tx_cached_data.idx6 = 0;
 	espi_vw_tx_cached_data.idx40 = 0;
+
+#ifdef CONFIG_ESPI_RTS5912_PRESERVED_DATA_HOOKS
+	if (preserved_data.valid && first_init) {
+		/* Restore cached TX data from the preserved data. Only do this
+		 * upon driver initialization (once per boot cycle). When this
+		 * function is called due to an eSPI bus reset (`first_init` is
+		 * false), leave the cached values set to zero (see above).
+		 */
+		espi_vw_tx_cached_data.idx4 = preserved_data.payload.espi_vw_tx_cached_idx4;
+		espi_vw_tx_cached_data.idx5 = preserved_data.payload.espi_vw_tx_cached_idx5;
+		espi_vw_tx_cached_data.idx6 = preserved_data.payload.espi_vw_tx_cached_idx6;
+		espi_vw_tx_cached_data.idx40 = preserved_data.payload.espi_vw_tx_cached_idx40;
+
+		LOG_INF("ESPI RTS5912: Restore preserved driver state.");
+
+		/* `preserved_data` isn't updated while the driver runs. It can be
+		 * applied only once at driver initialization, so invalidate it
+		 * now.
+		 */
+		preserved_data.valid = false;
+	}
+#endif /* CONFIG_ESPI_RTS5912_PRESERVED_DATA_HOOKS */
 
 	espi_reg->EVRXINTEN = (ESPI_EVRXINTEN_CFGCHGEN | ESPI_EVRXINTEN_RXCHGEN);
 
@@ -1682,6 +1765,9 @@ static int espi_rts5912_send_oob(const struct device *dev, struct espi_oob_packe
 	const struct espi_rts5912_config *const espi_config = dev->config;
 	struct espi_rts5912_data *espi_data = dev->data;
 	volatile struct espi_reg *const espi_reg = espi_config->espi_reg;
+	volatile struct acpi_reg *const acpi_reg = espi_config->acpi_reg;
+	volatile struct acpi_reg *const promt0_reg = espi_config->promt0_reg;
+	volatile struct kbc_reg *const kbc_reg = espi_config->kbc_reg;
 	int ret;
 
 	if (!(espi_reg->EOCFG & ESPI_EOCFG_CHRDY)) {
@@ -1699,12 +1785,25 @@ static int espi_rts5912_send_oob(const struct device *dev, struct espi_oob_packe
 		return -EINVAL;
 	}
 
+	/* Check if any data in port fifo */
+	if ((acpi_reg->STS & ACPI_STS_IBF) || (kbc_reg->STS & KBC_STS_IBF) ||
+		(promt0_reg->STS & ACPI_STS_IBF) || (acpi_reg->STS & ACPI_STS_OBF) ||
+		(kbc_reg->STS & KBC_STS_OBF) || (promt0_reg->STS & ACPI_STS_OBF)) {
+		LOG_ERR("%s: OOB channel need wait for io", __func__);
+		return -EBUSY;
+	}
+
+	__disable_irq();
+
 	for (int i = 0; i < pckt->len; i++) {
 		espi_data->oob_tx_ptr[i] = pckt->buf[i];
 	}
 
 	espi_reg->EOTXLEN = pckt->len - 1;
+
 	espi_reg->EOTXCTRL = ESPI_EOTXCTRL_TXSTR;
+
+	__enable_irq();
 
 	espi_data->oob_tx_busy = true;
 
@@ -2196,6 +2295,70 @@ static int espi_rts5912_manage_callback(const struct device *dev, struct espi_ca
 	return espi_manage_callback(&data->callbacks, callback, set);
 }
 
+#ifdef CONFIG_ESPI_RTS5912_PRESERVED_DATA_HOOKS
+#define ESPI_RTS5912_PRESERVED_DATA_FORMAT_VERSION 1
+
+int espi_rts5912_get_preserved_data(size_t buf_max_size, uint8_t *buf_out)
+{
+	if (buf_out == NULL) {
+		return -EINVAL;
+	}
+
+	if (buf_max_size < sizeof(preserved_data.payload)) {
+		/* Provided buffer is too small to fit all preserved data. */
+		return -ERANGE;
+	}
+
+	/* Gather data to preserve */
+	memset(&preserved_data.payload, 0, sizeof(preserved_data.payload));
+	preserved_data.payload.version = ESPI_RTS5912_PRESERVED_DATA_FORMAT_VERSION;
+	preserved_data.payload.espi_vw_tx_cached_idx4 = espi_vw_tx_cached_data.idx4;
+	preserved_data.payload.espi_vw_tx_cached_idx5 = espi_vw_tx_cached_data.idx5;
+	preserved_data.payload.espi_vw_tx_cached_idx6 = espi_vw_tx_cached_data.idx6;
+	preserved_data.payload.espi_vw_tx_cached_idx40 = espi_vw_tx_cached_data.idx40;
+
+	LOG_DBG("Get ESPI Cached Data: %02x %02x %02x %02x", espi_vw_tx_cached_data.idx4,
+		espi_vw_tx_cached_data.idx5, espi_vw_tx_cached_data.idx6,
+		espi_vw_tx_cached_data.idx40);
+
+	memcpy(buf_out, &preserved_data.payload, sizeof(preserved_data.payload));
+
+	/* Return number of bytes written out */
+	return sizeof(preserved_data.payload);
+}
+
+int espi_rts5912_set_preserved_data(size_t size, const uint8_t *buf_in)
+{
+	/* There can only be one instance of this driver. */
+	const struct device *dev = DEVICE_DT_GET(DT_DRV_INST(0));
+
+	if (device_is_ready(dev)) {
+		/* This function must be called before device init. */
+		return -EBUSY;
+	}
+
+	if (buf_in == NULL) {
+		return -EINVAL;
+	}
+
+	if (size < sizeof(preserved_data.payload)) {
+		return -ERANGE;
+	}
+
+	memcpy(&preserved_data.payload, buf_in, sizeof(preserved_data.payload));
+
+	if (preserved_data.payload.version != ESPI_RTS5912_PRESERVED_DATA_FORMAT_VERSION) {
+		LOG_ERR("ESPI RTS5912: Invalid preserved data (ver %u)",
+			preserved_data.payload.version);
+		return -EBADMSG;
+	}
+
+	preserved_data.valid = true;
+
+	return 0;
+}
+#endif /* CONFIG_ESPI_RTS5912_PRESERVED_DATA_HOOKS */
+
 static DEVICE_API(espi, espi_rts5912_driver_api) = {
 	.config = espi_rts5912_configure,
 	.get_channel_status = espi_rts5912_channel_ready,
@@ -2219,7 +2382,7 @@ static DEVICE_API(espi, espi_rts5912_driver_api) = {
 #endif
 };
 
-static void espi_vw_ch_setup(const struct device *dev);
+static void espi_vw_ch_setup(const struct device *dev, bool first_init);
 
 #define VW_RESET_DELAY 150UL
 
@@ -2244,7 +2407,7 @@ static void espi_rst_isr(const struct device *dev)
 			/* rst pin low go high trigger interrupt */
 			evt.evt_data = 1;
 #ifdef CONFIG_ESPI_VWIRE_CHANNEL
-			espi_vw_ch_setup(dev);
+			espi_vw_ch_setup(dev, /*first_init=*/false);
 			espi_reg->ESPICFG = data->config_data;
 			if (espi_reg->EVCFG & ESPI_EVCFG_CHEN) {
 				k_timeout_t delay = K_MSEC(VW_RESET_DELAY);
@@ -2273,6 +2436,11 @@ static void espi_bus_reset_setup(const struct device *dev)
 		/* low to high */
 		espi_reg->ERSTCFG = ESPI_ERSTCFG_RSTMONEN | ESPI_ERSTCFG_RSTINTEN;
 	}
+
+	/* Clear the status register (this is a W1C bit) to prevent the bus_rst
+	 * ISR from immediately firing.
+	 */
+	espi_reg->ERSTCFG |= ESPI_ERSTCFG_RSTSTS;
 
 	NVIC_ClearPendingIRQ(DT_IRQ_BY_NAME(DT_DRV_INST(0), bus_rst, irq));
 
@@ -2372,7 +2540,7 @@ static int espi_rts5912_init(const struct device *dev)
 
 #ifdef CONFIG_ESPI_VWIRE_CHANNEL
 	/* Setup eSPI virtual-wire channel */
-	espi_vw_ch_setup(dev);
+	espi_vw_ch_setup(dev, /*first_init=*/true);
 #endif
 
 #ifdef CONFIG_ESPI_OOB_CHANNEL

@@ -6,7 +6,7 @@
  */
 
 #include <zephyr/drivers/can.h>
-#include <zephyr/drivers/can/can_mcan.h>
+#include "can_mcan.h"
 #include <zephyr/drivers/clock_control/stm32_clock_control.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/pinctrl.h>
@@ -214,7 +214,6 @@ static DEVICE_API(can, can_stm32h7_driver_api) = {
 #endif /* CONFIG_CAN_MANUAL_RECOVERY_MODE*/
 	.get_core_clock = can_stm32h7_get_core_clock,
 	.get_max_filters = can_mcan_get_max_filters,
-	.set_state_change_callback = can_mcan_set_state_change_callback,
 	/* Timing limits are per the STM32H7 Reference Manual (RM0433 Rev 7),
 	 * section 56.5.7, FDCAN nominal bit timing and prescaler register
 	 * (FDCAN_NBTP).
@@ -273,8 +272,7 @@ static const struct can_mcan_ops can_stm32h7_ops = {
 					    &can_stm32h7_ops,		    \
 					    &can_stm32h7_cbs_##n);	    \
 									    \
-	static struct can_mcan_data can_mcan_data_##n =			    \
-		CAN_MCAN_DATA_INITIALIZER(NULL);			    \
+	CAN_MCAN_DATA_DEFINE(can_mcan_data_##n, NULL);                      \
 									    \
 	CAN_DEVICE_DT_INST_DEFINE(n, can_stm32h7_init, NULL,		    \
 				  &can_mcan_data_##n,			    \

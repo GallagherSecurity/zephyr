@@ -690,13 +690,58 @@ Cross-referencing C documentation
    They are rendered in the HTML output as links to the corresponding Doxygen documentation for the
    item. For example::
 
-      Check out :c:function:`gpio_pin_configure` for more information.
+      Check out :c:func:`gpio_pin_configure` for more information.
 
    Will render as:
 
       Check out :c:func:`gpio_pin_configure` for more information.
 
    You may provide a custom link text, similar to the built-in :rst:role:`ref` role.
+
+Cross-referencing CMake documentation
+=====================================
+
+You may use the following roles to cross-reference the documentation of Zephyr's CMake modules,
+commands, and variables.
+
+.. rst:role:: cmake:module
+
+   This role is used to reference a CMake module. For example::
+
+      See :cmake:module:`extensions` for more information.
+
+   Will render as:
+
+      See :cmake:module:`extensions` for more information.
+
+.. rst:role:: cmake:command
+
+   This role is used to reference a CMake command. For example::
+
+      See :cmake:command:`yaml_load` for more information.
+
+   Will render as:
+
+      See :cmake:command:`yaml_load` for more information.
+
+   Commands documented by CMake itself are referenced through their fully qualified name, given as
+   an explicit link target::
+
+      See :cmake:command:`target_sources <command:target_sources>` for more information.
+
+   Will render as:
+
+      See :cmake:command:`target_sources <command:target_sources>` for more information.
+
+.. rst:role:: cmake:variable
+
+   This role is used to reference a CMake variable. For example::
+
+      See :cmake:variable:`CMAKE_C_COMPILER` for more information.
+
+   Will render as:
+
+      See :cmake:variable:`CMAKE_C_COMPILER` for more information.
 
 Visual Elements
 ***************
@@ -736,8 +781,27 @@ Recommended image formats based on content
 * **Screenshots**: WebP or PNG.
 * **Diagrams**: Consider using Graphviz for simple diagrams (see
   `dedicated section <graphviz_diagrams>`_ below. If using an external tool, SVG is preferred.
-* **Photos** (ex. boards): WebP. Use transparency if possible/available.
+* **Photos** (ex. boards): WebP, no larger than 600 px on the largest dimension.
+  Whenever the subject can be isolated from its background (typically the case for board photos),
+  save the image with a transparent background so it blends in with both light and dark
+  documentation themes.
 
+  You can convert an existing image to a properly sized WebP using `cwebp`_ or `ImageMagick`_. For
+  example::
+
+     # Using cwebp (resize width to 600 px, height auto, ~80% quality).
+     # For a portrait image, use "-resize 0 600" to cap the height instead.
+     cwebp -resize 600 0 board_name.png -o board_name.webp
+
+     # Using ImageMagick
+     magick board_name.png -resize 600x600 -quality 80 board_name.webp
+
+  When the source already has a transparent background (e.g. a PNG with an alpha channel), both
+  tools preserve transparency in the resulting WebP. The ``-resize 600 0`` / ``600x600`` arguments
+  only scale the image down, preserving its aspect ratio.
+
+.. _cwebp: https://developers.google.com/speed/webp/download
+.. _ImageMagick: https://imagemagick.org/
 
 .. _graphviz_diagrams:
 
@@ -779,6 +843,91 @@ Graphviz's DOT language.
 .. _Graphviz: https://graphviz.org
 .. _Graphviz documentation: https://graphviz.org/documentation
 
+Mermaid
+=======
+
+`Mermaid`_ is a tool for creating diagrams and visualizations using a simple text-based syntax. It
+is particularly well-suited for creating flowcharts, sequence diagrams, class diagrams, and
+state transition diagrams.
+
+To include a mermaid diagram in a document, use the :rst:dir:`mermaid` directive. For example::
+
+   .. mermaid::
+      :caption: State transition diagram for a GPIO debounce
+      :alt: GPIO debounce state diagram showing transitions between inactive and active states
+            through maybe_active and maybe_inactive intermediate states before each state becomes
+            stable.
+
+      ---
+      config:
+        state:
+          useMaxWidth: false
+      ---
+      stateDiagram-v2
+
+          State inactive {
+              [*] --> stable_inactive
+              stable_inactive --> maybe_active : edge to active
+              maybe_active --> stable_inactive : edge to inactive
+          }
+
+          State active {
+              [*] --> stable_active
+              stable_active --> maybe_inactive : edge to inactive
+              maybe_inactive --> stable_active : edge to active
+          }
+
+          [*] --> inactive
+
+          maybe_active --> active : After(x ms)
+          maybe_inactive --> inactive : After(x ms)
+
+
+Would render as:
+
+.. mermaid::
+   :caption: State transition diagram for a GPIO debounce
+   :alt: GPIO debounce state diagram showing transitions between inactive and active states
+         through maybe_active and maybe_inactive intermediate states before each state becomes
+         stable.
+
+   ---
+   config:
+     state:
+       useMaxWidth: false
+   ---
+   stateDiagram-v2
+
+       State inactive {
+           [*] --> stable_inactive
+           stable_inactive --> maybe_active : edge to active
+           maybe_active --> stable_inactive : edge to inactive
+       }
+
+       State active {
+           [*] --> stable_active
+           stable_active --> maybe_inactive : edge to inactive
+           maybe_inactive --> stable_active : edge to active
+       }
+
+       [*] --> inactive
+
+       maybe_active --> active : After(x ms)
+       maybe_inactive --> inactive : After(x ms)
+
+
+A diagram is drawn across the width of the page and its height follows from its aspect ratio, so a
+diagram that is taller than it is wide ends up much larger than it needs to be. Turning off
+``useMaxWidth``, as in the example above, keeps the diagram at the size Mermaid computed for it; it
+still shrinks to fit a narrow screen. The setting belongs to the diagram type, ``state`` here and
+``flowchart``, ``sequence`` or another type elsewhere.
+
+For references about supported diagrams, syntax, and samples; please refer to the `Mermaid documentation`_.
+For fast iteration when creating or updating diagrams, you can use the `Mermaid live editor`_.
+
+.. _Mermaid: https://mermaid.js.org/
+.. _Mermaid documentation: https://mermaid.js.org/intro/
+.. _Mermaid live editor: https://mermaid.live/
 
 Custom Sphinx Roles and Directives
 **********************************
@@ -1335,6 +1484,9 @@ Boards
       to speed up documentation builds without completely disabling the hardware features table. Set the
       config option ``zephyr_hw_features_vendor_filter`` to the list of vendors to generate features for.
       If the option is empty, hardware features are generated for all boards from all vendors.
+
+      The config option ``zephyr_hw_features_twister_extra_flags`` can be used to provide additional flags to the
+      twister command.
 
 .. rst:directive:: .. zephyr:board-supported-runners::
 

@@ -32,6 +32,7 @@
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/util_macro.h>
+#include <zephyr/toolchain.h>
 #include <zephyr/types.h>
 
 #include "btp_bap_audio_stream.h"
@@ -51,8 +52,8 @@ static struct btp_bap_broadcast_local_source local_sources[CONFIG_BT_BAP_BROADCA
 static struct btp_bap_broadcast_remote_source *broadcast_source_to_sync;
 /* A mask for the maximum BIS we can sync to. +1 since the BIS indexes start from 1. */
 static const uint32_t bis_index_mask = BIT_MASK(CONFIG_BT_BAP_BROADCAST_SNK_STREAM_COUNT + 1);
-#define PA_SYNC_INTERVAL_TO_TIMEOUT_RATIO 20 /* Set the timeout relative to interval */
-#define PA_SYNC_SKIP                      5
+#define PA_SYNC_INTERVAL_TO_TIMEOUT_RATIO 20U /* Set the timeout relative to interval */
+#define PA_SYNC_SKIP                      5U
 static struct bt_bap_bass_subgroup delegator_subgroups[CONFIG_BT_BAP_BASS_MAX_SUBGROUPS];
 
 static inline struct btp_bap_broadcast_stream *stream_bap_to_broadcast(struct bt_bap_stream *stream)
@@ -75,7 +76,7 @@ uint8_t btp_bap_broadcast_local_source_idx_get(struct btp_bap_broadcast_local_so
 struct btp_bap_broadcast_local_source *
 btp_bap_broadcast_local_source_allocate(uint32_t broadcast_id)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(local_sources); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(local_sources); i++) {
 		if (local_sources[i].allocated && local_sources[i].broadcast_id == broadcast_id) {
 			LOG_ERR("Local source already allocated for broadcast id 0x%06X",
 				broadcast_id);
@@ -84,7 +85,7 @@ btp_bap_broadcast_local_source_allocate(uint32_t broadcast_id)
 		}
 	}
 
-	for (size_t i = 0; i < ARRAY_SIZE(local_sources); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(local_sources); i++) {
 		if (!local_sources[i].allocated) {
 			local_sources[i].allocated = true;
 			local_sources[i].source_id = i;
@@ -111,7 +112,7 @@ int btp_bap_broadcast_local_source_free(struct btp_bap_broadcast_local_source *s
 struct btp_bap_broadcast_local_source *
 btp_bap_broadcast_local_source_from_src_id_get(uint32_t source_id)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(local_sources); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(local_sources); i++) {
 		if (local_sources[i].allocated && local_sources[i].source_id == source_id) {
 			return &local_sources[i];
 		}
@@ -125,7 +126,7 @@ btp_bap_broadcast_local_source_from_src_id_get(uint32_t source_id)
 static struct btp_bap_broadcast_local_source *
 btp_bap_broadcast_local_source_from_brcst_id_get(uint32_t broadcast_id)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(local_sources); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(local_sources); i++) {
 		if (local_sources[i].allocated && local_sources[i].broadcast_id == broadcast_id) {
 			return &local_sources[i];
 		}
@@ -138,7 +139,7 @@ btp_bap_broadcast_local_source_from_brcst_id_get(uint32_t broadcast_id)
 
 static struct btp_bap_broadcast_remote_source *remote_broadcaster_alloc(void)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(remote_broadcast_sources); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(remote_broadcast_sources); i++) {
 		struct btp_bap_broadcast_remote_source *broadcaster = &remote_broadcast_sources[i];
 
 		if (broadcaster->broadcast_id == BT_BAP_INVALID_BROADCAST_ID) {
@@ -152,7 +153,7 @@ static struct btp_bap_broadcast_remote_source *remote_broadcaster_alloc(void)
 static struct btp_bap_broadcast_remote_source *remote_broadcaster_find(const bt_addr_le_t *addr,
 								       uint32_t broadcast_id)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(remote_broadcast_sources); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(remote_broadcast_sources); i++) {
 		struct btp_bap_broadcast_remote_source *broadcaster = &remote_broadcast_sources[i];
 
 		if (broadcaster->broadcast_id == broadcast_id &&
@@ -167,7 +168,7 @@ static struct btp_bap_broadcast_remote_source *remote_broadcaster_find(const bt_
 static struct btp_bap_broadcast_remote_source *
 remote_broadcaster_find_by_sink(struct bt_bap_broadcast_sink *sink)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(remote_broadcast_sources); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(remote_broadcast_sources); i++) {
 		struct btp_bap_broadcast_remote_source *broadcaster = &remote_broadcast_sources[i];
 
 		if (broadcaster->sink == sink) {
@@ -292,7 +293,7 @@ static struct bt_bap_stream_ops stream_ops = {
 struct btp_bap_broadcast_stream *
 btp_bap_broadcast_stream_alloc(struct btp_bap_broadcast_local_source *source)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(source->streams); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(source->streams); i++) {
 		struct btp_bap_broadcast_stream *stream = &source->streams[i];
 
 		if (stream->in_use == false) {
@@ -318,13 +319,103 @@ static void remote_broadcaster_free(struct btp_bap_broadcast_remote_source *broa
 	}
 }
 
+static int stream_chan_alloc_get(enum bt_audio_location chan_alloc, size_t stream_idx,
+				 enum bt_audio_location *stream_chan_alloc)
+{
+	uint32_t chan_alloc_bits = (uint32_t)chan_alloc;
+
+	if (stream_chan_alloc == NULL) {
+		return -EINVAL;
+	}
+
+	/* Mono itself can be used with multiple BISes, but this helper derives a
+	 * single-channel allocation for a specific BIS index. For mono there is no
+	 * index-based split, so only stream_idx 0 can be derived here.
+	 */
+	if (chan_alloc == BT_AUDIO_LOCATION_MONO_AUDIO) {
+		if (stream_idx != 0U) {
+			return -EINVAL;
+		}
+
+		*stream_chan_alloc = BT_AUDIO_LOCATION_MONO_AUDIO;
+		return 0;
+	}
+
+	/* When there is a 1:1 mapping between channel bits and BISes, each set bit
+	 * in chan_alloc belongs to one lower-indexed stream. Clear one least
+	 * significant set bit per lower-indexed stream, then return the next one.
+	 * This selects the Nth set bit without scanning all 32 possible positions.
+	 */
+	for (size_t i = 0U; i < stream_idx; i++) {
+		/* clear LSB from lower indexed streams */
+		chan_alloc_bits ^= LSB_GET(chan_alloc_bits);
+	}
+
+	/* All set bits were consumed before reaching stream_idx, so there is no
+	 * channel allocation that can be derived for this BIS index.
+	 */
+	if (chan_alloc_bits == 0U) {
+		return -EINVAL;
+	}
+
+	*stream_chan_alloc = (enum bt_audio_location)LSB_GET(chan_alloc_bits);
+	return 0;
+}
+
+static int stream_bis_codec_data_set(bool set_bis_chan_alloc, bool derive_bis_chan_alloc,
+				     enum bt_audio_location chan_alloc, size_t bis_idx,
+				     uint8_t *codec_data,
+				     struct bt_bap_broadcast_source_stream_param *stream_param)
+{
+	enum bt_audio_location bis_chan_alloc;
+	int err;
+
+	/* Leave the per-BIS codec data empty when no channel allocation shall be
+	 * exposed in the BIS-specific codec configuration.
+	 */
+	if (!set_bis_chan_alloc) {
+		stream_param->data = NULL;
+		stream_param->data_len = 0U;
+
+		return 0;
+	}
+
+	bis_chan_alloc = chan_alloc;
+
+	/* Reuse the subgroup channel allocation unless there is an unambiguous
+	 * 1:1 mapping between channel bits and BISes and we can derive a unique
+	 * channel allocation for this BIS index.
+	 */
+	if (derive_bis_chan_alloc) {
+		err = stream_chan_alloc_get(chan_alloc, bis_idx, &bis_chan_alloc);
+		if (err != 0) {
+			LOG_DBG("Failed to derive BIS channel allocation (%zu): %d", bis_idx, err);
+			return err;
+		}
+	}
+
+	/* Encode a single BT_AUDIO_CODEC_CFG_CHAN_ALLOC LTV for this BIS. */
+	codec_data[0] = sizeof(uint8_t) /* type */ + sizeof(uint32_t) /* value */;
+	codec_data[1] = BT_AUDIO_CODEC_CFG_CHAN_ALLOC;
+	sys_put_le32((uint32_t)bis_chan_alloc, &codec_data[2]);
+
+	stream_param->data = codec_data;
+	stream_param->data_len = sizeof(uint8_t) + sizeof(uint8_t) + sizeof(uint32_t);
+
+	return 0;
+}
+
 static int setup_broadcast_source(uint8_t streams_per_subgroup, uint8_t subgroups,
 				  struct btp_bap_broadcast_local_source *source,
 				  struct bt_audio_codec_cfg *codec_cfg)
 {
 	int err;
+	enum bt_audio_location chan_alloc = BT_AUDIO_LOCATION_MONO_AUDIO;
+	bool derive_bis_chan_alloc = false;
+	bool set_bis_chan_alloc = false;
 	struct bt_bap_broadcast_source_stream_param
 		stream_params[CONFIG_BT_BAP_BROADCAST_SRC_STREAM_COUNT];
+	uint8_t stream_codec_data[CONFIG_BT_BAP_BROADCAST_SRC_STREAM_COUNT][6];
 	struct bt_bap_broadcast_source_subgroup_param
 		subgroup_param[CONFIG_BT_BAP_BROADCAST_SRC_SUBGROUP_COUNT];
 	struct bt_bap_broadcast_source_param create_param;
@@ -339,22 +430,50 @@ static int setup_broadcast_source(uint8_t streams_per_subgroup, uint8_t subgroup
 	 */
 	memcpy(&source->streams[0].codec_cfg, codec_cfg, sizeof(*codec_cfg));
 
+	if (codec_cfg->id == BT_HCI_CODING_FORMAT_LC3) {
+		err = bt_audio_codec_cfg_get_chan_allocation(codec_cfg, &chan_alloc, false);
+		if (err == 0 && streams_per_subgroup > 1U) {
+			size_t chan_alloc_count = sys_count_bits(&chan_alloc, sizeof(chan_alloc));
+
+			/* Always set BIS channel allocation when source allocation is
+			 * present. Only derive a unique per-BIS allocation when there is an
+			 * unambiguous 1:1 mapping between channel bits and BISes.
+			 */
+			if ((chan_alloc != BT_AUDIO_LOCATION_MONO_AUDIO) &&
+			    (chan_alloc_count == streams_per_subgroup)) {
+				derive_bis_chan_alloc = true;
+			}
+
+			set_bis_chan_alloc = true;
+		} else if (err == 0) {
+			set_bis_chan_alloc = true;
+		}
+	}
+
 	for (size_t i = 0U; i < subgroups; i++) {
 		subgroup_param[i].params_count = streams_per_subgroup;
 		subgroup_param[i].params = stream_params + i * streams_per_subgroup;
 		subgroup_param[i].codec_cfg = &source->streams[0].codec_cfg;
-	}
+		for (size_t j = 0U; j < streams_per_subgroup; j++) {
+			const size_t stream_idx = i * streams_per_subgroup + j;
+			struct bt_bap_stream *stream =
+				stream_broadcast_to_bap(&source->streams[stream_idx]);
 
-	for (size_t j = 0U; j < streams_per_subgroup; j++) {
-		struct btp_bap_broadcast_stream *b_stream = &source->streams[j];
-		struct bt_bap_stream *stream = stream_broadcast_to_bap(b_stream);
+			stream_params[stream_idx].stream = stream;
+			bt_bap_stream_cb_register(stream, &stream_ops);
 
-		stream_params[j].stream = stream;
-		bt_bap_stream_cb_register(stream, &stream_ops);
-
-		/* BIS Codec Specific Configuration specified on subgroup level */
-		stream_params[j].data = NULL;
-		stream_params[j].data_len = 0U;
+			/* stream_bis_codec_data_set() fills the BIS-specific codec data for
+			 * this stream, reusing or deriving channel allocation as needed.
+			 */
+			err = stream_bis_codec_data_set(set_bis_chan_alloc,
+							derive_bis_chan_alloc,
+							chan_alloc, j,
+							stream_codec_data[stream_idx],
+							&stream_params[stream_idx]);
+			if (err != 0) {
+				return err;
+			}
+		}
 	}
 
 	create_param.params_count = subgroups;
@@ -383,6 +502,56 @@ static int setup_broadcast_source(uint8_t streams_per_subgroup, uint8_t subgroup
 	return 0;
 }
 
+static void cleanup_broadcast_source_setup(struct btp_bap_broadcast_local_source *source)
+{
+	int err;
+	bool cleanup_failed = false;
+
+	if (source == NULL) {
+		return;
+	}
+
+	if (source->ext_adv != NULL) {
+		err = bt_le_ext_adv_delete(source->ext_adv);
+		if (err != 0) {
+			LOG_ERR("Failed to delete extended advertising instance: %d", err);
+			cleanup_failed = true;
+		} else {
+			err = tester_gap_clear_adv_instance(source->ext_adv);
+			if (err != 0) {
+				LOG_ERR("Failed to clear extended advertising instance: %d", err);
+				cleanup_failed = true;
+			} else {
+				source->ext_adv = NULL;
+			}
+		}
+	}
+
+	if (source->bap_broadcast != NULL) {
+		err = bt_bap_broadcast_source_delete(source->bap_broadcast);
+		if (err != 0) {
+			LOG_ERR("Failed to delete broadcast source: %d", err);
+			cleanup_failed = true;
+		} else {
+			source->bap_broadcast = NULL;
+		}
+	}
+
+	if (cleanup_failed) {
+		/* Keep the local source allocated when partial teardown fails so we do
+		 * not lose ext_adv/broadcast handles that may still be valid. This
+		 * allows a later release/reset path to retry cleanup.
+		 */
+		LOG_ERR("Failed to fully clean up broadcast source setup state");
+		return;
+	}
+
+	err = btp_bap_broadcast_local_source_free(source);
+	if (err != 0) {
+		LOG_ERR("Failed to free local source: %d", err);
+	}
+}
+
 uint8_t btp_bap_broadcast_source_setup(const void *cmd, uint16_t cmd_len, void *rsp,
 				       uint16_t *rsp_len)
 {
@@ -392,7 +561,15 @@ uint8_t btp_bap_broadcast_source_setup(const void *cmd, uint16_t cmd_len, void *
 	struct bt_audio_codec_cfg codec_cfg;
 	const struct btp_bap_broadcast_source_setup_cmd *cp = cmd;
 	struct btp_bap_broadcast_source_setup_rp *rp = rsp;
-	uint32_t broadcast_id = 0;
+	uint32_t broadcast_id = 0U;
+
+	if ((cmd_len < sizeof(*cp)) || (cmd_len != sizeof(*cp) + cp->cc_ltvs_len)) {
+		return BTP_STATUS_FAILED;
+	}
+
+	if (cp->cc_ltvs_len > sizeof(codec_cfg.data)) {
+		return BTP_STATUS_FAILED;
+	}
 
 	err = bt_rand(&broadcast_id, BT_AUDIO_BROADCAST_ID_SIZE);
 	if (err != 0) {
@@ -444,10 +621,12 @@ uint8_t btp_bap_broadcast_source_setup(const void *cmd, uint16_t cmd_len, void *
 	source->qos.sdu = sys_le16_to_cpu(cp->max_sdu);
 
 	source->stream_count = cp->subgroups * cp->streams_per_subgroup;
+	source->subgroup_count = cp->subgroups;
 
 	err = setup_broadcast_source(cp->streams_per_subgroup, cp->subgroups, source, &codec_cfg);
 	if (err != 0) {
 		LOG_DBG("Unable to setup broadcast source: %d", err);
+		cleanup_broadcast_source_setup(source);
 		return BTP_STATUS_FAILED;
 	}
 
@@ -466,18 +645,21 @@ uint8_t btp_bap_broadcast_source_setup(const void *cmd, uint16_t cmd_len, void *
 					     &source->ext_adv);
 	if (err != 0) {
 		LOG_DBG("Failed to create extended advertising instance: %d", err);
+		cleanup_broadcast_source_setup(source);
 		return BTP_STATUS_FAILED;
 	}
 
 	err = tester_gap_padv_configure(source->ext_adv, &per_adv_param);
 	if (err != 0) {
 		LOG_DBG("Failed to configure periodic advertising: %d", err);
+		cleanup_broadcast_source_setup(source);
 		return BTP_STATUS_FAILED;
 	}
 
 	err = bt_bap_broadcast_source_get_base(source->bap_broadcast, &base_buf);
 	if (err != 0) {
 		LOG_DBG("Failed to get encoded BASE: %d\n", err);
+		cleanup_broadcast_source_setup(source);
 		return BTP_STATUS_FAILED;
 	}
 
@@ -487,6 +669,7 @@ uint8_t btp_bap_broadcast_source_setup(const void *cmd, uint16_t cmd_len, void *
 	per_ad->data = base_buf.data;
 	err = tester_gap_padv_set_data(source->ext_adv, per_ad, 1);
 	if (err != 0) {
+		cleanup_broadcast_source_setup(source);
 		return BTP_STATUS_FAILED;
 	}
 
@@ -558,10 +741,12 @@ uint8_t btp_bap_broadcast_source_setup_v2(const void *cmd, uint16_t cmd_len, voi
 	source->qos.sdu = sys_le16_to_cpu(cp->max_sdu);
 
 	source->stream_count = cp->subgroups * cp->streams_per_subgroup;
+	source->subgroup_count = cp->subgroups;
 
 	err = setup_broadcast_source(cp->streams_per_subgroup, cp->subgroups, source, &codec_cfg);
 	if (err != 0) {
 		LOG_DBG("Unable to setup broadcast source: %d", err);
+		cleanup_broadcast_source_setup(source);
 		return BTP_STATUS_FAILED;
 	}
 
@@ -580,12 +765,106 @@ uint8_t btp_bap_broadcast_source_setup_v2(const void *cmd, uint16_t cmd_len, voi
 					     &source->ext_adv);
 	if (err != 0) {
 		LOG_DBG("Failed to create extended advertising instance: %d", err);
+		cleanup_broadcast_source_setup(source);
 		return BTP_STATUS_FAILED;
 	}
 
 	err = tester_gap_padv_configure(source->ext_adv, &per_adv_param);
 	if (err != 0) {
 		LOG_DBG("Failed to configure periodic advertising: %d", err);
+		cleanup_broadcast_source_setup(source);
+		return BTP_STATUS_FAILED;
+	}
+
+	err = bt_bap_broadcast_source_get_base(source->bap_broadcast, &base_buf);
+	if (err != 0) {
+		LOG_DBG("Failed to get encoded BASE: %d", err);
+		cleanup_broadcast_source_setup(source);
+		return BTP_STATUS_FAILED;
+	}
+
+	per_ad = &source->per_adv_local;
+	per_ad->type = BT_DATA_SVC_DATA16;
+	per_ad->data_len = base_buf.len;
+	per_ad->data = base_buf.data;
+	err = tester_gap_padv_set_data(source->ext_adv, per_ad, 1);
+	if (err != 0) {
+		LOG_DBG("Failed to set periodic advertising data: %d", err);
+		cleanup_broadcast_source_setup(source);
+		return BTP_STATUS_FAILED;
+	}
+
+	rp->gap_settings = gap_settings;
+	*rsp_len = sizeof(*rp);
+
+	return BTP_STATUS_SUCCESS;
+}
+
+uint8_t btp_bap_broadcast_source_reconfigure(const void *cmd, uint16_t cmd_len, void *rsp,
+					     uint16_t *rsp_len)
+{
+	int err;
+	struct bt_audio_codec_cfg codec_cfg;
+	const struct btp_bap_broadcast_source_reconfigure_cmd *cp = cmd;
+	struct btp_bap_broadcast_local_source *source;
+	struct bt_data *per_ad;
+
+	NET_BUF_SIMPLE_DEFINE(base_buf, BT_BASE_MAX_SIZE);
+
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
+	LOG_DBG("");
+
+	if ((cmd_len < sizeof(*cp)) || (cmd_len != sizeof(*cp) + cp->cc_ltvs_len) ||
+	    (cp->cc_ltvs_len > sizeof(codec_cfg.data))) {
+		LOG_DBG("Invalid command length: %u", cmd_len);
+		return BTP_STATUS_FAILED;
+	}
+
+	if (cp->subgroups > CONFIG_BT_BAP_BROADCAST_SRC_SUBGROUP_COUNT) {
+		LOG_DBG("Invalid number of subgroups: %u", cp->subgroups);
+		return BTP_STATUS_FAILED;
+	}
+
+	uint32_t broadcast_id = sys_get_le24(cp->broadcast_id);
+
+	source = btp_bap_broadcast_local_source_from_brcst_id_get(broadcast_id);
+	if (source == NULL) {
+		LOG_DBG("No broadcast source found for broadcast ID 0x%06X", broadcast_id);
+		return BTP_STATUS_FAILED;
+	}
+
+	/* Reconfiguring cannot change the number of subgroups or streams, only their
+	 * codec/QoS content.
+	 */
+	if (cp->subgroups != source->subgroup_count ||
+	    (uint16_t)(cp->subgroups * cp->streams_per_subgroup) != source->stream_count) {
+		LOG_DBG("Cannot change topology on reconfigure: %u subgroup(s) x %u stream(s), "
+			"source has %u subgroup(s) with %u stream(s) total",
+			cp->subgroups, cp->streams_per_subgroup, source->subgroup_count,
+			source->stream_count);
+		return BTP_STATUS_FAILED;
+	}
+
+	(void)memset(&codec_cfg, 0, sizeof(codec_cfg));
+	codec_cfg.id = cp->coding_format;
+	codec_cfg.vid = sys_le16_to_cpu(cp->vid);
+	codec_cfg.cid = sys_le16_to_cpu(cp->cid);
+	codec_cfg.data_len = cp->cc_ltvs_len;
+	(void)memcpy(codec_cfg.data, cp->cc_ltvs, cp->cc_ltvs_len);
+
+	source->qos.phy = BT_BAP_QOS_CFG_2M;
+	source->qos.framing = cp->framing;
+	source->qos.rtn = cp->retransmission_num;
+	source->qos.latency = sys_le16_to_cpu(cp->max_transport_latency);
+	source->qos.interval = sys_get_le24(cp->sdu_interval);
+	source->qos.pd = sys_get_le24(cp->presentation_delay);
+	source->qos.sdu = sys_le16_to_cpu(cp->max_sdu);
+
+	err = setup_broadcast_source(cp->streams_per_subgroup, cp->subgroups, source, &codec_cfg);
+	if (err != 0) {
+		LOG_DBG("Unable to reconfigure broadcast source: %d", err);
 		return BTP_STATUS_FAILED;
 	}
 
@@ -605,9 +884,6 @@ uint8_t btp_bap_broadcast_source_setup_v2(const void *cmd, uint16_t cmd_len, voi
 		return BTP_STATUS_FAILED;
 	}
 
-	rp->gap_settings = gap_settings;
-	*rsp_len = sizeof(*rp);
-
 	return BTP_STATUS_SUCCESS;
 }
 
@@ -619,6 +895,10 @@ uint8_t btp_bap_broadcast_source_release(const void *cmd, uint16_t cmd_len, void
 	uint32_t broadcast_id = sys_get_le24(cp->broadcast_id);
 	struct btp_bap_broadcast_local_source *source =
 		btp_bap_broadcast_local_source_from_brcst_id_get(broadcast_id);
+
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
 
 	if (source == NULL) {
 		return BTP_STATUS_FAILED;
@@ -645,6 +925,10 @@ uint8_t btp_bap_broadcast_adv_start(const void *cmd, uint16_t cmd_len, void *rsp
 	uint32_t broadcast_id = sys_get_le24(cp->broadcast_id);
 	struct btp_bap_broadcast_local_source *source =
 		btp_bap_broadcast_local_source_from_brcst_id_get(broadcast_id);
+
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
 
 	if (source == NULL) {
 		return BTP_STATUS_FAILED;
@@ -679,6 +963,10 @@ uint8_t btp_bap_broadcast_adv_stop(const void *cmd, uint16_t cmd_len, void *rsp,
 	struct btp_bap_broadcast_local_source *source =
 		btp_bap_broadcast_local_source_from_brcst_id_get(broadcast_id);
 
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	if (source == NULL) {
 		return BTP_STATUS_FAILED;
 	}
@@ -703,6 +991,10 @@ uint8_t btp_bap_broadcast_source_start(const void *cmd, uint16_t cmd_len, void *
 	uint32_t broadcast_id = sys_get_le24(cp->broadcast_id);
 	struct btp_bap_broadcast_local_source *source =
 		btp_bap_broadcast_local_source_from_brcst_id_get(broadcast_id);
+
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
 
 	if (source == NULL) {
 		return BTP_STATUS_FAILED;
@@ -733,6 +1025,10 @@ uint8_t btp_bap_broadcast_source_stop(const void *cmd, uint16_t cmd_len, void *r
 	struct btp_bap_broadcast_local_source *source =
 		btp_bap_broadcast_local_source_from_brcst_id_get(broadcast_id);
 
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	if (source == NULL) {
 		return BTP_STATUS_FAILED;
 	}
@@ -762,7 +1058,7 @@ uint8_t btp_bap_broadcast_source_stop(const void *cmd, uint16_t cmd_len, void *r
 
 static int broadcast_sink_reset(void)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(remote_broadcast_sources); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(remote_broadcast_sources); i++) {
 		remote_broadcaster_free(&remote_broadcast_sources[i]);
 	}
 
@@ -785,7 +1081,6 @@ static void btp_send_baa_found_ev(const bt_addr_le_t *address, uint32_t broadcas
 static bool baa_check(struct bt_data *data, void *user_data)
 {
 	const struct bt_le_scan_recv_info *info = user_data;
-	char le_addr[BT_ADDR_LE_STR_LEN];
 	struct bt_uuid_16 adv_uuid;
 	uint32_t broadcast_id;
 
@@ -809,10 +1104,8 @@ static bool baa_check(struct bt_data *data, void *user_data)
 
 	broadcast_id = sys_get_le24(data->data + BT_UUID_SIZE_16);
 
-	bt_addr_le_to_str(info->addr, le_addr, sizeof(le_addr));
-
 	LOG_DBG("Found BAA with ID 0x%06X, addr %s, sid 0x%02X, interval 0x%04X", broadcast_id,
-		le_addr, info->sid, info->interval);
+		bt_addr_le_str(info->addr), info->sid, info->interval);
 
 	btp_send_baa_found_ev(info->addr, broadcast_id, info->sid, info->interval);
 
@@ -878,7 +1171,9 @@ static bool base_subgroup_bis_cb(const struct bt_bap_base_subgroup_bis *bis, voi
 
 	if (parse_data->stream_cnt < ARRAY_SIZE(broadcaster->streams)) {
 		struct btp_bap_broadcast_stream *stream =
-			&broadcaster->streams[parse_data->stream_cnt++];
+			&broadcaster->streams[parse_data->stream_cnt];
+
+		parse_data->stream_cnt++;
 
 		stream->bis_id = bis->index;
 		memcpy(&stream->codec_cfg, codec_cfg, sizeof(*codec_cfg));
@@ -916,6 +1211,8 @@ static void base_recv_cb(struct bt_bap_broadcast_sink *sink, const struct bt_bap
 	struct btp_bap_broadcast_remote_source *broadcaster;
 	struct base_parse_data parse_data = {0};
 	int ret;
+
+	ARG_UNUSED(base_size);
 
 	LOG_DBG("");
 
@@ -996,10 +1293,13 @@ static struct bt_bap_broadcast_sink_cb broadcast_sink_cbs = {
 
 static void pa_timer_handler(struct k_work *work)
 {
+	ARG_UNUSED(work);
+
 	if (broadcast_source_to_sync != NULL) {
 		enum bt_bap_pa_state pa_state;
 		const struct bt_bap_scan_delegator_recv_state *recv_state =
 			broadcast_source_to_sync->sink_recv_state;
+		int err;
 
 		if (recv_state->pa_sync_state == BT_BAP_PA_STATE_INFO_REQ) {
 			pa_state = BT_BAP_PA_STATE_NO_PAST;
@@ -1007,7 +1307,10 @@ static void pa_timer_handler(struct k_work *work)
 			pa_state = BT_BAP_PA_STATE_FAILED;
 		}
 
-		bt_bap_scan_delegator_set_pa_state(recv_state->src_id, pa_state);
+		err = bt_bap_scan_delegator_set_pa_state(recv_state->src_id, pa_state);
+		if (err != 0) {
+			LOG_ERR("Failed to set PA state: %d", err);
+		}
 	}
 
 	LOG_DBG("PA timeout");
@@ -1102,10 +1405,10 @@ btp_send_broadcast_receive_state_ev(struct bt_conn *conn,
 	ev->num_subgroups = state->num_subgroups;
 
 	ptr = ev->subgroups;
-	for (uint8_t i = 0; i < ev->num_subgroups; i++) {
+	for (uint8_t i = 0U; i < ev->num_subgroups; i++) {
 		const struct bt_bap_bass_subgroup *subgroup = &state->subgroups[i];
 
-		sys_put_le32(subgroup->bis_sync >> 1, ptr);
+		sys_put_le32(subgroup->bis_sync, ptr);
 		ptr += sizeof(subgroup->bis_sync);
 		*ptr = subgroup->metadata_len;
 		ptr += sizeof(subgroup->metadata_len);
@@ -1178,6 +1481,8 @@ static int pa_sync_term_req_cb(struct bt_conn *conn,
 {
 	struct btp_bap_broadcast_remote_source *broadcaster;
 
+	ARG_UNUSED(conn);
+
 	LOG_DBG("");
 
 	broadcaster = remote_broadcaster_find(&recv_state->addr, recv_state->broadcast_id);
@@ -1201,6 +1506,8 @@ static void broadcast_code_cb(struct bt_conn *conn,
 	int err;
 	uint32_t index_bitfield;
 	struct btp_bap_broadcast_remote_source *broadcaster;
+
+	ARG_UNUSED(conn);
 
 	LOG_DBG("Broadcast code received for %p", recv_state);
 
@@ -1240,6 +1547,8 @@ static int bis_sync_req_cb(struct bt_conn *conn,
 {
 	struct btp_bap_broadcast_remote_source *broadcaster;
 	bool bis_synced = false;
+
+	ARG_UNUSED(conn);
 
 	LOG_DBG("BIS sync request received for %p: 0x%08x", recv_state, bis_sync_req[0]);
 
@@ -1304,6 +1613,11 @@ uint8_t btp_bap_broadcast_sink_setup(const void *cmd, uint16_t cmd_len, void *rs
 {
 	int err;
 
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
 	err = broadcast_sink_reset();
@@ -1332,6 +1646,11 @@ uint8_t btp_bap_broadcast_sink_release(const void *cmd, uint16_t cmd_len, void *
 {
 	int err;
 
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
 	err = broadcast_sink_reset();
@@ -1343,6 +1662,11 @@ uint8_t btp_bap_broadcast_scan_start(const void *cmd, uint16_t cmd_len, void *rs
 				     uint16_t *rsp_len)
 {
 	int err;
+
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
 
 	LOG_DBG("");
 
@@ -1359,6 +1683,11 @@ uint8_t btp_bap_broadcast_scan_start(const void *cmd, uint16_t cmd_len, void *rs
 uint8_t btp_bap_broadcast_scan_stop(const void *cmd, uint16_t cmd_len, void *rsp, uint16_t *rsp_len)
 {
 	int err;
+
+	ARG_UNUSED(cmd);
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
 
 	LOG_DBG("");
 
@@ -1381,6 +1710,10 @@ uint8_t btp_bap_broadcast_sink_sync(const void *cmd, uint16_t cmd_len, void *rsp
 	struct bt_le_per_adv_sync_param create_params = {0};
 	uint32_t broadcast_id = sys_get_le24(cp->broadcast_id);
 
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
 	if (IS_ENABLED(CONFIG_BT_PER_ADV_SYNC_TRANSFER_RECEIVER) && cp->past_avail) {
@@ -1401,6 +1734,8 @@ uint8_t btp_bap_broadcast_sink_sync(const void *cmd, uint16_t cmd_len, void *rsp
 		}
 
 		err = pa_sync_past(conn, cp->sync_timeout);
+
+		bt_conn_unref(conn);
 	} else {
 		/* We scanned on our own or the Broadcast Assistant does not support PAST transfer.
 		 * Let's sync to the Broadcaster PA without PAST.
@@ -1444,6 +1779,10 @@ uint8_t btp_bap_broadcast_sink_stop(const void *cmd, uint16_t cmd_len, void *rsp
 	const struct btp_bap_broadcast_sink_stop_cmd *cp = cmd;
 	uint32_t broadcast_id = sys_get_le24(cp->broadcast_id);
 
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
 	broadcaster = remote_broadcaster_find(&cp->address, broadcast_id);
@@ -1478,6 +1817,10 @@ uint8_t btp_bap_broadcast_sink_bis_sync(const void *cmd, uint16_t cmd_len, void 
 	int err;
 	struct btp_bap_broadcast_remote_source *broadcaster;
 	const struct btp_bap_broadcast_sink_bis_sync_cmd *cp = cmd;
+
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
 
 	LOG_DBG("");
 
@@ -1525,11 +1868,9 @@ static void bap_broadcast_assistant_discover_cb(struct bt_conn *conn, int err,
 static void bap_broadcast_assistant_scan_cb(const struct bt_le_scan_recv_info *info,
 					    uint32_t broadcast_id)
 {
-	char le_addr[BT_ADDR_LE_STR_LEN];
-
-	bt_addr_le_to_str(info->addr, le_addr, sizeof(le_addr));
 	LOG_DBG("[DEVICE]: %s, broadcast_id 0x%06X, interval (ms) %u (0x%04x)), SID 0x%x, RSSI %i",
-		le_addr, broadcast_id, BT_GAP_PER_ADV_INTERVAL_TO_MS(info->interval),
+		bt_addr_le_str(info->addr), broadcast_id,
+		BT_GAP_PER_ADV_INTERVAL_TO_MS(info->interval),
 		info->interval, info->sid, info->rssi);
 }
 
@@ -1548,36 +1889,51 @@ bap_broadcast_assistant_recv_state_cb(struct bt_conn *conn, int err,
 
 static void bap_broadcast_assistant_recv_state_removed_cb(struct bt_conn *conn, uint8_t src_id)
 {
+	ARG_UNUSED(conn);
+	ARG_UNUSED(src_id);
+
 	LOG_DBG("");
 }
 
 static void bap_broadcast_assistant_scan_start_cb(struct bt_conn *conn, int err)
 {
+	ARG_UNUSED(conn);
+
 	LOG_DBG("err: %d", err);
 }
 
 static void bap_broadcast_assistant_scan_stop_cb(struct bt_conn *conn, int err)
 {
+	ARG_UNUSED(conn);
+
 	LOG_DBG("err: %d", err);
 }
 
 static void bap_broadcast_assistant_add_src_cb(struct bt_conn *conn, int err)
 {
+	ARG_UNUSED(conn);
+
 	LOG_DBG("err: %d", err);
 }
 
 static void bap_broadcast_assistant_mod_src_cb(struct bt_conn *conn, int err)
 {
+	ARG_UNUSED(conn);
+
 	LOG_DBG("err: %d", err);
 }
 
 static void bap_broadcast_assistant_broadcast_code_cb(struct bt_conn *conn, int err)
 {
+	ARG_UNUSED(conn);
+
 	LOG_DBG("err: %d", err);
 }
 
 static void bap_broadcast_assistant_rem_src_cb(struct bt_conn *conn, int err)
 {
+	ARG_UNUSED(conn);
+
 	LOG_DBG("err: %d", err);
 }
 
@@ -1601,6 +1957,10 @@ uint8_t btp_bap_broadcast_discover_scan_delegators(const void *cmd, uint16_t cmd
 	struct bt_conn *conn;
 	const struct btp_bap_discover_scan_delegators_cmd *cp = cmd;
 
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
 	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
@@ -1609,6 +1969,8 @@ uint8_t btp_bap_broadcast_discover_scan_delegators(const void *cmd, uint16_t cmd
 	}
 
 	err = bt_bap_broadcast_assistant_discover(conn);
+
+	bt_conn_unref(conn);
 
 	return BTP_STATUS_VAL(err);
 }
@@ -1620,6 +1982,10 @@ uint8_t btp_bap_broadcast_assistant_scan_start(const void *cmd, uint16_t cmd_len
 	struct bt_conn *conn;
 	const struct btp_bap_broadcast_assistant_scan_start_cmd *cp = cmd;
 
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
 	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
@@ -1628,6 +1994,8 @@ uint8_t btp_bap_broadcast_assistant_scan_start(const void *cmd, uint16_t cmd_len
 	}
 
 	err = bt_bap_broadcast_assistant_scan_start(conn, true);
+
+	bt_conn_unref(conn);
 
 	return BTP_STATUS_VAL(err);
 }
@@ -1639,6 +2007,10 @@ uint8_t btp_bap_broadcast_assistant_scan_stop(const void *cmd, uint16_t cmd_len,
 	struct bt_conn *conn;
 	const struct btp_bap_broadcast_assistant_scan_stop_cmd *cp = cmd;
 
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
 	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
@@ -1648,22 +2020,63 @@ uint8_t btp_bap_broadcast_assistant_scan_stop(const void *cmd, uint16_t cmd_len,
 
 	err = bt_bap_broadcast_assistant_scan_stop(conn);
 
+	bt_conn_unref(conn);
+
 	return BTP_STATUS_VAL(err);
 }
+
+/* Parses subgroups data from BTP command and fills up struct bt_bap_bass_subgroup
+ * array. Return false on if provided data is not valid or if exceeds subgroup capacity.
+ */
+static bool btp2subgroups(uint8_t cnt, const uint8_t *data, uint16_t data_len,
+			  uint8_t cnt_subgroups, struct bt_bap_bass_subgroup *subgroups)
+{
+	struct net_buf_simple buf;
+
+	if (cnt > cnt_subgroups) {
+		return false;
+	}
+
+	net_buf_simple_init_with_data(&buf, (void *)data, data_len);
+
+	for (uint8_t i = 0U; i < cnt; i++) {
+		struct bt_bap_bass_subgroup *subgroup = &subgroups[i];
+
+		/* If remaining data is less than the necessary subgroup fields, return failed */
+		if (buf.len < sizeof(subgroup->bis_sync) + sizeof(subgroup->metadata_len)) {
+			return false;
+		}
+
+		subgroup->bis_sync = net_buf_simple_pull_le32(&buf);
+		subgroup->metadata_len = net_buf_simple_pull_u8(&buf);
+
+		if (subgroup->metadata_len > sizeof(subgroup->metadata) ||
+		    subgroup->metadata_len > buf.len) {
+			return false;
+		}
+
+		memcpy(subgroup->metadata, net_buf_simple_pull_mem(&buf, subgroup->metadata_len),
+		       subgroup->metadata_len);
+	}
+
+	return buf.len == 0U;
+}
+
 
 uint8_t btp_bap_broadcast_assistant_add_src(const void *cmd, uint16_t cmd_len, void *rsp,
 					    uint16_t *rsp_len)
 {
 	int err;
-	const uint8_t *ptr;
 	struct bt_conn *conn;
 	const struct btp_bap_add_broadcast_src_cmd *cp = cmd;
 	struct bt_bap_broadcast_assistant_add_src_param param = {0};
 
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
-	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
-	if (!conn) {
+	if (cmd_len < sizeof(*cp)) {
 		return BTP_STATUS_FAILED;
 	}
 
@@ -1673,23 +2086,23 @@ uint8_t btp_bap_broadcast_assistant_add_src(const void *cmd, uint16_t cmd_len, v
 	param.pa_sync = cp->padv_sync > 0 ? true : false;
 	param.broadcast_id = sys_get_le24(cp->broadcast_id);
 	param.pa_interval = sys_le16_to_cpu(cp->padv_interval);
-	param.num_subgroups = MIN(cp->num_subgroups, CONFIG_BT_BAP_BASS_MAX_SUBGROUPS);
+	param.num_subgroups = cp->num_subgroups;
 	param.subgroups = delegator_subgroups;
 
-	ptr = cp->subgroups;
-	for (uint8_t i = 0; i < param.num_subgroups; i++) {
-		struct bt_bap_bass_subgroup *subgroup = &delegator_subgroups[i];
+	if (!btp2subgroups(cp->num_subgroups, cp->subgroups, cmd_len - sizeof(*cp),
+			   ARRAY_SIZE(delegator_subgroups), delegator_subgroups)) {
+		return BTP_STATUS_FAILED;
+	}
 
-		subgroup->bis_sync = sys_get_le32(ptr);
-
-		ptr += sizeof(subgroup->bis_sync);
-		subgroup->metadata_len = *ptr;
-		ptr += sizeof(subgroup->metadata_len);
-		memcpy(subgroup->metadata, ptr, subgroup->metadata_len);
-		ptr += subgroup->metadata_len;
+	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
+	if (!conn) {
+		return BTP_STATUS_FAILED;
 	}
 
 	err = bt_bap_broadcast_assistant_add_src(conn, &param);
+
+	bt_conn_unref(conn);
+
 	if (err != 0) {
 		LOG_DBG("err %d", err);
 
@@ -1706,6 +2119,10 @@ uint8_t btp_bap_broadcast_assistant_remove_src(const void *cmd, uint16_t cmd_len
 	struct bt_conn *conn;
 	const struct btp_bap_remove_broadcast_src_cmd *cp = cmd;
 
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
 	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
@@ -1715,6 +2132,8 @@ uint8_t btp_bap_broadcast_assistant_remove_src(const void *cmd, uint16_t cmd_len
 
 	err = bt_bap_broadcast_assistant_rem_src(conn, cp->src_id);
 
+	bt_conn_unref(conn);
+
 	return BTP_STATUS_VAL(err);
 }
 
@@ -1722,15 +2141,16 @@ uint8_t btp_bap_broadcast_assistant_modify_src(const void *cmd, uint16_t cmd_len
 					       uint16_t *rsp_len)
 {
 	int err;
-	const uint8_t *ptr;
 	struct bt_conn *conn;
 	const struct btp_bap_modify_broadcast_src_cmd *cp = cmd;
 	struct bt_bap_broadcast_assistant_mod_src_param param = {0};
 
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
-	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
-	if (!conn) {
+	if (cmd_len < sizeof(*cp)) {
 		return BTP_STATUS_FAILED;
 	}
 
@@ -1738,23 +2158,22 @@ uint8_t btp_bap_broadcast_assistant_modify_src(const void *cmd, uint16_t cmd_len
 	param.src_id = cp->src_id;
 	param.pa_sync = cp->padv_sync > 0 ? true : false;
 	param.pa_interval = sys_le16_to_cpu(cp->padv_interval);
-	param.num_subgroups = MIN(cp->num_subgroups, CONFIG_BT_BAP_BASS_MAX_SUBGROUPS);
+	param.num_subgroups = cp->num_subgroups;
 	param.subgroups = delegator_subgroups;
 
-	ptr = cp->subgroups;
-	for (uint8_t i = 0; i < param.num_subgroups; i++) {
-		struct bt_bap_bass_subgroup *subgroup = &delegator_subgroups[i];
+	if (!btp2subgroups(cp->num_subgroups, cp->subgroups, cmd_len - sizeof(*cp),
+			   ARRAY_SIZE(delegator_subgroups), delegator_subgroups)) {
+		return BTP_STATUS_FAILED;
+	}
 
-		subgroup->bis_sync = sys_get_le32(ptr);
-
-		ptr += sizeof(subgroup->bis_sync);
-		subgroup->metadata_len = *ptr;
-		ptr += sizeof(subgroup->metadata_len);
-		memcpy(subgroup->metadata, ptr, subgroup->metadata_len);
-		ptr += subgroup->metadata_len;
+	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
+	if (!conn) {
+		return BTP_STATUS_FAILED;
 	}
 
 	err = bt_bap_broadcast_assistant_mod_src(conn, &param);
+
+	bt_conn_unref(conn);
 
 	return BTP_STATUS_VAL(err);
 }
@@ -1766,6 +2185,10 @@ uint8_t btp_bap_broadcast_assistant_set_broadcast_code(const void *cmd, uint16_t
 	struct bt_conn *conn;
 	const struct btp_bap_set_broadcast_code_cmd *cp = cmd;
 
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
 	LOG_DBG("");
 
 	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
@@ -1774,6 +2197,9 @@ uint8_t btp_bap_broadcast_assistant_set_broadcast_code(const void *cmd, uint16_t
 	}
 
 	err = bt_bap_broadcast_assistant_set_broadcast_code(conn, cp->src_id, cp->broadcast_code);
+
+	bt_conn_unref(conn);
+
 	if (err != 0) {
 		LOG_DBG("err %d", err);
 		return BTP_STATUS_FAILED;
@@ -1791,12 +2217,11 @@ uint8_t btp_bap_broadcast_assistant_send_past(const void *cmd, uint16_t cmd_len,
 	struct bt_le_per_adv_sync *pa_sync;
 	const struct btp_bap_send_past_cmd *cp = cmd;
 
-	LOG_DBG("");
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
 
-	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
-	if (!conn) {
-		return BTP_STATUS_FAILED;
-	}
+	LOG_DBG("");
 
 	pa_sync = tester_gap_padv_get();
 	if (!pa_sync) {
@@ -1812,7 +2237,15 @@ uint8_t btp_bap_broadcast_assistant_send_past(const void *cmd, uint16_t cmd_len,
 	 */
 	service_data = cp->src_id << 8;
 
+	conn = bt_conn_lookup_addr_le(BT_ID_DEFAULT, &cp->address);
+	if (!conn) {
+		return BTP_STATUS_FAILED;
+	}
+
 	err = bt_le_per_adv_sync_transfer(pa_sync, conn, service_data);
+
+	bt_conn_unref(conn);
+
 	if (err != 0) {
 		LOG_DBG("Could not transfer periodic adv sync: %d", err);
 
@@ -1828,14 +2261,9 @@ uint8_t btp_bap_scan_delegator_add_src(const void *cmd, uint16_t cmd_len, void *
 	const struct btp_bap_scan_delegator_add_src_cmd *cp = cmd;
 	struct btp_bap_scan_delegator_add_src_rp *rp = rsp;
 	struct bt_bap_scan_delegator_add_src_param param = {0};
-	struct net_buf_simple buf;
 	int err;
 
 	if (cmd_len < sizeof(*cp)) {
-		return BTP_STATUS_FAILED;
-	}
-
-	if (cp->num_subgroups > CONFIG_BT_BAP_BASS_MAX_SUBGROUPS) {
 		return BTP_STATUS_FAILED;
 	}
 
@@ -1850,29 +2278,9 @@ uint8_t btp_bap_scan_delegator_add_src(const void *cmd, uint16_t cmd_len, void *
 	param.broadcast_id = sys_get_le24(cp->broadcast_id);
 	param.num_subgroups = cp->num_subgroups;
 
-	net_buf_simple_init_with_data(&buf, (void *)cp->subgroups, cmd_len - sizeof(*cp));
 
-	for (uint8_t i = 0; i < param.num_subgroups; i++) {
-		struct bt_bap_bass_subgroup *subgroup = &param.subgroups[i];
-
-		/* If remaining data is less than the necessary subgroup fields, return failed */
-		if (buf.len < sizeof(subgroup->bis_sync) + sizeof(subgroup->metadata_len)) {
-			return BTP_STATUS_FAILED;
-		}
-
-		subgroup->bis_sync = net_buf_simple_pull_le32(&buf);
-		subgroup->metadata_len = net_buf_simple_pull_u8(&buf);
-
-		if (subgroup->metadata_len > sizeof(subgroup->metadata) ||
-		    subgroup->metadata_len > buf.len) {
-			return BTP_STATUS_FAILED;
-		}
-
-		memcpy(subgroup->metadata, net_buf_simple_pull_mem(&buf, subgroup->metadata_len),
-		       subgroup->metadata_len);
-	}
-
-	if (buf.len != 0U) {
+	if (!btp2subgroups(cp->num_subgroups, cp->subgroups, cmd_len - sizeof(*cp),
+			   ARRAY_SIZE(param.subgroups), param.subgroups)) {
 		return BTP_STATUS_FAILED;
 	}
 
@@ -1884,6 +2292,37 @@ uint8_t btp_bap_scan_delegator_add_src(const void *cmd, uint16_t cmd_len, void *
 	rp->src_id = (uint8_t)err;
 	*rsp_len = sizeof(*rp);
 
+	return BTP_STATUS_SUCCESS;
+}
+
+uint8_t btp_bap_set_sink_broadcast_code(const void *cmd, uint16_t cmd_len, void *rsp,
+					uint16_t *rsp_len)
+{
+	const struct btp_bap_broadcast_sink_set_broadcast_code_cmd *cp = cmd;
+	struct btp_bap_broadcast_remote_source *broadcaster = NULL;
+	uint32_t host_broadcast_id = sys_get_le24(cp->broadcast_id);
+
+	ARG_UNUSED(cmd_len);
+	ARG_UNUSED(rsp);
+	ARG_UNUSED(rsp_len);
+
+	/* Find the broadcaster by address and broadcast_id */
+	broadcaster = remote_broadcaster_find(&cp->address, host_broadcast_id);
+	if (broadcaster == NULL) {
+		LOG_DBG("Broadcast source not found for addr %s, broadcast_id 0x%06X, alloc new",
+			bt_addr_le_str(&cp->address), host_broadcast_id);
+		/* If not found, allocate a new one */
+		broadcaster = remote_broadcaster_alloc();
+		if (broadcaster == NULL) {
+			LOG_DBG("Failed to allocate broadcaster entry");
+			return BTP_STATUS_FAILED;
+		}
+		bt_addr_le_copy(&broadcaster->address, &cp->address);
+	}
+	(void)memcpy(broadcaster->sink_broadcast_code, cp->broadcast_code,
+		     BT_ISO_BROADCAST_CODE_SIZE);
+	broadcaster->broadcast_id = host_broadcast_id;
+	broadcaster->broadcast_code_received = true;
 	return BTP_STATUS_SUCCESS;
 }
 

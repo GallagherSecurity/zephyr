@@ -130,6 +130,7 @@ struct gpio_bee_data {
 	const struct device *dev;
 	sys_slist_t cb;
 	struct gpio_pad_node *array;
+	gpio_port_pins_t connect_pin;
 };
 
 static uint32_t gpio_bee_get_pull_config(gpio_flags_t flags)
@@ -167,11 +168,14 @@ static void gpio_bee_fill_init_struct(GPIO_InitTypeDef *init_struct, uint32_t gp
 	init_struct->GPIO_OutPutMode =
 		flags & GPIO_OPEN_DRAIN ? GPIO_OUTPUT_OPENDRAIN : GPIO_OUTPUT_PUSHPULL;
 #endif
-	init_struct->GPIO_ITCmd = flags & GPIO_INT_ENABLE ? ENABLE : DISABLE;
-	init_struct->GPIO_ITTrigger =
-		flags & GPIO_INT_EDGE ? GPIO_INT_Trigger_EDGE : GPIO_INT_Trigger_LEVEL;
-	init_struct->GPIO_ITPolarity = flags & GPIO_INT_LOW_0 ? GPIO_INT_POLARITY_ACTIVE_LOW
-							      : GPIO_INT_POLARITY_ACTIVE_HIGH;
+	/*
+	 * gpio_pin_configure() never carries interrupt flags; the trigger,
+	 * polarity and enable are owned by gpio_pin_interrupt_configure(). Keep
+	 * the interrupt disabled here: GPIO_Init() only writes the interrupt
+	 * registers when GPIO_ITCmd is ENABLE, so this leaves an already armed
+	 * interrupt untouched instead of clobbering its trigger/polarity.
+	 */
+	init_struct->GPIO_ITCmd = DISABLE;
 }
 
 static int gpio_bee_pin_configure(const struct device *port, gpio_pin_t pin, gpio_flags_t flags)
@@ -185,12 +189,24 @@ static int gpio_bee_pin_configure(const struct device *port, gpio_pin_t pin, gpi
 	GPIO_InitTypeDef gpio_init_struct;
 	uint8_t debounce_ms =
 		(flags & BEE_GPIO_INPUT_DEBOUNCE_MS_MASK) >> BEE_GPIO_INPUT_DEBOUNCE_MS_POS;
+	unsigned int key;
 
 	LOG_DBG("port=%s, pin=%d, flags=0x%x, line%d", port->name, pin, flags, __LINE__);
 
 	__ASSERT(pad_pin < TOTAL_PIN_NUM, "gpio port or pin error");
 
-	if (flags & GPIO_OPEN_SOURCE) {
+	if ((flags & GPIO_SINGLE_ENDED) != 0 && (flags & GPIO_LINE_OPEN_DRAIN) == 0) {
+		return -ENOTSUP;
+	}
+
+#if defined(CONFIG_SOC_SERIES_RTL8752H)
+	if ((flags & GPIO_OPEN_DRAIN) == GPIO_OPEN_DRAIN) {
+		/* RTL8752H does not provide a hardware open-drain output mode. */
+		return -ENOTSUP;
+	}
+#endif
+
+	if ((flags & GPIO_INPUT) && (flags & GPIO_OUTPUT)) {
 		return -ENOTSUP;
 	}
 
@@ -198,50 +214,66 @@ static int gpio_bee_pin_configure(const struct device *port, gpio_pin_t pin, gpi
 		Pinmux_Deinit(pad_pin);
 		Pad_Config(pad_pin, PAD_SW_MODE, PAD_NOT_PWRON, PAD_PULL_NONE, PAD_OUT_DISABLE,
 			   PAD_OUT_HIGH);
+
+		key = irq_lock();
+		data->connect_pin &= ~gpio_bit;
+		irq_unlock(key);
+
 		return 0;
 	}
 
 	pull_config = gpio_bee_get_pull_config(flags);
 
-	if (debounce_ms) {
-		data->array[pin].pin_debounce_ms = debounce_ms;
-	} else {
-		data->array[pin].pin_debounce_ms = 0;
-	}
+	data->array[pin].pin_debounce_ms = debounce_ms;
 
 	gpio_bee_fill_init_struct(&gpio_init_struct, gpio_bit, flags, debounce_ms);
 
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)
 	Pad_Dedicated_Config(pad_pin, DISABLE);
 #endif
-	Pad_Config(pad_pin, PAD_PINMUX_MODE, PAD_IS_PWRON, pull_config,
-		   (flags & GPIO_OUTPUT) ? PAD_OUT_ENABLE : PAD_OUT_DISABLE,
-		   (flags & GPIO_OUTPUT_INIT_HIGH) ? PAD_OUT_HIGH : PAD_OUT_LOW);
-	Pinmux_Config(pad_pin, DWGPIO);
-
-	switch (flags & (GPIO_OUTPUT | GPIO_OUTPUT_INIT_HIGH | GPIO_OUTPUT_INIT_LOW)) {
-	case (GPIO_OUTPUT_HIGH):
-		BEE_GPIO_WRITE_BIT(port_base, gpio_bit, 1);
-		break;
-	case (GPIO_OUTPUT_LOW):
-		BEE_GPIO_WRITE_BIT(port_base, gpio_bit, 0);
-		break;
-	default:
-		break;
-	}
-
-	/* to avoid trigger gpio interrupt */
-	if (debounce_ms && (flags & GPIO_INT_ENABLE)) {
-		BEE_GPIO_INT_CONFIG(port_base, gpio_bit, DISABLE);
+	if (flags & GPIO_OUTPUT) {
+		switch (flags & (GPIO_OUTPUT_INIT_HIGH | GPIO_OUTPUT_INIT_LOW)) {
+		case GPIO_OUTPUT_INIT_HIGH:
+			BEE_GPIO_WRITE_BIT(port_base, gpio_bit, 1);
+			break;
+		case GPIO_OUTPUT_INIT_LOW:
+			BEE_GPIO_WRITE_BIT(port_base, gpio_bit, 0);
+			break;
+		default:
+			break;
+		}
 		BEE_GPIO_INIT(port_base, &gpio_init_struct);
-		BEE_GPIO_MASK_INT_CONFIG(port_base, gpio_bit, ENABLE);
-		BEE_GPIO_INT_CONFIG(port_base, gpio_bit, ENABLE);
-		k_busy_wait(data->array[pin].pin_debounce_ms * 2 * USEC_PER_MSEC);
-		BEE_GPIO_CLEAR_INT_PENDING_BIT(port_base, gpio_bit);
-		BEE_GPIO_MASK_INT_CONFIG(port_base, gpio_bit, DISABLE);
+		/*
+		 * Route (Pinmux_Config) before committing to pinmux mode
+		 * (Pad_Config), reverse of the input path: the other order enters
+		 * pinmux mode while routing still points at the previous function,
+		 * glitching the driven line. Do not reorder.
+		 */
+		Pinmux_Config(pad_pin, DWGPIO);
+		Pad_Config(pad_pin, PAD_PINMUX_MODE, PAD_IS_PWRON, pull_config, PAD_OUT_ENABLE,
+			   (flags & GPIO_OUTPUT_INIT_HIGH) ? PAD_OUT_HIGH : PAD_OUT_LOW);
 	} else {
-		BEE_GPIO_INIT(port_base, &gpio_init_struct);
+		Pad_Config(pad_pin, PAD_PINMUX_MODE, PAD_IS_PWRON, pull_config, PAD_OUT_DISABLE,
+			   PAD_OUT_LOW);
+		Pinmux_Config(pad_pin, DWGPIO);
+
+		/* to avoid trigger gpio interrupt */
+		if (debounce_ms && GPIO_GET_INT_ENABLE(port_base, gpio_bit)) {
+			BEE_GPIO_INT_CONFIG(port_base, gpio_bit, DISABLE);
+			BEE_GPIO_INIT(port_base, &gpio_init_struct);
+			BEE_GPIO_MASK_INT_CONFIG(port_base, gpio_bit, ENABLE);
+			BEE_GPIO_INT_CONFIG(port_base, gpio_bit, ENABLE);
+			k_busy_wait(data->array[pin].pin_debounce_ms * 2 * USEC_PER_MSEC);
+			BEE_GPIO_CLEAR_INT_PENDING_BIT(port_base, gpio_bit);
+			BEE_GPIO_MASK_INT_CONFIG(port_base, gpio_bit, DISABLE);
+		} else {
+			BEE_GPIO_INIT(port_base, &gpio_init_struct);
+		}
 	}
+
+	key = irq_lock();
+	data->connect_pin |= gpio_bit;
+	irq_unlock(key);
 
 	return 0;
 }
@@ -261,11 +293,12 @@ static int gpio_bee_port_set_masked_raw(const struct device *port, gpio_port_pin
 {
 	const struct gpio_bee_config *config = port->config;
 	__maybe_unused GPIO_TypeDef *port_base = config->port_base;
-
-	gpio_port_pins_t pins_value = BEE_GPIO_READ_INPUT_DATA(port_base);
+	unsigned int key = irq_lock();
+	gpio_port_pins_t pins_value = BEE_GPIO_READ_OUTPUT_DATA(port_base);
 
 	pins_value = (pins_value & ~mask) | (mask & value);
 	BEE_GPIO_WRITE(port_base, pins_value);
+	irq_unlock(key);
 
 	return 0;
 }
@@ -294,11 +327,13 @@ static int gpio_bee_port_toggle_bits(const struct device *port, gpio_port_pins_t
 {
 	const struct gpio_bee_config *config = port->config;
 	__maybe_unused GPIO_TypeDef *port_base = config->port_base;
-
-	uint32_t pins_value = BEE_GPIO_READ_INPUT_DATA(port_base);
+	unsigned int key = irq_lock();
+	uint32_t pins_value = BEE_GPIO_READ_OUTPUT_DATA(port_base);
 
 	pins_value = pins_value ^ pins;
 	BEE_GPIO_WRITE(port_base, pins_value);
+	irq_unlock(key);
+
 	LOG_DBG("port=%s, pin=0x%x, pins_value=0x%x, line%d", port->name, pins, pins_value,
 		__LINE__);
 
@@ -416,14 +451,21 @@ int gpio_bee_port_get_direction(const struct device *port, gpio_port_pins_t map,
 {
 	const struct gpio_bee_config *config = port->config;
 	GPIO_TypeDef *port_base = config->port_base;
+	struct gpio_bee_data *data = port->data;
 	gpio_port_pins_t gpio_dir_status = GPIO_GET_PORT_DIRECTION(port_base);
+	gpio_port_pins_t connect_pin;
+	unsigned int key;
+
+	key = irq_lock();
+	connect_pin = data->connect_pin;
+	irq_unlock(key);
 
 	if (inputs != NULL) {
-		*inputs = gpio_dir_status;
+		*inputs = map & ~gpio_dir_status & connect_pin;
 	}
 
 	if (outputs != NULL) {
-		*outputs = ~gpio_dir_status;
+		*outputs = map & gpio_dir_status & connect_pin;
 	}
 
 	return 0;
@@ -476,7 +518,7 @@ static int gpio_bee_init(const struct device *dev)
 	}
 
 	ret = pinctrl_lookup_state(config->pcfg, PINCTRL_STATE_DEFAULT, &state);
-	if ((ret < 0) && (ret != -ENOENT)) {
+	if (ret < 0) {
 		LOG_ERR("GPIO relate pins should be configured on dts pinctrl node");
 		return -EIO;
 	}

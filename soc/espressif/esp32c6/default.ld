@@ -18,7 +18,7 @@
 #ifdef CONFIG_ESP_SIMPLE_BOOT
 user_sram_end = DRAM_SHARED_BUFFERS_END;
 #else
-user_sram_end = BOOTLOADER_IRAM_LOADER_SEG_START;
+user_sram_end = BOOTLOADER_DRAM_LOADER_SEG_START;
 #endif
 
 /* User available memory segments */
@@ -85,10 +85,22 @@ MEMORY
 
 #if CONFIG_ESP32_ULP_COPROC_ENABLED
   lp_ram_seg(RW):  org = LPSRAM_RTC_START,
-                   len = LPSRAM_RTC_SIZE
+                   len = LPSRAM_RTC_SIZE - CONFIG_RESERVE_RTC_MEM
 #else
   lp_ram_seg(RW):  org = LPSRAM_IRAM_START,
                    len = LPSRAM_RTC_START + LPSRAM_RTC_SIZE - LPSRAM_IRAM_START
+                        - CONFIG_RESERVE_RTC_MEM
+#endif
+  /* We reduced the size of lp_ram_seg by CONFIG_RESERVE_RTC_MEM value.
+     It reserves LP memory for this segment so data keep a fixed address:
+       - rtc timer data (s_rtc_timer_retain_mem, see esp_clk.c).
+     Placed at the end of usable LP linker memory, immediately before the
+     DT retainedmem / ipc / mbox regions.
+  */
+#if (CONFIG_RESERVE_RTC_MEM > 0)
+  lp_reserved_seg(RW): org = LPSRAM_RTC_START + LPSRAM_RTC_SIZE
+                             - CONFIG_RESERVE_RTC_MEM,
+                       len = CONFIG_RESERVE_RTC_MEM
 #endif
 
 #ifdef CONFIG_GEN_ISR_TABLES
@@ -165,9 +177,9 @@ SECTIONS
      * 12. Flash offset (LMA) for start of LP_DRAM region
      * 13. Size of LP_DRAM region
      */
-    LONG(ADDR(.rtc.data))
-    LONG(LOADADDR(.rtc.data))
-    LONG(SIZEOF(.rtc.data))
+    LONG(ADDR(.rtc.force_fast))
+    LONG(LOADADDR(.rtc.force_fast))
+    LONG(LOADADDR(.rtc.force_slow) + SIZEOF(.rtc.force_slow) - LOADADDR(.rtc.force_fast))
 
     /* IROM metadata:
      * 14. Destination address (VMA) for IROM region
@@ -193,7 +205,7 @@ SECTIONS
   #include <zephyr/linker/llext-sections.ld>
 
   /* --- START OF RTC --- */
-  .rtc.text :
+  .rtc.text : ALIGN_WITH_INPUT
   {
     . = ALIGN(4);
     _rtc_fast_start = ABSOLUTE(.);
@@ -208,7 +220,7 @@ SECTIONS
    * It holds data marked with RTC_FAST_ATTR attribute.
    * See the file "esp_attr.h" for more information.
    */
-  .rtc.force_fast :
+  .rtc.force_fast : ALIGN_WITH_INPUT
   {
     . = ALIGN(4);
     _rtc_force_fast_start = ABSOLUTE(.);
@@ -221,12 +233,25 @@ SECTIONS
   /* RTC data section holds data marked with
    * RTC_DATA_ATTR, RTC_RODATA_ATTR attributes.
    */
-  .rtc.data :
+  .rtc.data : ALIGN_WITH_INPUT
   {
     _rtc_data_start = ABSOLUTE(.);
     *(.rtc.data .rtc.data.*)
     *(.rtc.rodata .rtc.rodata.*)
     _rtc_data_end = ABSOLUTE(.);
+  } GROUP_DATA_LINK_IN(lp_ram_seg, ROMABLE_REGION)
+
+  /* This section located in RTC SLOW Memory area.
+   * It holds data marked with RTC_SLOW_ATTR attribute.
+   * See the file "esp_attr.h" for more information.
+   */
+  .rtc.force_slow : ALIGN_WITH_INPUT
+  {
+    . = ALIGN(4);
+    _rtc_force_slow_start = ABSOLUTE(.);
+    *(.rtc.force_slow .rtc.force_slow.*)
+    . = ALIGN(4);
+    _rtc_force_slow_end = ABSOLUTE(.);
   } GROUP_DATA_LINK_IN(lp_ram_seg, ROMABLE_REGION)
 
   .rtc.bss (NOLOAD) :
@@ -250,31 +275,24 @@ SECTIONS
     _rtc_noinit_end = ABSOLUTE(.);
   } GROUP_LINK_IN(lp_ram_seg)
 
-  /* This section located in RTC SLOW Memory area.
-   * It holds data marked with RTC_SLOW_ATTR attribute.
-   * See the file "esp_attr.h" for more information.
-   */
-  .rtc.force_slow :
-  {
-    . = ALIGN(4);
-    _rtc_force_slow_start = ABSOLUTE(.);
-    *(.rtc.force_slow .rtc.force_slow.*)
-    . = ALIGN(4);
-    _rtc_force_slow_end = ABSOLUTE(.);
-  } GROUP_DATA_LINK_IN(lp_ram_seg, ROMABLE_REGION)
-
   /**
    * This section holds RTC data that should have fixed addresses.
    * The data are not initialized at power-up and are retained during deep sleep.
    */
+#if (CONFIG_RESERVE_RTC_MEM > 0)
   .rtc_reserved (NOLOAD) :
   {
     . = ALIGN(4);
     _rtc_reserved_start = ABSOLUTE(.);
     *(.rtc_timer_data_in_rtc_mem .rtc_timer_data_in_rtc_mem.*)
     _rtc_reserved_end = ABSOLUTE(.);
-  } GROUP_LINK_IN(rtc_slow_seg)
+  } GROUP_LINK_IN(lp_reserved_seg)
   _rtc_reserved_length = (_rtc_reserved_end - _rtc_reserved_start);
+  ASSERT((_rtc_reserved_length <= CONFIG_RESERVE_RTC_MEM),
+         "RTC reserved segment does not fit CONFIG_RESERVE_RTC_MEM.")
+#else
+  _rtc_reserved_length = 0;
+#endif
 
   /* Get size of rtc slow data based on rtc_data_location alias */
   _rtc_slow_length = (_rtc_force_slow_end - _rtc_data_start);
@@ -282,6 +300,15 @@ SECTIONS
 
   ASSERT((_rtc_slow_length <= LENGTH(rtc_slow_seg)), "RTC_SLOW segment data does not fit.")
   ASSERT((_rtc_fast_length <= LENGTH(rtc_data_seg)), "RTC_FAST segment data does not fit.")
+
+  /* The LP_DRAM load descriptor above spans .rtc.force_fast through .rtc.force_slow, so the
+   * bootloader can only place those sections correctly while the VMA and LMA layouts of that
+   * span agree. ALIGN_WITH_INPUT on the four loadable LP sections keeps them in step; this
+   * catches any future change that reintroduces a skew.
+   */
+  ASSERT((LOADADDR(.rtc.force_slow) + SIZEOF(.rtc.force_slow) - LOADADDR(.rtc.force_fast)) ==
+         (ADDR(.rtc.force_slow) + SIZEOF(.rtc.force_slow) - ADDR(.rtc.force_fast)),
+         "LP-SRAM loadable sections must be contiguous with equal VMA and LMA offsets")
 
   /* --- END OF RTC --- */
 
@@ -312,6 +339,8 @@ SECTIONS
 
     *(.iram1 .iram1.*)
     *(.iram0.literal .iram.literal .iram.text.literal .iram0.text .iram.text)
+    /* Input sections named with zephyr_linker_sources(RAMFUNC_SECTION ...) */
+    #include <snippets-ramfunc-section.ld>
     *libzephyr.a:panic.*(.literal .text .literal.* .text.*)
     *libzephyr.a:loader.*(.literal .text .literal.* .text.*)
     *libzephyr.a:flash_init.*(.literal .text .literal.* .text.*)
@@ -327,7 +356,7 @@ SECTIONS
     *libgcc.a:lib2funcs.*(.literal .text .literal.* .text.*)
     *libdrivers__flash.a:flash_esp32.*(.literal .text .literal.* .text.*)
     *libzephyr.a:log_noos.*(.literal .text .literal.* .text.*)
-    *libdrivers__timer.a:esp32c6_sys_timer.*(.literal .text .literal.* .text.*)
+    *libdrivers__timer.a:esp32_sys_timer.*(.literal .text .literal.* .text.*)
     *libzephyr.a:log_core.*(.literal .text .literal.* .text.*)
     *libzephyr.a:cbprintf_complete.*(.literal .text .literal.* .text.*)
     *libzephyr.a:printk.*(.literal.printk .literal.vprintk .literal.char_out .text.printk .text.vprintk .text.char_out)
@@ -339,6 +368,7 @@ SECTIONS
     *libzephyr.a:rtc_*.*(.literal .text .literal.* .text.*)
     *libzephyr.a:periph_ctrl.*(.literal .text .literal.* .text.*)
     *libzephyr.a:regi2c_ctrl.*(.literal .text .literal.* .text.*)
+    *libzephyr.a:sar_periph_ctrl_common.*(.literal .text .literal.* .text.*)
     *libgcov.a:(.literal .text .literal.* .text.*)
     *libphy.a:( .phyiram .phyiram.*)
     *librtc.a:(.literal .text .literal.* .text.*)
@@ -361,12 +391,6 @@ SECTIONS
     *libzephyr.a:lldesc.*(.literal .literal.* .text .text.*)
 
     /* [mapping:log] */
-    *(.literal.esp_log_write .text.esp_log_write)
-    *(.literal.esp_log_timestamp .text.esp_log_timestamp)
-    *(.literal.esp_log_early_timestamp .text.esp_log_early_timestamp)
-    *(.literal.esp_log_impl_lock .text.esp_log_impl_lock)
-    *(.literal.esp_log_impl_lock_timeout .text.esp_log_impl_lock_timeout)
-    *(.literal.esp_log_impl_unlock .text.esp_log_impl_unlock)
 
     /* [mapping:spi_flash] */
     *libzephyr.a:spi_flash_chip_boya.*(.literal .literal.* .text .text.*)
@@ -383,6 +407,9 @@ SECTIONS
     *libzephyr.a:flash_ops.*(.literal .literal.* .text .text.*)
     *libzephyr.a:spi_flash_os_func_app.*(.literal .literal.* .text .text.*)
     *libzephyr.a:spi_flash_os_func_noos.*(.literal .literal.* .text .text.*)
+#if defined(CONFIG_ESP32_SLEEP_SET_FLASH_DPD)
+    *libzephyr.a:spi_flash_dpd_enable.*(.literal .literal.* .text .text.*)
+#endif
     *libzephyr.a:flash_mmap.*(.literal .text .literal.* .text.*)
     *libzephyr.a:esp_flash_api.*(.literal .text .literal.* .text.*)
 
@@ -399,23 +426,57 @@ SECTIONS
     *(.literal.esp_cpu_reset .text.esp_cpu_reset)
     *(.literal.esp_cpu_wait_for_intr .text.esp_cpu_wait_for_intr)
     *(.literal.esp_cpu_compare_and_set .text.esp_cpu_compare_and_set)
-    *(.literal.esp_gpio_reserve_pins .text.esp_gpio_reserve_pins)
-    *(.literal.esp_gpio_is_pin_reserved .text.esp_gpio_is_pin_reserved)
-    *(.literal.rtc_vddsdio_get_config .text.rtc_vddsdio_get_config)
-    *(.literal.rtc_vddsdio_set_config .text.rtc_vddsdio_set_config)
     *libzephyr.a:esp_memory_utils.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:gpio_hal.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:interrupt.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:rv_utils.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:pmu_pvt.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:gpio.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:adc_oneshot_hal.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:adc_hal_common.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:adc_hal.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:uart_hal_iram.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_rom_print.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_ieee802154.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_ieee802154_ack.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_ieee802154_dev.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_ieee802154_event.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_ieee802154_frame.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_ieee802154_pib.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_ieee802154_sec.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_ieee802154_timer.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_ieee802154_util.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:clk_utils.*(.literal .literal.* .text .text.*)
     *libzephyr.a:pmu_init.*(.literal .literal.* .text .text.*)
     *libzephyr.a:pmu_param.*(.literal .literal.* .text .text.*)
     *libzephyr.a:pmu_sleep.*(.literal .literal.* .text .text.*)
+#if defined(CONFIG_ESP32_PM_SLP_IRAM_OPT)
+    *libzephyr.a:phy_override.*(.literal.phy_get_tsens_value .text.phy_get_tsens_value)
+    *libzephyr.a:temperature_sensor_hal.*(.literal.temperature_sensor_hal_get_raw_value .text.temperature_sensor_hal_get_raw_value)
+    *libzephyr.a:sleep_console.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:sleep_modes.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:sleep_modem.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:sleep_clock.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:peripheral_domain_pd.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_clk.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_clk_tree.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:sar_periph_ctrl.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:sar_tsens_ctrl.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:adc_share_hw_ctrl.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_timer_impl_common.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:esp_timer_impl_systimer.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:pm_impl_zephyr.*(.literal .literal.* .text .text.*)
+#endif
+    *libzephyr.a:pmu_hal.*(.literal .literal.* .text .text.*)
     *libzephyr.a:rtc_clk.*(.literal .literal.* .text .text.*)
     *libzephyr.a:rtc_clk_init.*(.literal .literal.* .text .text.*)
     *libzephyr.a:rtc_time.*(.literal .literal.* .text .text.*)
     *libzephyr.a:rtc_sleep.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:sleep_cache.*(.literal .literal.* .text .text.*)
     *libzephyr.a:systimer.*(.literal .literal.* .text .text.*)
     *(.literal.sar_periph_ctrl_power_enable .text.sar_periph_ctrl_power_enable)
 
     /* [mapping:soc_pm] */
-    *(.literal.GPIO_HOLD_MASK .text.GPIO_HOLD_MASK)
 
     /* [mapping:esp_rom] */
     *libzephyr.a:esp_rom_crc.*(.literal .literal.* .text .text.*)
@@ -425,7 +486,7 @@ SECTIONS
     *libzephyr.a:esp_rom_efuse.*(.literal .literal.* .text .text.*)
     *libzephyr.a:esp_rom_systimer.*(.literal .literal.* .text .text.*)
     *libzephyr.a:esp_rom_wdt.*(.literal .literal.* .text .text.*)
-    *libzephyr.a:esp_rom_hp_regi2c_esp32c6.*(.literal .literal.* .text .text.*)
+    *libzephyr.a:regi2c_impl.*(.literal .literal.* .text .text.*)
 
     /* [mapping:esp_mm] */
     *libzephyr.a:esp_cache_utils.*(.literal .literal.* .text .text.*)
@@ -433,11 +494,43 @@ SECTIONS
     *libzephyr.a:cache_utils.*(.literal .text .literal.* .text.*)
 
 #if defined(CONFIG_ESP32_WIFI_IRAM_OPT)
-    *libnet80211.a:( .wifi0iram  .wifi0iram.* .wifislpiram .wifislpiram.* .wifiextrairam .wifiextrairam.* .wifi_extra_iram.*)
-    *libpp.a:( .wifi0iram  .wifi0iram.* .wifislpiram .wifislpiram.* .wifiextrairam .wifiextrairam.* .wifi_extra_iram.*)
-    *libcoexist.a:(.wifi_slp_iram  .wifi_slp_iram.* .coexiram .coexiram.* .coexsleepiram .coexsleepiram.*)
+    *libnet80211.a:(.wifi0iram .wifi0iram.*)
+    *libpp.a:(.wifi0iram .wifi0iram.*)
+#endif
 
-    /* [mapping:esp_wifi] */
+#if defined(CONFIG_ESP32_WIFI_RX_IRAM_OPT)
+    *libnet80211.a:(.wifirxiram .wifirxiram.*)
+    *libpp.a:(.wifirxiram .wifirxiram.*)
+#endif
+
+#if defined(CONFIG_ESP32_WIFI_SLP_IRAM_OPT)
+    *libnet80211.a:(.wifislpiram .wifislpiram.*)
+    *libpp.a:(.wifislpiram .wifislpiram.*)
+#endif
+
+#if defined(CONFIG_ESP32_WIFI_IRAM_OPT) || defined(CONFIG_ESP32_WIFI_SLP_IRAM_OPT)
+    *libpp.a:(.wifiorslpiram .wifiorslpiram.*)
+#endif
+
+#if defined(CONFIG_ESP32_WIFI_RX_IRAM_OPT) || defined(CONFIG_ESP32_WIFI_SLP_IRAM_OPT)
+    *libnet80211.a:(.wifislprxiram .wifislprxiram.*)
+    *libpp.a:(.wifislprxiram .wifislprxiram.*)
+#endif
+
+#if defined(CONFIG_ESP32_WIFI_EXTRA_IRAM_OPT)
+    *libnet80211.a:(.wifiextrairam .wifiextrairam.*)
+    *libpp.a:(.wifiextrairam .wifiextrairam.*)
+#endif
+
+#if defined(CONFIG_ESP32_WIFI_IRAM_OPT)
+    *libcoexist.a:(.coexiram .coexiram.*)
+#endif
+
+#if defined(CONFIG_ESP32_WIFI_IRAM_OPT)
+    *(.literal.coex_pti_get_wrapper .text.coex_pti_get_wrapper)
+#endif
+
+#if defined(CONFIG_ESP32_WIFI_SLP_IRAM_OPT)
     *(.literal.wifi_clock_enable_wrapper .text.wifi_clock_enable_wrapper)
     *(.literal.wifi_clock_disable_wrapper .text.wifi_clock_disable_wrapper)
 
@@ -445,12 +538,12 @@ SECTIONS
     *(.literal.esp_phy_enable .text.esp_phy_enable)
     *(.literal.esp_phy_disable .text.esp_phy_disable)
     *(.literal.esp_wifi_bt_power_domain_off .text.esp_wifi_bt_power_domain_off)
-#endif /* CONFIG_ESP32_WIFI_IRAM_OPT */
 
-#if defined(CONFIG_ESP32_WIFI_RX_IRAM_OPT)
-    *libnet80211.a:( .wifirxiram  .wifirxiram.* .wifislprxiram .wifislprxiram.*)
-    *libpp.a:( .wifirxiram  .wifirxiram.* .wifislprxiram .wifislprxiram.*)
-#endif /* CONFIG_ESP32_WIFI_RX_IRAM_OPT */
+#if defined(CONFIG_PM)
+    *(.literal.wifi_apb80m_request .text.wifi_apb80m_request)
+    *(.literal.wifi_apb80m_release .text.wifi_apb80m_release)
+#endif
+#endif
 
   *libbtbb.a:(.iram1 .iram1.*)
   *libbtbb.a:(.high_perf_code_iram1 .high_perf_code_iram1.*)
@@ -596,12 +689,6 @@ SECTIONS
     *libzephyr.a:lldesc.*(.rodata .rodata.* .srodata .srodata.*)
 
     /* [mapping:log] */
-    *(.rodata.esp_log_write)
-    *(.rodata.esp_log_timestamp)
-    *(.rodata.esp_log_early_timestamp)
-    *(.rodata.esp_log_impl_lock)
-    *(.rodata.esp_log_impl_lock_timeout)
-    *(.rodata.esp_log_impl_unlock)
 
     /* [mapping:spi_flash] */
     *libzephyr.a:spi_flash_chip_boya.*(.rodata .rodata.* .srodata .srodata.*)
@@ -619,6 +706,9 @@ SECTIONS
     *libzephyr.a:flash_qio_mode.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:spi_flash_os_func_app.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:spi_flash_os_func_noos.*(.rodata .rodata.* .srodata .srodata.*)
+#if defined(CONFIG_ESP32_SLEEP_SET_FLASH_DPD)
+    *libzephyr.a:spi_flash_dpd_enable.*(.rodata .rodata.* .srodata .srodata.*)
+#endif
     *libzephyr.a:flash_mmap.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:esp_flash_api.*(.rodata .rodata.* .srodata .srodata.*)
 
@@ -632,15 +722,13 @@ SECTIONS
     *(.rodata.esp_cpu_reset)
     *(.rodata.esp_cpu_wait_for_intr)
     *(.rodata.esp_cpu_compare_and_set)
-    *(.rodata.esp_gpio_reserve_pins)
-    *(.rodata.esp_gpio_is_pin_reserved)
-    *(.rodata.rtc_vddsdio_get_config)
-    *(.rodata.rtc_vddsdio_set_config)
     *libzephyr.a:esp_memory_utils.*(.rodata .rodata.* .srodata .srodata.*)
+    *libzephyr.a:clk_utils.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:rtc_clk.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:rtc_clk_init.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:systimer.*(.rodata .rodata.* .srodata .srodata.*)
     *(.rodata.sar_periph_ctrl_power_enable)
+    *(.rodata.GPIO_HOLD_MASK)
     *libzephyr.a:pmu_init.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:pmu_param.*(.rodata .rodata.* .srodata .srodata.*)
 
@@ -658,7 +746,7 @@ SECTIONS
     *libzephyr.a:esp_rom_spiflash.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:esp_rom_efuse.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:esp_rom_systimer.*(.rodata .rodata.* .srodata .srodata.*)
-    *libzephyr.a:esp_rom_hp_regi2c_esp32c6.*(.rodata .rodata.* .srodata .srodata.*)
+    *libzephyr.a:regi2c_impl.*(.rodata .rodata.* .srodata .srodata.*)
 
     *libphy.a:(.rodata .rodata.* .srodata .srodata.*)
 
@@ -687,6 +775,7 @@ SECTIONS
     *libzephyr.a:cpu_region_protect.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:clk.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:esp_clk.*(.rodata .rodata.* .srodata .srodata.*)
+    *libzephyr.a:esp_clk_tree.*(.rodata .rodata.* .srodata .srodata.*)
     *libzephyr.a:flash_ops.*(.rodata .rodata.* .srodata .srodata.*)
 
     *libzephyr.a:esp_gpio_reserve.*(.rodata .rodata.* .srodata .srodata.*)
@@ -746,11 +835,11 @@ SECTIONS
     *(.user_stacks*)
     z_user_stacks_end = .;
 #endif /* CONFIG_USERSPACE */
-#ifdef CONFIG_LLEXT
+#if defined(CONFIG_LLEXT) && !defined(CONFIG_LLEXT_CUSTOM_HEAP_PLACEMENT)
     *(.llext_heap)
     *(.llext_ext_heap)
     *(.llext_metadata_heap)
-#endif /* CONFIG_LLEXT */
+#endif /* CONFIG_LLEXT && !CONFIG_LLEXT_CUSTOM_HEAP_PLACEMENT */
     . = ALIGN(4);
   } GROUP_LINK_IN(RAMABLE_REGION)
 
@@ -827,15 +916,56 @@ SECTIONS
     __rom_region_start = ABSOLUTE(.);
 
 #if !defined(CONFIG_ESP32_WIFI_IRAM_OPT)
-    *libnet80211.a:( .wifi0iram  .wifi0iram.* .wifislpiram .wifislpiram.* .wifiextrairam .wifiextrairam.* .wifi_extra_iram.*)
-    *libpp.a:( .wifi0iram  .wifi0iram.* .wifislpiram .wifislpiram.* .wifiextrairam .wifiextrairam.* .wifi_extra_iram.*)
-    *libcoexist.a:(.wifi_slp_iram  .wifi_slp_iram.* .coexiram .coexiram.* .coexsleepiram .coexsleepiram.*)
-#endif /* CONFIG_ESP32_WIFI_IRAM_OPT */
+    *libnet80211.a:(.wifi0iram .wifi0iram.*)
+    *libpp.a:(.wifi0iram .wifi0iram.*)
+#endif
 
 #if !defined(CONFIG_ESP32_WIFI_RX_IRAM_OPT)
-    *libnet80211.a:( .wifirxiram  .wifirxiram.* .wifislprxiram .wifislprxiram.*)
-    *libpp.a:( .wifirxiram  .wifirxiram.* .wifislprxiram .wifislprxiram.*)
-#endif /* CONFIG_ESP32_WIFI_RX_IRAM_OPT */
+    *libnet80211.a:(.wifirxiram .wifirxiram.*)
+    *libpp.a:(.wifirxiram .wifirxiram.*)
+#endif
+
+#if !defined(CONFIG_ESP32_WIFI_SLP_IRAM_OPT)
+    *libnet80211.a:(.wifislpiram .wifislpiram.*)
+    *libpp.a:(.wifislpiram .wifislpiram.*)
+#endif
+
+#if !defined(CONFIG_ESP32_WIFI_IRAM_OPT) && !defined(CONFIG_ESP32_WIFI_SLP_IRAM_OPT)
+    *libpp.a:(.wifiorslpiram .wifiorslpiram.*)
+#endif
+
+#if !defined(CONFIG_ESP32_WIFI_RX_IRAM_OPT) && !defined(CONFIG_ESP32_WIFI_SLP_IRAM_OPT)
+    *libnet80211.a:(.wifislprxiram .wifislprxiram.*)
+    *libpp.a:(.wifislprxiram .wifislprxiram.*)
+#endif
+
+#if !defined(CONFIG_ESP32_WIFI_EXTRA_IRAM_OPT)
+    *libnet80211.a:(.wifiextrairam .wifiextrairam.*)
+    *libpp.a:(.wifiextrairam .wifiextrairam.*)
+#endif
+
+#if !defined(CONFIG_ESP32_WIFI_IRAM_OPT)
+    *libcoexist.a:(.coexiram .coexiram.*)
+#endif
+
+#if !defined(CONFIG_ESP32_WIFI_IRAM_OPT)
+    *(.literal.coex_pti_get_wrapper .text.coex_pti_get_wrapper)
+#endif
+
+#if !defined(CONFIG_ESP32_WIFI_SLP_IRAM_OPT)
+    *(.literal.wifi_clock_enable_wrapper .text.wifi_clock_enable_wrapper)
+    *(.literal.wifi_clock_disable_wrapper .text.wifi_clock_disable_wrapper)
+
+    /* [mapping:esp_phy] */
+    *(.literal.esp_phy_enable .text.esp_phy_enable)
+    *(.literal.esp_phy_disable .text.esp_phy_disable)
+    *(.literal.esp_wifi_bt_power_domain_off .text.esp_wifi_bt_power_domain_off)
+
+#if !defined(CONFIG_PM)
+    *(.literal.wifi_apb80m_request .text.wifi_apb80m_request)
+    *(.literal.wifi_apb80m_release .text.wifi_apb80m_release)
+#endif
+#endif
 
     *(.adv_fast_execute_code_iram1 .adv_fast_execute_code_iram1.*)
     *(.literal .text .literal.* .text.*)
@@ -855,6 +985,9 @@ SECTIONS
       */
     . += 16;
 
+    /* Enforce flash segment size alignment */
+    . = ALIGN(0x10);
+
     _instruction_reserved_end = ABSOLUTE(.);
     _text_end = ABSOLUTE(.);
     _instruction_reserved_end = ABSOLUTE(.);
@@ -862,7 +995,7 @@ SECTIONS
     /* Align for PMP granularity requirements */
     MPU_MIN_SIZE_ALIGN
     __rom_region_end = ABSOLUTE(.);
-    __rom_region_size = __rom_region_end - __rom_region_start;
+    __rom_region_size = ABSOLUTE(__rom_region_end - __rom_region_start);
     _etext = .;
 
   } GROUP_DATA_LINK_IN(FLASH_CODE_REGION, ROMABLE_REGION)
@@ -876,6 +1009,16 @@ SECTIONS
   {
     . = ALIGN(CACHE_ALIGN);
   } GROUP_LINK_IN(ROMABLE_REGION)
+
+  /* Move drom0 after the .text region in the shared I/D cache window.
+   * irom0_0_seg and drom0_0_seg share the same origin (unified cache),
+   * so advance the drom counter past the aligned IROM span; otherwise
+   * .flash.rodata would land in the same flash mapping as .text.
+   */
+  .flash_rodata_dummy (NOLOAD) :
+  {
+    . += ALIGN(_instruction_reserved_end - _instruction_reserved_start, CACHE_ALIGN);
+  } GROUP_LINK_IN(RODATA_REGION)
 
   /* Symbols used during the application memory mapping */
   _image_drom_start = LOADADDR(.flash.rodata);
@@ -933,7 +1076,6 @@ SECTIONS
     *(.rodata_wlog*)
 #include <zephyr/linker/kobject-rom.ld>
     . = ALIGN(4);
-    __rodata_region_end = .;
   } GROUP_DATA_LINK_IN(RODATA_REGION, ROMABLE_REGION)
 
   #include <zephyr/linker/cplusplus-rom.ld>
@@ -952,9 +1094,15 @@ SECTIONS
    * This is used to calculate the size of the _image_drom_size variable */
   .flash.rodata_end : ALIGN(0x10)
   {
-    . = ALIGN(4);
+    /* Enforce flash segment size alignment */
+    LONG(0);
     _rodata_reserved_end = ABSOLUTE(.);
     _image_rodata_end = ABSOLUTE(.);
+    /* The read-only region must span the linker-collected rom sections too:
+     * device API structures live there, and a pointer into one reaches a
+     * syscall as an argument, where it is checked against this region.
+     */
+    __rodata_region_end = .;
   } GROUP_DATA_LINK_IN(RODATA_REGION, ROMABLE_REGION)
 
   /* --- END OF .rodata --- */
@@ -964,7 +1112,6 @@ SECTIONS
 #endif
 
   #include <zephyr/linker/debug-sections.ld>
-  /DISCARD/ : { *(.note.GNU-stack) }
 
   SECTION_PROLOGUE(.riscv.attributes, 0,)
     {

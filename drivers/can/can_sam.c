@@ -6,7 +6,7 @@
  */
 
 #include <zephyr/drivers/can.h>
-#include <zephyr/drivers/can/can_mcan.h>
+#include "can_mcan.h"
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/clock_control/atmel_sam_pmc.h>
 #include <soc.h>
@@ -173,7 +173,6 @@ static DEVICE_API(can, can_sam_driver_api) = {
 #endif /* CONFIG_CAN_MANUAL_RECOVERY_MODE */
 	.get_core_clock = can_sam_get_core_clock,
 	.get_max_filters = can_mcan_get_max_filters,
-	.set_state_change_callback =  can_mcan_set_state_change_callback,
 	.timing_min = CAN_MCAN_TIMING_MIN_INITIALIZER,
 	.timing_max = CAN_MCAN_TIMING_MAX_INITIALIZER,
 #ifdef CONFIG_CAN_FD_MODE
@@ -228,13 +227,17 @@ static void config_can_##inst##_irq(void)                                       
 #define CAN_SAM_CLOCK_DIVIDER_DEFINE(inst)							\
 		IF_ENABLED(CONFIG_SOC_SERIES_SAMX7X, (.divider = DT_INST_PROP(inst, divider),))
 
+#define CAN_INSTANCE_BY_NAME(inst)					\
+	((DT_INST_REG_ADDR_BY_NAME(inst, m_can) - MCAN0_BASE_ADDRESS) / 0x4000U)
+
 #define CAN_SAM_CFG_INST(inst)						\
 	CAN_MCAN_DT_INST_CALLBACKS_DEFINE(inst, can_sam_cbs_##inst);	\
 	CAN_SAM_MRAM_DEFINE(inst)					\
 									\
 	static const struct can_sam_config can_sam_cfg_##inst = {	\
 		.base = CAN_MCAN_DT_INST_MCAN_ADDR(inst),		\
-		.instance = inst,					\
+		IF_ENABLED(DT_INST_REG_HAS_NAME(inst, sram_sel),	\
+			(.instance = CAN_INSTANCE_BY_NAME(inst),))	\
 		CAN_SAM_MEMORY_DEFINE(inst)				\
 		.clock_cfg = SAM_DT_INST_CLOCK_PMC_CFG(inst),		\
 		CAN_SAM_CLOCK_DIVIDER_DEFINE(inst)			\
@@ -247,9 +250,7 @@ static void config_can_##inst##_irq(void)                                       
 					    &can_sam_ops,		\
 					    &can_sam_cbs_##inst);
 
-#define CAN_SAM_DATA_INST(inst)						\
-	static struct can_mcan_data can_mcan_data_##inst =		\
-		CAN_MCAN_DATA_INITIALIZER(NULL);
+#define CAN_SAM_DATA_INST(inst) CAN_MCAN_DATA_DEFINE(can_mcan_data_##inst, NULL);
 
 #define CAN_SAM_DEVICE_INST(inst)						\
 	CAN_DEVICE_DT_INST_DEFINE(inst, can_sam_init, NULL,			\

@@ -13,7 +13,7 @@ LOG_MODULE_REGISTER(spi_wch);
 #include <errno.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/spi/rtio.h>
+#include "spi_rtio.h"
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/clock_control.h>
 
@@ -67,8 +67,8 @@ static int spi_wch_configure(const struct device *dev, const struct spi_config *
 		return -ENOTSUP;
 	}
 
-	if (SPI_OP_MODE_GET(config->operation) != SPI_OP_MODE_MASTER) {
-		LOG_ERR("Slave mode not supported");
+	if (SPI_OP_MODE_GET(config->operation) != SPI_OP_MODE_CONTROLLER) {
+		LOG_ERR("Peripheral mode not supported");
 		return -ENOTSUP;
 	}
 

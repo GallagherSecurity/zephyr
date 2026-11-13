@@ -22,7 +22,12 @@ LOG_MODULE_REGISTER(spi_ambiq_spid);
 #include "spi_context.h"
 #include <soc.h>
 
-#define SPID_ADDR_INTERVAL 1
+#if defined(CONFIG_SOC_SERIES_APOLLO5X)
+#define IOS_ADDR_INTERVAL (IOSLAVEFD1_BASE - IOSLAVEFD0_BASE)
+#else
+#define IOS_ADDR_INTERVAL 1
+#endif
+
 struct spi_ambiq_config {
 	const struct gpio_dt_spec int_gpios;
 	uint32_t base;
@@ -138,7 +143,7 @@ static int spi_config(const struct device *dev, const struct spi_config *config)
 		}
 	}
 
-	if (config->operation & SPI_OP_MODE_MASTER) {
+	if (config->operation & SPI_OP_MODE_CONTROLLER) {
 		LOG_ERR("Controller mode not supported");
 		return -ENOTSUP;
 	}
@@ -169,11 +174,16 @@ static int spi_config(const struct device *dev, const struct spi_config *config)
 	data->ios_cfg.pui8SRAMBuffer = ambiq_spid_sram_buffer,
 	data->ios_cfg.ui32SRAMBufferCap = AMBIQ_SPID_TX_BUFSIZE_MAX,
 
-	ctx->config = config;
+	ctx->config = NULL;
 
 	ret = am_hal_ios_configure(data->ios_handler, &data->ios_cfg);
+	if (ret != AM_HAL_STATUS_SUCCESS) {
+		return -EIO;
+	}
 
-	return ret;
+	ctx->config = config;
+
+	return 0;
 }
 
 static int spi_ambiq_xfer(const struct device *dev, const struct spi_config *config)
@@ -271,6 +281,7 @@ static int spi_ambiq_transceive(const struct device *dev, const struct spi_confi
 				const struct spi_buf_set *rx_bufs)
 {
 	struct spi_ambiq_data *data = dev->data;
+	int pm_ret;
 	int ret;
 
 	if (!tx_bufs && !rx_bufs) {
@@ -279,7 +290,8 @@ static int spi_ambiq_transceive(const struct device *dev, const struct spi_confi
 
 	ret = pm_device_runtime_get(dev);
 	if (ret < 0) {
-		LOG_ERR("pm_device_runtime_get failed: %d", ret);
+		LOG_ERR_PM_DEVICE_RUNTIME_GET(dev, ret);
+		return ret;
 	}
 
 	/* context setup */
@@ -287,22 +299,22 @@ static int spi_ambiq_transceive(const struct device *dev, const struct spi_confi
 
 	ret = spi_config(dev, config);
 	if (ret) {
-		spi_context_release(&data->ctx, ret);
-		return ret;
+		goto end;
 	}
 
 	spi_context_buffers_setup(&data->ctx, tx_bufs, rx_bufs, 1);
 
 	ret = spi_ambiq_xfer(dev, config);
 
+end:
 	spi_context_release(&data->ctx, ret);
 
 	/* Use async put to avoid useless device suspension/resumption
 	 * when doing consecutive transmission.
 	 */
-	ret = pm_device_runtime_put_async(dev, K_MSEC(2));
-	if (ret < 0) {
-		LOG_ERR("pm_device_runtime_put failed: %d", ret);
+	pm_ret = pm_device_runtime_put_async(dev, K_MSEC(2));
+	if (pm_ret < 0) {
+		LOG_ERR_PM_DEVICE_RUNTIME_PUT(dev, pm_ret);
 	}
 
 	return ret;
@@ -408,28 +420,31 @@ static int spi_ambiq_pm_action(const struct device *dev, enum pm_device_action a
 }
 #endif /* CONFIG_PM_DEVICE */
 
-#define AMBIQ_SPID_INIT(n)                                                                         \
-	PINCTRL_DT_INST_DEFINE(n);                                                                 \
-	static void spi_irq_config_func_##n(void)                                                  \
-	{                                                                                          \
-		IRQ_CONNECT(DT_INST_IRQN(n), DT_INST_IRQ(n, priority), spi_ambiq_isr,              \
-			    DEVICE_DT_INST_GET(n), 0);                                             \
-		irq_enable(DT_INST_IRQN(n));                                                       \
-	};                                                                                         \
-	static struct spi_ambiq_data spi_ambiq_data##n = {                                         \
-		SPI_CONTEXT_INIT_LOCK(spi_ambiq_data##n, ctx),                                     \
-		SPI_CONTEXT_INIT_SYNC(spi_ambiq_data##n, ctx),                                     \
-		.spim_wrcmp_sem = Z_SEM_INITIALIZER(spi_ambiq_data##n.spim_wrcmp_sem, 0, 1)};      \
-	static const struct spi_ambiq_config spi_ambiq_config##n = {                               \
-		.int_gpios = GPIO_DT_SPEC_INST_GET(n, int_gpios),                                  \
-		.base = DT_INST_REG_ADDR(n),                                                       \
-		.size = DT_INST_REG_SIZE(n),                                                       \
-		.inst_idx = (DT_INST_REG_ADDR(n) - IOSLAVE_BASE) / SPID_ADDR_INTERVAL,             \
-		.pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(n),                                         \
-		.irq_config_func = spi_irq_config_func_##n};                                       \
-	PM_DEVICE_DT_INST_DEFINE(n, spi_ambiq_pm_action);                                          \
-	SPI_DEVICE_DT_INST_DEFINE(n, spi_ambiq_init, PM_DEVICE_DT_INST_GET(n), &spi_ambiq_data##n, \
-				  &spi_ambiq_config##n, POST_KERNEL, CONFIG_SPI_INIT_PRIORITY,     \
-				  &spi_ambiq_driver_api);
+#define AMBIQ_SPID_INIT(n)                                                             \
+	BUILD_ASSERT(DT_CHILD_NUM_STATUS_OKAY(DT_INST_PARENT(n)) == 1,                     \
+		     "Too many children for IOS, either SPI or I2C should be enabled!");       \
+	PINCTRL_DT_INST_DEFINE(n);                                                         \
+	static void spi_irq_config_func_##n(void)                                          \
+	{                                                                                  \
+		IRQ_CONNECT(DT_IRQN(DT_INST_PARENT(n)), DT_IRQ(DT_INST_PARENT(n), priority),   \
+			    spi_ambiq_isr, DEVICE_DT_INST_GET(n), 0);                              \
+		irq_enable(DT_IRQN(DT_INST_PARENT(n)));                                        \
+	};                                                                                 \
+	static struct spi_ambiq_data spi_ambiq_data##n = {                                 \
+		SPI_CONTEXT_INIT_LOCK(spi_ambiq_data##n, ctx),                                 \
+		SPI_CONTEXT_INIT_SYNC(spi_ambiq_data##n, ctx),                                 \
+		.spim_wrcmp_sem = Z_SEM_INITIALIZER(spi_ambiq_data##n.spim_wrcmp_sem, 0, 1)};  \
+	static const struct spi_ambiq_config spi_ambiq_config##n = {                       \
+		.int_gpios = GPIO_DT_SPEC_INST_GET(n, int_gpios),                              \
+		.base = DT_REG_ADDR(DT_INST_PARENT(n)),                                        \
+		.size = DT_REG_SIZE(DT_INST_PARENT(n)),                                        \
+		.inst_idx = (DT_REG_ADDR(DT_INST_PARENT(n)) - IOSLAVE_BASE) / IOS_ADDR_INTERVAL,\
+		.pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(n),                                     \
+		.irq_config_func = spi_irq_config_func_##n};                                   \
+	PM_DEVICE_DT_INST_DEFINE(n, spi_ambiq_pm_action);                                  \
+	SPI_DEVICE_DT_INST_DEFINE(n, spi_ambiq_init, PM_DEVICE_DT_INST_GET(n),             \
+		&spi_ambiq_data##n,                                                            \
+		&spi_ambiq_config##n, POST_KERNEL, CONFIG_SPI_INIT_PRIORITY,                   \
+		&spi_ambiq_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(AMBIQ_SPID_INIT)

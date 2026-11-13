@@ -9,16 +9,26 @@ supported:
   - adc
   - arduino_gpio
   - arduino_i2c
+  - arduino_i3c
   - arduino_serial
   - arduino_spi
+  - can
   - counter
+  - crc
+  - crypto
+  - dac
   - dma
+  - entropy
   - gpio
   - i2c
+  - i3c
+  - netif:eth
+  - ptp_clock
   - pwm
   - rtc
   - spi
   - uart
+  - usbd
   - watchdog
 ram: 256
 flash: 1024

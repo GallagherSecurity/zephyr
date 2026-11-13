@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
+zephyr_syscall_header(${ZEPHYR_BASE}/include/zephyr/drivers/memc.h)
+
 zephyr_library()
+
+zephyr_library_sources_ifdef(CONFIG_USERSPACE memc_handlers.c)
 
 if((DEFINED CONFIG_FLASH_MCUX_FLEXSPI_XIP) AND (DEFINED CONFIG_FLASH))
   zephyr_code_relocate(FILES memc_mcux_flexspi.c LOCATION ${CONFIG_FLASH_MCUX_FLEXSPI_XIP_MEM}_TEXT)
+  zephyr_code_relocate(FILES memc_mcux_flexspi.c LOCATION ${CONFIG_FLASH_MCUX_FLEXSPI_XIP_MEM}_RODATA)
 endif()
 
 if((DEFINED CONFIG_FLASH_MCUX_XSPI_XIP) AND (DEFINED CONFIG_FLASH))
@@ -15,6 +20,7 @@ zephyr_library_include_directories_ifdef(CONFIG_MEMC_MSPI ${ZEPHYR_BASE}/drivers
 
 # zephyr-keep-sorted-start
 zephyr_library_sources_ifdef(CONFIG_MEMC_BFLB_BL61X memc_bflb_bl61x.c)
+zephyr_library_sources_ifdef(CONFIG_MEMC_BFLB_BL808_PSRAM_UHS memc_bflb_bl808_psram_uhs.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_HIFIVE_UNMATCHED_DRAM sifive_ddr.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_MAX32_HPB memc_max32_hpb.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_MCUX_FLEXSPI memc_mcux_flexspi.c)
@@ -28,8 +34,10 @@ zephyr_library_sources_ifdef(CONFIG_MEMC_MCUX_XSPI memc_mcux_xspi.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_MCUX_XSPI_PSRAM memc_mcux_xspi_psram.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_MSPI_APS6404L memc_mspi_aps6404l.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_MSPI_APS_Z8 memc_mspi_aps_z8.c)
+zephyr_library_sources_ifdef(CONFIG_MEMC_MSPI_IS66WV memc_mspi_is66wv.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_NXP_S32_QSPI memc_nxp_s32_qspi.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_NXP_S32_XSPI memc_nxp_s32_xspi.c)
+zephyr_library_sources_ifdef(CONFIG_MEMC_NXP_SRAMC memc_nxp_sramc.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_RENESAS_RA_SDRAM memc_renesas_ra_sdram.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_SAM_SMC memc_sam_smc.c)
 zephyr_library_sources_ifdef(CONFIG_MEMC_SILABS_SIWX91X_QSPI memc_silabs_siwx91x_qspi.c)

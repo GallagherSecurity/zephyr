@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024-2025 Renesas Electronics Corporation
+ * Copyright (c) 2024-2026 Renesas Electronics Corporation
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -127,7 +127,7 @@
 			reg-names = "channel", "common";
 			clocks = <&iclk MSTPA 22>;
 			dma-channels = <8>;
-			#dma-cells = <2>;
+			#dma-cells = <1>;
 			status = "disabled";
 		};
 
@@ -484,6 +484,11 @@
 				compatible = "renesas,ra-udc";
 				status = "disabled";
 			};
+
+			uhc {
+				compatible = "renesas,ra-uhc";
+				status = "disabled";
+			};
 		};
 
 		port_irq0: external-interrupt@40006000 {
@@ -763,6 +768,7 @@
 		eth: ethernet@40064100 {
 			compatible = "renesas,ra-ethernet";
 			reg = <0x40064100 0xfc>;
+			clocks = <&pclka MSTPB 15>;
 			interrupts = <51 0>;
 			local-mac-address = [00 11 22 33 44 55];
 			phy-connection-type = "rmii";
@@ -776,11 +782,10 @@
 			status = "disabled";
 		};
 
-		flash: flash-controller@407e0000 {
-			compatible = "renesas,ra-flash-hp-controller";
+		faci: faci@407e0000 {
+			compatible = "renesas,ra-faci";
 			reg = <0x407e0000 0x10000>;
-			#address-cells = <1>;
-			#size-cells = <1>;
+			ranges;
 			interrupts = <49 1>, <50 1>;
 			interrupt-names = "frdyi", "fiferr";
 		};

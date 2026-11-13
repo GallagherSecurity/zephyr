@@ -55,8 +55,8 @@
 
 #endif
 
-#define RAM_BASE CONFIG_SRAM_BASE_ADDRESS
-#define RAM_SIZE KB(CONFIG_SRAM_SIZE)
+#define RAM_BASE DT_CHOSEN_SRAM_ADDR
+#define RAM_SIZE DT_CHOSEN_SRAM_SIZE
 
 MEMORY
     {
@@ -254,7 +254,6 @@ SECTIONS
 
 #include <zephyr/linker/debug-sections.ld>
 
-    /DISCARD/ : { *(.note.GNU-stack) }
 
     SECTION_PROLOGUE(.riscv.attributes, 0,)
 	{

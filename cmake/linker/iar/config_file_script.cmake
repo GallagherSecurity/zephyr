@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-cmake_minimum_required(VERSION 3.17)
+cmake_minimum_required(VERSION 3.28.0)
 
 set(SORT_TYPE_NAME Lexical)
 
@@ -41,6 +41,17 @@ function(process_region)
           EXPR "@ADDR(.ramfunc_init)@"
           )
       else()
+        # make lower case aliases for ITCM and DTCM
+        if(${name} STREQUAL ITCM)
+          create_symbol(OBJECT ${REGION_OBJECT} SYMBOL __itcm_load_start
+            EXPR "@LOADADDR(${name_clean})@"
+            )
+        endif()
+        if(${name} STREQUAL DTCM)
+          create_symbol(OBJECT ${REGION_OBJECT} SYMBOL __dtcm_load_start
+            EXPR "@LOADADDR(${name_clean})@"
+            )
+        endif()
         create_symbol(OBJECT ${REGION_OBJECT} SYMBOL __${name_clean}_load_start
           EXPR "@LOADADDR(${name_clean})@"
           )
@@ -69,6 +80,17 @@ function(process_region)
     get_property(symbol_val GLOBAL PROPERTY SYMBOL_TABLE___${name_clean}_end)
 
     if("${symbol_val}" STREQUAL "${name_clean}")
+      # make lower case aliases for ITCM and DTCM
+      if(${name} STREQUAL ITCM)
+        create_symbol(OBJECT ${REGION_OBJECT} SYMBOL __itcm_size
+          EXPR "@SIZE(${name_clean})@"
+          )
+      endif()
+      if(${name} STREQUAL DTCM)
+        create_symbol(OBJECT ${REGION_OBJECT} SYMBOL __dtcm_size
+          EXPR "@SIZE(${name_clean})@"
+          )
+      endif()
       create_symbol(OBJECT ${REGION_OBJECT} SYMBOL __${name_clean}_size
         EXPR "@SIZE(${name_clean})@"
         )
@@ -293,11 +315,11 @@ function(system_to_string)
   endforeach()
 
   if(IAR_LIBC)
-    set(${STRING_STRING} "${${STRING_STRING}}if (K_HEAP_MEM_POOL_SIZE>0)\n{\n")
-    set(${STRING_STRING} "${${STRING_STRING}}  define block HEAP with alignment=8 { symbol kheap__system_heap };\n")
-    set(${STRING_STRING} "${${STRING_STRING}}}\nelse\n{\n")
-    set(${STRING_STRING} "${${STRING_STRING}}  define block HEAP with alignment=8, expanding size { };\n")
-    set(${STRING_STRING} "${${STRING_STRING}}}\n")
+    if(K_HEAP_MEM_POOL_SIZE GREATER 0)
+      set(${STRING_STRING} "${${STRING_STRING}}define block HEAP with alignment=8 { symbol kheap__system_heap };\n")
+    else()
+      set(${STRING_STRING} "${${STRING_STRING}}define block HEAP with alignment=8, expanding size { };\n")
+    endif()
     set(${STRING_STRING} "${${STRING_STRING}}\"DLib heap\": place in RAM { block HEAP };\n")
 #    set(${STRING_STRING} "${${STRING_STRING}}define exported symbol HEAP$$Base=kheap__system_heap;\n")
 #    set(${STRING_STRING} "${${STRING_STRING}}define exported symbol HEAP$$Limit=END(kheap__system_heap);\n")
@@ -520,6 +542,15 @@ function(section_to_string)
       set_property(GLOBAL APPEND PROPERTY ILINK_SYMBOL_ICF "__${name_clean}_start = (__iar_tls$$INIT_DATA$$Base)")
       set_property(GLOBAL APPEND PROPERTY ILINK_SYMBOL_ICF "__${name_clean}_end = (__iar_tls$$INIT_DATA$$Limit)")
     else()
+      # make lower case aliases for ITCM and DTCM
+      if(${name} STREQUAL ITCM)
+        set_property(GLOBAL APPEND PROPERTY ILINK_SYMBOL_ICF "__itcm_start = ADDR(${name_clean})")
+        set_property(GLOBAL APPEND PROPERTY ILINK_SYMBOL_ICF "__itcm_end = END(${name_clean})")
+      endif()
+      if(${name} STREQUAL DTCM)
+        set_property(GLOBAL APPEND PROPERTY ILINK_SYMBOL_ICF "__dtcm_start = ADDR(${name_clean})")
+        set_property(GLOBAL APPEND PROPERTY ILINK_SYMBOL_ICF "__dtcm_end = END(${name_clean})")
+      endif()
       set_property(GLOBAL APPEND PROPERTY ILINK_SYMBOL_ICF "__${name_clean}_start = ADDR(${name_clean})")
       set_property(GLOBAL APPEND PROPERTY ILINK_SYMBOL_ICF "__${name_clean}_end = END(${name_clean})")
     endif()
@@ -616,7 +647,7 @@ function(section_to_string)
     endif()
     # In ilink if a block with min_size=X  does not match any input sections,
     # its _init block may be discarded despite being needed for spacing with
-    # other _init blocks. To get around tihs, lets tag min_size blocks as keep.
+    # other _init blocks. To get around this, lets tag min_size blocks as keep.
     if(CONFIG_IAR_ZEPHYR_INIT
        AND DEFINED group_parent_vma AND DEFINED group_parent_lma
        AND DEFINED i_min_size
@@ -800,7 +831,6 @@ function(section_to_string)
     if(${length} GREATER 0)
       if(NOT "${idx}" STREQUAL "${last_index}")
         set(TEMP "${TEMP},")
-      elseif()
       endif()
     endif()
 
@@ -941,7 +971,7 @@ function(symbol_to_string)
             "${${STRING_STRING}}define image symbol ${symbol} = ${expr};\n"
             )
         else()
-          # Treatmen of "zephyr_linker_symbol(SYMBOL z_arm_platform_init EXPR "@SystemInit@")"
+          # Treatmen of "zephyr_linker_symbol(SYMBOL soc_reset_hook EXPR "@SystemInit@")"
           set_property(GLOBAL APPEND PROPERTY SYMBOL_STEERING_FILE
             "--redirect ${symbol}=${expr}\n"
             )

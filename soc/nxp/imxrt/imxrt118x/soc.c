@@ -156,18 +156,26 @@ const __imx_boot_container_section container boot_header = {
 
 /* Handle CM7 core initialization based on execution mode */
 #if !defined(CONFIG_CM7_BOOT_FROM_FLASH)
-#define CM7_BOOT_ADDRESS   (CM7_FLASH_ADDR + CONFIG_CM7_FLEXSPI_OFFSET - ADJUSTED_LMA)
+#define CM7_BOOT_ADDRESS   (CM7_FLASH_ADDR - ADJUSTED_LMA)
 #else
-#define CM7_BOOT_ADDRESS   (CM7_FLASH_ADDR + CONFIG_CM7_FLEXSPI_OFFSET)
+#define CM7_BOOT_ADDRESS   CM7_FLASH_ADDR
 #endif /* defined(CONFIG_CM7_BOOT_FROM_FLASH) */
 #endif /* (defined(CONFIG_SECOND_CORE_MCUX) && defined(CONFIG_CPU_CORTEX_M33)) */
 
 #ifdef CONFIG_INIT_ARM_PLL
+#define ARM_PLL_NODE DT_COMPAT_GET_ANY_STATUS_OKAY(nxp_imxrt118x_arm_pll)
+#define ARM_PLL_LOOP_DIV DT_PROP(ARM_PLL_NODE, loop_div)
+#define ARM_PLL_POST_DIV DT_PROP(ARM_PLL_NODE, post_div)
+
+#define ARM_PLL_POST_DIV_ENUM \
+	((ARM_PLL_POST_DIV == 1) ? kCLOCK_PllPostDiv1 : \
+	(ARM_PLL_POST_DIV == 2) ? kCLOCK_PllPostDiv2 : \
+	(ARM_PLL_POST_DIV == 4) ? kCLOCK_PllPostDiv4 : \
+	kCLOCK_PllPostDiv8)
+
 static const clock_arm_pll_config_t armPllConfig_BOARD_BootClockRUN = {
-	/* Post divider, 0 - DIV by 2, 1 - DIV by 4, 2 - DIV by 8, 3 - DIV by 1 */
-	.postDivider = kCLOCK_PllPostDiv2,
-	/* PLL Loop divider, Fout = Fin * ( loopDivider / ( 2 * postDivider ) ) */
-	.loopDivider = 132,
+	.postDivider = ARM_PLL_POST_DIV_ENUM,
+	.loopDivider = ARM_PLL_LOOP_DIV,
 };
 #endif
 
@@ -264,6 +272,12 @@ __weak void clock_init(void)
 	board_flexspi_clock_safe_config();
 
 #ifdef CONFIG_INIT_ARM_PLL
+	BUILD_ASSERT((ARM_PLL_POST_DIV == 1) || (ARM_PLL_POST_DIV == 2) ||
+		     (ARM_PLL_POST_DIV == 4) || (ARM_PLL_POST_DIV == 8),
+		     "ARM PLL post-div must be 1, 2, 4, or 8");
+	BUILD_ASSERT(ARM_PLL_LOOP_DIV >= 104 && ARM_PLL_LOOP_DIV <= 208,
+		     "ARM PLL loop-div must be in range 104-208");
+
 	/* Init Arm Pll. */
 	CLOCK_InitArmPll(&armPllConfig_BOARD_BootClockRUN);
 #endif
@@ -486,7 +500,8 @@ __weak void clock_init(void)
 
 #endif /* CONFIG_COMPARATOR_MCUX_ACMP || CONFIG_SENSOR_MCUX_ACMP */
 
-#if defined(CONFIG_ETH_NXP_IMX_NETC) && (DT_CHILD_NUM_STATUS_OKAY(DT_NODELABEL(netc)) != 0)
+#if (defined(CONFIG_ETH_NXP_IMX_NETC) || defined(CONFIG_MDIO_NXP_IMX_NETC)) && \
+	(DT_CHILD_NUM_STATUS_OKAY(DT_NODELABEL(netc)) != 0)
 	/* Configure ENET using SYS_PLL1_DIV2_CLK */
 	rootCfg.mux = kCLOCK_ENET_ClockRoot_MuxSysPll1Div2;
 	rootCfg.div = 4;
@@ -540,8 +555,8 @@ __weak void clock_init(void)
 		~BLK_CTRL_WAKEUPMIX_NETC_PORT_MISC_CFG_PORT4_RMII_REF_CLK_DIR_MASK;
 
 	/* Set TMR 1588 Ref clock source. */
-	BLK_CTRL_WAKEUPMIX->NETC_PORT_MISC_CFG |=
-		BLK_CTRL_WAKEUPMIX_NETC_PORT_MISC_CFG_TMR_EXT_CLK_SEL_MASK;
+	BLK_CTRL_WAKEUPMIX->NETC_PORT_MISC_CFG &=
+		~BLK_CTRL_WAKEUPMIX_NETC_PORT_MISC_CFG_TMR_EXT_CLK_SEL_MASK;
 #endif
 
 #ifdef CONFIG_CAN_MCUX_FLEXCAN
@@ -861,8 +876,8 @@ void soc_reset_hook(void)
 }
 #endif
 
-#if defined(CONFIG_SECOND_CORE_MCUX) && defined(CONFIG_CPU_CORTEX_M33)
-
+#if defined(CONFIG_SECOND_CORE_MCUX) && defined(CONFIG_SOC_IMXRT118X_SECOND_CORE_KICKOFF) && \
+	defined(CONFIG_CPU_CORTEX_M33)
 static int second_core_boot(void)
 {
 	/*
@@ -896,5 +911,5 @@ static int second_core_boot(void)
 	return 0;
 }
 
-SYS_INIT(second_core_boot, PRE_KERNEL_2, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
+SYS_INIT(second_core_boot, POST_KERNEL, CONFIG_APPLICATION_INIT_PRIORITY);
 #endif

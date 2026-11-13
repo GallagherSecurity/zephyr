@@ -23,8 +23,8 @@
 
 #include <zephyr/shell/shell.h>
 
-#include "host/shell/bt.h"
-#include "common/bt_shell_private.h"
+#include <host/shell/bt.h>
+#include <common/bt_shell_private.h>
 
 #define HELP_NONE "[none]"
 
@@ -117,8 +117,7 @@ static void hf_sco_disconnected(struct bt_conn *sco_conn, uint8_t reason)
 	bt_shell_print("HF SCO disconnected %p (reason %u)", sco_conn, reason);
 
 	if (hf_sco_conn == sco_conn) {
-		bt_conn_unref(hf_sco_conn);
-		hf_sco_conn = NULL;
+		bt_conn_drop(&hf_sco_conn);
 	} else {
 		bt_shell_warn("Unknown SCO disconnected (%p != %p)", hf_sco_conn, sco_conn);
 	}
@@ -1152,8 +1151,7 @@ static void ag_sco_disconnected(struct bt_conn *sco_conn, uint8_t reason)
 	bt_shell_print("AG SCO disconnected %p (reason %u)", sco_conn, reason);
 
 	if (hfp_ag_sco_conn == sco_conn) {
-		bt_conn_unref(hfp_ag_sco_conn);
-		hfp_ag_sco_conn = NULL;
+		bt_conn_drop(&hfp_ag_sco_conn);
 	} else {
 		bt_shell_warn("Unknown SCO disconnected (%p != %p)", hfp_ag_sco_conn, sco_conn);
 	}
@@ -1910,12 +1908,14 @@ static int cmd_ag_voice_recognition(const struct shell *sh, size_t argc, char **
 static int cmd_ag_vre_state(const struct shell *sh, size_t argc, char **argv)
 {
 	const char *action;
+	size_t len;
 	uint8_t state = 0;
 	int err;
 
 	action = argv[1];
 
-	for (size_t index = 0; index < strlen(action); index++) {
+	len = strlen(action);
+	for (size_t index = 0; index < len; index++) {
 		switch (action[index]) {
 		case 'R':
 			state |= BIT(0);
@@ -1941,6 +1941,7 @@ static int cmd_ag_vre_state(const struct shell *sh, size_t argc, char **argv)
 static int cmd_ag_vre_text(const struct shell *sh, size_t argc, char **argv)
 {
 	const char *action;
+	size_t len;
 	uint8_t state = 0;
 	const char *id;
 	uint8_t type;
@@ -1954,7 +1955,8 @@ static int cmd_ag_vre_text(const struct shell *sh, size_t argc, char **argv)
 	operation = (uint8_t)atoi(argv[4]);
 	text = argv[5];
 
-	for (size_t index = 0; index < strlen(action); index++) {
+	len = strlen(action);
+	for (size_t index = 0; index < len; index++) {
 		switch (action[index]) {
 		case 'R':
 			state |= BIT(0);

@@ -6,11 +6,12 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/portability/cmsis_types.h>
+#include <zephyr/sys/check.h>
 #include <string.h>
 #include "wrapper.h"
 
-K_MEM_SLAB_DEFINE(cmsis_rtos_msgq_cb_slab, sizeof(struct cmsis_rtos_msgq_cb),
-		  CONFIG_CMSIS_V2_MSGQ_MAX_COUNT, 4);
+K_MEM_SLAB_DEFINE_TYPE(cmsis_rtos_msgq_cb_slab, struct cmsis_rtos_msgq_cb,
+		       CONFIG_CMSIS_V2_MSGQ_MAX_COUNT);
 
 static const osMessageQueueAttr_t init_msgq_attrs = {
 	.name = "ZephyrMsgQ",
@@ -45,7 +46,9 @@ osMessageQueueId_t osMessageQueueNew(uint32_t msg_count, uint32_t msg_size,
 	}
 
 	if (attr->cb_mem != NULL) {
-		__ASSERT(attr->cb_size == sizeof(struct cmsis_rtos_msgq_cb), "Invalid cb_size\n");
+		CHECKIF(attr->cb_size < sizeof(struct cmsis_rtos_msgq_cb)) {
+			return NULL;
+		}
 		msgq = (struct cmsis_rtos_msgq_cb *)attr->cb_mem;
 	} else if (k_mem_slab_alloc(&cmsis_rtos_msgq_cb_slab, (void **)&msgq, K_MSEC(100)) != 0) {
 		return NULL;

@@ -4,8 +4,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef __APOLLO5_PINCTRL_H__
-#define __APOLLO5_PINCTRL_H__
+/**
+ * @file
+ * @brief Devicetree pin control helpers for Ambiq Apollo5
+ * @ingroup pinctrl_apollo5
+ */
+
+#ifndef ZEPHYR_INCLUDE_DT_BINDINGS_PINCTRL_AMBIQ_APOLLO5_PINCTRL_H_
+#define ZEPHYR_INCLUDE_DT_BINDINGS_PINCTRL_AMBIQ_APOLLO5_PINCTRL_H_
+
+/**
+ * @addtogroup ambiq_pinctrl Ambiq pin control helpers
+ * @ingroup devicetree-pinctrl
+ */
+
+/**
+ * @defgroup pinctrl_apollo5 Ambiq Apollo5 pin control helpers
+ * @brief Macros for pin control configuration of Ambiq Apollo5
+ * @ingroup ambiq_pinctrl
+ *
+ * Use APOLLO5_PINMUX() to encode a pin number and alternative function for
+ * the @p pinmux devicetree property.
+ *
+ * @code{.dts}
+ * #include <zephyr/dt-bindings/pinctrl/ambiq-apollo5-pinctrl.h>
+ *
+ * &pinctrl {
+ *         uart0_default: uart0_default {
+ *                 group1 {
+ *                         pinmux = <APOLLO5_PINMUX(60, 4)>;
+ *                 };
+ *                 group2 {
+ *                         pinmux = <APOLLO5_PINMUX(47, 4)>;
+ *                         input-enable;
+ *                 };
+ *         };
+ * };
+ * @endcode
+ *
+ * @{
+ */
+
+/** @cond INTERNAL_HIDDEN */
 
 #define APOLLO5_ALT_FUNC_POS 0
 #define APOLLO5_ALT_FUNC_MASK 0xf
@@ -17,4 +57,8 @@
 	(pin_num << APOLLO5_PIN_NUM_POS |       \
 	 alt_func << APOLLO5_ALT_FUNC_POS)
 
-#endif /* __APOLLO5_PINCTRL_H__ */
+/** @endcond */
+
+/** @} */
+
+#endif /* ZEPHYR_INCLUDE_DT_BINDINGS_PINCTRL_AMBIQ_APOLLO5_PINCTRL_H_ */

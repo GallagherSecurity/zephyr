@@ -22,7 +22,7 @@
 #include <string.h>
 #include <zephyr/logging/log.h>
 
-#include <zephyr/drivers/sensor/apds9960.h>
+#include "apds9960.h"
 
 LOG_MODULE_REGISTER(APDS9960, CONFIG_SENSOR_LOG_LEVEL);
 
@@ -571,8 +571,7 @@ static int apds9960_init_interrupt(const struct device *dev)
 	struct apds9960_data *drv_data = dev->data;
 
 	if (!gpio_is_ready_dt(&config->int_gpio)) {
-		LOG_ERR("%s: device %s is not ready", dev->name,
-			config->int_gpio.port->name);
+		LOG_ERR_DEVICE_NOT_READY(config->int_gpio.port);
 		return -ENODEV;
 	}
 
@@ -657,7 +656,7 @@ static int apds9960_init(const struct device *dev)
 	k_sleep(K_MSEC(6));
 
 	if (!device_is_ready(config->i2c.bus)) {
-		LOG_ERR("Bus device is not ready");
+		LOG_ERR_DEVICE_NOT_READY(config->i2c.bus);
 		return -EINVAL;
 	}
 
@@ -710,10 +709,11 @@ static DEVICE_API(sensor, apds9960_driver_api) = {
 	static const struct apds9960_config apds9960_config_##i = {                                \
 		.i2c = I2C_DT_SPEC_INST_GET(i),                                                    \
 		APDS9960_CONFIG_INTERRUPT(i)                                                       \
-		.pgain = DT_INST_PROP(i, pgain) << 1,                                              \
-		.again = DT_INST_PROP(i, again),                                                   \
-		.ppcount = DT_INST_PROP(i, ppulse_length) | (DT_INST_PROP(i, ppulse_count) - 1),   \
-		.pled_boost = DT_INST_PROP(i, pled_boost) << 4,                                    \
+		.pgain = DT_INST_ENUM_IDX(i, pgain) << 2,                                          \
+		.again = DT_INST_ENUM_IDX(i, again),                                               \
+		.ppcount = (DT_INST_ENUM_IDX(i, ppulse_length) << 6) |                             \
+			   ((DT_INST_PROP(i, ppulse_count) - 1) & 0x3F),                           \
+		.pled_boost = DT_INST_ENUM_IDX(i, pled_boost) << 4,                                \
 		APDS9960_CONFIG_GESTURE(i)                                                         \
 	};                                                                                         \
                                                                                                    \

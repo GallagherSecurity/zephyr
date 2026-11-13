@@ -18,6 +18,14 @@
 
 #include <zephyr/drivers/gpio/gpio_utils.h>
 
+#if DT_ANY_INST_HAS_BOOL_STATUS_OKAY(hspadctrl_supported)
+#define HSPADCTRL_SUPPORTED 1
+#endif
+
+#if HSPADCTRL_SUPPORTED
+#include <hal/nrf_gpiohspadctrl.h>
+#endif
+
 #define GPIOTE_PHANDLE(id) DT_INST_PHANDLE(id, gpiote_instance)
 #define GPIOTE_PROP(idx, prop)     DT_PROP(GPIOTE(idx), prop)
 
@@ -51,8 +59,15 @@ struct gpio_nrfx_cfg {
 	nrfx_gpiote_t *gpiote;
 	uint32_t edge_sense;
 	uint8_t port_num;
+#if NRF_GPIO_HAS_DETECT_MODE
+	bool latch_detect;
+#endif
 #if defined(GPIOTE_FEATURE_FLAG)
 	uint32_t flags;
+#endif
+#if HSPADCTRL_SUPPORTED
+	uint8_t has_hs_bias : 1;
+	uint8_t hs_bias : 4;
 #endif
 };
 
@@ -449,6 +464,10 @@ static int gpio_nrfx_pin_interrupt_configure(const struct device *port,
 		return 0;
 	}
 
+#if NRF_GPIO_HAS_DETECT_MODE
+	nrf_gpio_port_detect_latch_set(cfg->port, cfg->latch_detect);
+#endif
+
 	nrfx_gpiote_trigger_config_t trigger_config = {
 		.trigger = get_trigger(mode, trig),
 	};
@@ -542,6 +561,25 @@ static int gpio_nrfx_port_get_direction(const struct device *port,
 }
 #endif /* CONFIG_GPIO_GET_DIRECTION */
 
+#if HSPADCTRL_SUPPORTED
+static bool has_hs_bias(const struct device *port)
+{
+	const struct gpio_nrfx_cfg *cfg = get_port_cfg(port);
+
+	return cfg->has_hs_bias;
+}
+
+static void set_hs_bias(const struct device *port)
+{
+	const struct gpio_nrfx_cfg *cfg = get_port_cfg(port);
+
+	/* The GPIOHSPADCTRL shares base address with the GPIO port is belongs to */
+	NRF_GPIOHSPADCTRL_Type *reg = (NRF_GPIOHSPADCTRL_Type *)cfg->port;
+
+	nrf_gpiohspadctrl_hs_bias_set(reg, cfg->hs_bias);
+}
+#endif /* HSPADCTRL_SUPPORTED */
+
 #ifdef CONFIG_GPIO_NRFX_INTERRUPT
 /* Get port device from port id. */
 static const struct device *get_dev(uint32_t port_id)
@@ -625,6 +663,12 @@ static int gpio_nrfx_init(const struct device *port)
 	const struct gpio_nrfx_cfg *cfg = get_port_cfg(port);
 	int err;
 
+#if HSPADCTRL_SUPPORTED
+	if (has_hs_bias(port)) {
+		set_hs_bias(port);
+	}
+#endif /* HSPADCTRL_SUPPORTED */
+
 	if (!use_gpiote(cfg)) {
 		goto pm_init;
 	}
@@ -696,12 +740,18 @@ static DEVICE_API(gpio, gpio_nrfx_drv_api_funcs) = {
 		.gpiote = GPIOTE_REF(id),						\
 		.edge_sense = DT_INST_PROP_OR(id, sense_edge_mask, 0),			\
 		.port_num = DT_INST_PROP(id, port),					\
+		IF_ENABLED(NRF_GPIO_HAS_DETECT_MODE,					\
+			(.latch_detect = DT_INST_PROP(id, latch_detect),))		\
 		IF_ENABLED(GPIOTE_FEATURE_FLAG,						\
 			(.flags =							\
 			 (DT_PROP_OR(GPIOTE_PHANDLE(id), no_port_event, 0) ?		\
 			    GPIOTE_FLAG_NO_PORT_EVT : 0) |				\
 			 (DT_PROP_OR(GPIOTE_PHANDLE(id), fixed_channels_supported, 0) ?	\
 			  GPIOTE_FLAG_FIXED_CHAN : 0),)					\
+			)								\
+		IF_ENABLED(HSPADCTRL_SUPPORTED,						\
+			(.has_hs_bias = DT_INST_PROP(id, hspadctrl_supported),		\
+			 .hs_bias = DT_INST_PROP(id, hs_bias),)				\
 			)								\
 	};										\
 											\

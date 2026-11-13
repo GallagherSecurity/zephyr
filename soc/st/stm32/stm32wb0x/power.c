@@ -14,7 +14,7 @@
  */
 #include <zephyr/kernel.h>
 #include <zephyr/pm/pm.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/init.h>
 #include <zephyr/arch/common/pm_s2ram.h>
 
@@ -83,7 +83,7 @@ static int suspend_system_to_deepstop(void)
  */
 static void prepare_for_deepstop_entry(void)
 {
-	/* DEEPSTOP2 configuration is performed in familiy-wide code
+	/* DEEPSTOP2 configuration is performed in family-wide code
 	 * instead of here (see `soc/st/stm32/common/soc_config.c`).
 	 * RAMRET configuration is performed once during SoC init,
 	 * since it is retained across Deepstop (see `soc.c`).
@@ -173,6 +173,26 @@ void pm_state_set(enum pm_state state, uint8_t substate_id)
 	}
 }
 
+#ifdef CONFIG_PM_CUSTOM_TICKS_HOOK
+int64_t pm_policy_next_custom_ticks(void)
+{
+	int64_t ticks;
+	uint64_t radio_time;
+
+	/* If any timer1 or timer2 is busy, then inhibit sleep */
+	if (LL_RADIO_TIMER_IsEnabledTimer1(BLUE) || LL_RADIO_TIMER_IsEnabledTimer2(BLUE)) {
+		return 0;
+	} else if (!LL_RADIO_TIMER_IsEnabledBLEWakeupTimer(WAKEUP)) {
+		/* No radio event pending */
+		return -1LL;
+	}
+	(void) HAL_RADIO_TIMER_GetRadioTimerStatus(&radio_time);
+	ticks = (int64_t) k_cyc_to_ticks_near64(radio_time - HAL_RADIO_TIMER_GetCurrentSysTime());
+
+	return MAX(0, ticks);
+}
+#endif /* CONFIG_PM_CUSTOM_TICKS_HOOK */
+
 void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 {
 	ARG_UNUSED(state);
@@ -182,12 +202,17 @@ void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id)
 	 * The only thing we may have to do is release GPIO retention,
 	 * which we have not done yet because we wanted the driver to
 	 * restore all configuration first.
-	 * We also need to enable IRQs to fullfill the API contract.
+	 * We also need to enable IRQs to fulfill the API contract.
 	 */
 #if HAS_GPIO_RETENTION
 	LL_PWR_DisableGPIORET();
 	LL_PWR_DisableDBGRET();
 #endif /* HAS_GPIO_RETENTION */
 
+	/* We need to be sure that the HSE is ready before restarting the execution. */
+	if (LL_RCC_HSE_IsEnabled()) {
+		while (LL_RCC_HSE_IsReady() == 0U) {
+		}
+	}
 	__enable_irq();
 }

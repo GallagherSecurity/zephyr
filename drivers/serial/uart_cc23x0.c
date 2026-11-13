@@ -383,12 +383,6 @@ static int uart_cc23x0_irq_is_pending(const struct device *dev)
 	return status ? 1 : 0;
 }
 
-static int uart_cc23x0_irq_update(const struct device *dev)
-{
-	ARG_UNUSED(dev);
-	return 1;
-}
-
 static void uart_cc23x0_irq_callback_set(const struct device *dev, uart_irq_callback_user_data_t cb,
 					 void *user_data)
 {
@@ -889,7 +883,6 @@ static DEVICE_API(uart, uart_cc23x0_driver_api) = {
 	.irq_err_enable = uart_cc23x0_irq_err_enable,
 	.irq_err_disable = uart_cc23x0_irq_err_disable,
 	.irq_is_pending = uart_cc23x0_irq_is_pending,
-	.irq_update = uart_cc23x0_irq_update,
 	.irq_callback_set = uart_cc23x0_irq_callback_set,
 #endif /* CONFIG_UART_INTERRUPT_DRIVEN */
 #if CONFIG_UART_CC23X0_DMA_DRIVEN
@@ -1008,7 +1001,7 @@ static int uart_cc23x0_pm_action(const struct device *dev, enum pm_device_action
 	PM_DEVICE_DT_INST_DEFINE(n, uart_cc23x0_pm_action);                                        \
 	UART_CC23X0_INIT_FUNC(n);                                                                  \
                                                                                                    \
-	static struct uart_cc23x0_config uart_cc23x0_config_##n = {                                \
+	static const struct uart_cc23x0_config uart_cc23x0_config_##n = {                          \
 		.reg = DT_INST_REG_ADDR(n),                                                        \
 		.sys_clk_freq = DT_INST_PROP_BY_PHANDLE(n, clocks, clock_frequency),               \
 		.pcfg = PINCTRL_DT_INST_DEV_CONFIG_GET(n),                                         \

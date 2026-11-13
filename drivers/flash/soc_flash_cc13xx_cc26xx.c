@@ -14,7 +14,10 @@
 #include <driverlib/vims.h>
 
 #define DT_DRV_COMPAT        ti_cc13xx_cc26xx_flash_controller
-#define SOC_NV_FLASH_NODE    DT_INST(0, soc_nv_flash)
+
+#include "flash_priv.h"
+
+#define SOC_NV_FLASH_NODE SOC_NV_FLASH_CHILD_NODE(0)
 
 #define FLASH_ADDR           DT_REG_ADDR(SOC_NV_FLASH_NODE)
 #define FLASH_SIZE           DT_REG_SIZE(SOC_NV_FLASH_NODE)
@@ -260,7 +263,7 @@ static int flash_cc13xx_cc26xx_read(const struct device *dev, off_t offs,
 		return -EINVAL;
 	}
 
-	memcpy(data, (void *)offs, size);
+	memcpy(data, (void *)(uintptr_t)offs, size);
 
 	return 0;
 }

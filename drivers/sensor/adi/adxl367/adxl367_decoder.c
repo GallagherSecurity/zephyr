@@ -96,8 +96,9 @@ static inline void adxl367_temp_convert_q31(q31_t *out, const uint8_t *buff,
 			data_in |= ADXL367_COMPLEMENT;
 		}
 
-		*out = ((data_in - ADXL367_TEMP_25C) / ADXL367_TEMP_SENSITIVITY
-				+ ADXL367_TEMP_BIAS_TEST_CONDITION) * ADXL367_TEMP_QSCALE;
+		*out = (q31_t)(((int64_t)(data_in - ADXL367_TEMP_25C) * ADXL367_TEMP_QSCALE)
+				/ ADXL367_TEMP_SENSITIVITY
+				+ (int64_t)ADXL367_TEMP_BIAS_TEST_CONDITION * ADXL367_TEMP_QSCALE);
 	}
 }
 
@@ -421,7 +422,7 @@ static void adxl367_get_12b_temp(const struct adxl367_fifo_data *enc_data,
 
 static int adxl367_decode_12b_stream(const uint8_t *buffer, struct sensor_chan_spec chan_spec,
 				uint32_t *fit, uint16_t max_count, void *data_out,
-				const struct adxl367_fifo_data *enc_data)
+				const struct adxl367_fifo_data *enc_data, uint64_t base_ts)
 {
 	const uint8_t *buffer_end =
 		buffer + sizeof(struct adxl367_fifo_data) + enc_data->fifo_byte_count;
@@ -468,8 +469,8 @@ static int adxl367_decode_12b_stream(const uint8_t *buffer, struct sensor_chan_s
 		if (chan_spec.chan_type == SENSOR_CHAN_DIE_TEMP) {
 			struct sensor_q31_data *data = (struct sensor_q31_data *)data_out;
 
-			memset(data, 0, sizeof(struct sensor_three_axis_data));
-			data->header.base_timestamp_ns = enc_data->timestamp;
+			memset(data, 0, sizeof(struct sensor_q31_data));
+			data->header.base_timestamp_ns = base_ts;
 			data->header.reading_count = 1;
 			data->shift = 8;
 
@@ -482,7 +483,7 @@ static int adxl367_decode_12b_stream(const uint8_t *buffer, struct sensor_chan_s
 				(struct sensor_three_axis_data *)data_out;
 
 			memset(data, 0, sizeof(struct sensor_three_axis_data));
-			data->header.base_timestamp_ns = enc_data->timestamp;
+			data->header.base_timestamp_ns = base_ts;
 			data->header.reading_count = 1;
 			data->shift = range_to_shift[enc_data->range];
 
@@ -518,6 +519,11 @@ static int adxl367_decode_stream(const uint8_t *buffer, struct sensor_chan_spec 
 	buffer += sizeof(struct adxl367_fifo_data);
 
 	uint8_t packet_size = enc_data->packet_size;
+
+	if (packet_size == 0) {
+		return -ENODATA;
+	}
+
 	uint64_t period_ns = accel_period_ns[enc_data->accel_odr];
 	uint8_t sample_size = 2;
 
@@ -525,9 +531,13 @@ static int adxl367_decode_stream(const uint8_t *buffer, struct sensor_chan_spec 
 		sample_size = 1;
 	}
 
+	uint16_t total_samples = enc_data->fifo_byte_count / packet_size;
+	uint64_t base_ts = enc_data->timestamp -
+			   (total_samples > 0 ? (total_samples - 1) : 0) * period_ns;
+
 	if (enc_data->fifo_read_mode == ADXL367_12B) {
 		count = adxl367_decode_12b_stream(buffer, chan_spec, fit, max_count,
-			data_out, enc_data);
+			data_out, enc_data, base_ts);
 	} else {
 		/* Calculate which sample is decoded. */
 		if (*fit >= (uintptr_t)buffer) {
@@ -548,8 +558,8 @@ static int adxl367_decode_stream(const uint8_t *buffer, struct sensor_chan_spec 
 			if (chan_spec.chan_type == SENSOR_CHAN_DIE_TEMP) {
 				struct sensor_q31_data *data = (struct sensor_q31_data *)data_out;
 
-				memset(data, 0, sizeof(struct sensor_three_axis_data));
-				data->header.base_timestamp_ns = enc_data->timestamp;
+				memset(data, 0, sizeof(struct sensor_q31_data));
+				data->header.base_timestamp_ns = base_ts;
 				data->header.reading_count = 1;
 				data->shift = 8;
 
@@ -567,7 +577,7 @@ static int adxl367_decode_stream(const uint8_t *buffer, struct sensor_chan_spec 
 					(struct sensor_three_axis_data *)data_out;
 
 				memset(data, 0, sizeof(struct sensor_three_axis_data));
-				data->header.base_timestamp_ns = enc_data->timestamp;
+				data->header.base_timestamp_ns = base_ts;
 				data->header.reading_count = 1;
 				data->shift = range_to_shift[enc_data->range];
 
@@ -624,6 +634,7 @@ static int adxl367_decoder_get_frame_count(const uint8_t *buffer,
 		case SENSOR_CHAN_ACCEL_Y:
 		case SENSOR_CHAN_ACCEL_Z:
 		case SENSOR_CHAN_ACCEL_XYZ:
+		case SENSOR_CHAN_DIE_TEMP:
 			*frame_count = 1;
 			ret = 0;
 			break;
@@ -748,7 +759,7 @@ static bool adxl367_decoder_has_trigger(const uint8_t *buffer, enum sensor_trigg
 	case SENSOR_TRIG_FIFO_WATERMARK:
 		return (ADXL367_STATUS_FIFO_WATERMARK & data->int_status);
 	case SENSOR_TRIG_FIFO_FULL:
-		return (ADXL367_STATUS_FIFO_WATERMARK & data->int_status);
+		return (ADXL367_STATUS_FIFO_OVERRUN & data->int_status);
 	default:
 		return false;
 	}

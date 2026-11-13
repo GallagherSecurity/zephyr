@@ -23,6 +23,20 @@ BUILD_ASSERT(sizeof(struct log_msg_desc) == sizeof(uint32_t),
 
 #define CBPRINTF_DESC_SIZE32 (sizeof(struct cbprintf_package_desc) / sizeof(uint32_t))
 
+/*
+ * cbvprintf_package() requires its buffer to be aligned at least to the size
+ * of a pointer. Avoid alignment arithmetic when the stack already provides
+ * that guarantee.
+ *
+ * Use the logging alignment for the fallback so the package address matches
+ * the alignment assumed when its size was calculated.
+ */
+#define LOG_MSG_ALIGNED_ALLOCA(_size)                                                              \
+	(IS_ALIGNED(ARCH_STACK_PTR_ALIGN, sizeof(void *))                                          \
+		 ? alloca(_size)                                                                   \
+		 : (void *)ROUND_UP((uintptr_t)alloca((_size) + Z_LOG_MSG_ALIGNMENT - 1U),         \
+				    Z_LOG_MSG_ALIGNMENT))
+
 /* For simplified message handling cprintf package must have only 1 word. */
 BUILD_ASSERT(!IS_ENABLED(CONFIG_LOG_SIMPLE_MSG_OPTIMIZE) ||
 	     (IS_ENABLED(CONFIG_LOG_SIMPLE_MSG_OPTIMIZE) && (CBPRINTF_DESC_SIZE32 == 1)));
@@ -340,6 +354,28 @@ static inline void z_vrfy_z_log_msg_static_create(const void *source,
 			      const struct log_msg_desc desc,
 			      uint8_t *package, const void *data)
 {
+	K_OOPS(K_SYSCALL_VERIFY(desc.package_len <= Z_LOG_MSG_MAX_PACKAGE));
+
+	K_OOPS(K_SYSCALL_VERIFY((desc.package_len == 0) || (package != NULL)));
+	K_OOPS(K_SYSCALL_VERIFY((desc.data_len == 0) || (data != NULL)));
+
+	if (desc.package_len > 0) {
+		K_OOPS(K_SYSCALL_MEMORY_READ(package, desc.package_len));
+	}
+
+	if (desc.data_len > 0) {
+		K_OOPS(K_SYSCALL_MEMORY_READ(data, desc.data_len));
+	}
+
+	if (IS_ENABLED(CONFIG_LOG_RUNTIME_FILTERING) &&
+	    IS_ENABLED(CONFIG_LOG_FRONTEND) &&
+	    (desc.level != LOG_LEVEL_NONE)) {
+		size_t source_size = sizeof(struct log_source_dynamic_data);
+
+		K_OOPS(K_SYSCALL_VERIFY(source != NULL));
+		K_OOPS(K_SYSCALL_MEMORY_READ(source, source_size));
+	}
+
 	z_impl_z_log_msg_static_create(source, desc, package, data);
 }
 #include <zephyr/syscalls/z_log_msg_static_create_mrsh.c>
@@ -376,19 +412,19 @@ void z_log_msg_runtime_vcreate(uint8_t domain_id, const void *source,
 		Z_LOG_MSG_DESC_INITIALIZER(domain_id, level, plen, dlen);
 
 	if (k_is_user_context()) {
-		pkg = alloca(plen);
+		pkg = LOG_MSG_ALIGNED_ALLOCA(plen);
 		msg = NULL;
 	} else if (IS_ENABLED(CONFIG_LOG_MODE_DEFERRED) && BACKENDS_IN_USE()) {
 		compiler_barrier();
 		msg = z_log_msg_alloc(msg_wlen);
 		if (IS_ENABLED(CONFIG_LOG_FRONTEND) && msg == NULL) {
-			pkg = alloca(plen);
+			pkg = LOG_MSG_ALIGNED_ALLOCA(plen);
 		} else {
 			pkg = msg ? msg->data : NULL;
 		}
 	} else {
 		compiler_barrier();
-		msg = alloca(msg_wlen * sizeof(int));
+		msg = LOG_MSG_ALIGNED_ALLOCA(msg_wlen * sizeof(int));
 		pkg = msg->data;
 	}
 

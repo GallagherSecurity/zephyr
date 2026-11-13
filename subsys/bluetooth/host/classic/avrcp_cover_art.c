@@ -22,9 +22,9 @@
 #include <zephyr/bluetooth/classic/bip.h>
 #include <zephyr/bluetooth/classic/avrcp_cover_art.h>
 
-#include "host/hci_core.h"
-#include "host/conn_internal.h"
-#include "host/l2cap_internal.h"
+#include <host/hci_core.h>
+#include <host/conn_internal.h>
+#include <host/l2cap_internal.h>
 #include "avctp_internal.h"
 #include "avrcp_internal.h"
 
@@ -175,9 +175,7 @@ static void tg_bip_transport_disconnected(struct bt_bip *bip)
 
 	LOG_DBG("BIP %p transport disconnected", bip);
 
-	if (tg->conn != NULL) {
-		bt_conn_unref(tg->conn);
-	}
+	bt_conn_drop(&tg->conn);
 
 	err = bt_bip_server_unregister(&tg->server);
 	if (err != 0) {
@@ -224,6 +222,11 @@ int bt_avrcp_tg_cover_art_init(uint16_t *psm)
 
 	if (psm == NULL) {
 		return -EINVAL;
+	}
+
+	if (*psm != 0) {
+		LOG_DBG("AVRCP Cover Art already initialized (PSM 0x%04x)", *psm);
+		return 0;
 	}
 
 	tg_cover_art_server.server.l2cap.psm = 0;
@@ -558,9 +561,7 @@ static void ct_bip_transport_disconnected(struct bt_bip *bip)
 
 	LOG_DBG("Cover Art CT %p  transport disconnected", ct);
 
-	if (ct->conn != NULL) {
-		bt_conn_unref(ct->conn);
-	}
+	bt_conn_drop(&ct->conn);
 
 	if ((cover_art_ct_cb != NULL) && (cover_art_ct_cb->l2cap_disconnected != NULL)) {
 		cover_art_ct_cb->l2cap_disconnected(ct);
@@ -603,18 +604,18 @@ int bt_avrcp_cover_art_ct_l2cap_connect(struct bt_avrcp_ct *ct,
 		return -ENOTCONN;
 	}
 
-	bt_conn_unref(conn);
-
 	index = bt_conn_index(conn);
 
 	if (index >= ARRAY_SIZE(avrcp_cover_art_ct)) {
 		LOG_ERR("Conn index out of bounds");
+		bt_conn_unref(conn);
 		return -EINVAL;
 	}
 
 	avrcp_cover_art_ct[index].bip.ops = &ct_bip_transport_ops;
 
 	err = bt_bip_l2cap_connect(conn, &avrcp_cover_art_ct[index].bip, psm);
+	bt_conn_unref(conn);
 	if (err != 0) {
 		LOG_ERR("Failed to connect AVRCP Cover Art L2CAP channel (err %d)", err);
 		return err;

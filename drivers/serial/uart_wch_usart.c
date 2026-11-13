@@ -10,6 +10,9 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/pinctrl.h>
+#ifdef CONFIG_UART_WCH_USART_RESET
+#include <zephyr/drivers/reset.h>
+#endif
 #include <zephyr/irq.h>
 
 #include <hal_ch32fun.h>
@@ -17,6 +20,9 @@
 struct usart_wch_config {
 	USART_TypeDef *regs;
 	const struct device *clock_dev;
+#ifdef CONFIG_UART_WCH_USART_RESET
+	const struct reset_dt_spec reset;
+#endif
 	uint32_t current_speed;
 	uint8_t parity;
 	uint8_t clock_id;
@@ -43,6 +49,19 @@ static int usart_wch_init(const struct device *dev)
 
 	clock_control_on(config->clock_dev, clock_sys);
 
+#ifdef CONFIG_UART_WCH_USART_RESET
+	if (!device_is_ready(config->reset.dev)) {
+		return -ENODEV;
+	}
+
+	(void)reset_line_toggle_dt(&config->reset);
+#endif
+
+	err = pinctrl_apply_state(config->pin_cfg, PINCTRL_STATE_DEFAULT);
+	if (err != 0) {
+		return err;
+	}
+
 	err = clock_control_get_rate(config->clock_dev, clock_sys, &clock_rate);
 	if (err != 0) {
 		return err;
@@ -62,15 +81,11 @@ static int usart_wch_init(const struct device *dev)
 		return -EINVAL;
 	}
 
-	regs->BRR = divn;
-	regs->CTLR1 = ctlr1;
+	regs->CTLR1 = 0;
 	regs->CTLR2 = 0;
 	regs->CTLR3 = 0;
-
-	err = pinctrl_apply_state(config->pin_cfg, PINCTRL_STATE_DEFAULT);
-	if (err != 0) {
-		return err;
-	}
+	regs->BRR = divn;
+	regs->CTLR1 = ctlr1;
 
 #ifdef CONFIG_UART_INTERRUPT_DRIVEN
 	config->irq_config_func(dev);
@@ -187,7 +202,7 @@ static int usart_wch_irq_tx_ready(const struct device *dev)
 	const struct usart_wch_config *config = dev->config;
 	USART_TypeDef *regs = config->regs;
 
-	return (regs->STATR & USART_STATR_TXE) > 0;
+	return (regs->STATR & USART_STATR_TXE) != 0 && (regs->CTLR1 & USART_CTLR1_TXEIE) != 0;
 }
 
 static void usart_wch_irq_rx_enable(const struct device *dev)
@@ -266,11 +281,6 @@ static int usart_wch_irq_is_pending(const struct device *dev)
 	return (statr & stat_mask) > 0;
 }
 
-static int usart_wch_irq_update(const struct device *dev)
-{
-	return 1;
-}
-
 static void usart_wch_irq_callback_set(const struct device *dev, uart_irq_callback_user_data_t cb,
 				       void *user_data)
 {
@@ -298,7 +308,6 @@ static DEVICE_API(uart, usart_wch_driver_api) = {
 	.irq_err_enable = usart_wch_irq_err_enable,
 	.irq_err_disable = usart_wch_irq_err_disable,
 	.irq_is_pending = usart_wch_irq_is_pending,
-	.irq_update = usart_wch_irq_update,
 	.irq_callback_set = usart_wch_irq_callback_set,
 #endif
 };
@@ -312,7 +321,7 @@ static DEVICE_API(uart, usart_wch_driver_api) = {
 #define USART_WCH_IRQ_HANDLER(idx)                                                                 \
 	static void usart_wch_irq_config_func_##idx(const struct device *dev)                      \
 	{                                                                                          \
-		IRQ_CONNECT(DT_INST_IRQN(idx), DT_INST_IRQ(idx, priority), usart_wch_isr,        \
+		IRQ_CONNECT(DT_INST_IRQN(idx), DT_INST_IRQ(idx, priority), usart_wch_isr,          \
 			    DEVICE_DT_INST_GET(idx), 0);                                           \
 		irq_enable(DT_INST_IRQN(idx));                                                     \
 	}
@@ -320,6 +329,12 @@ static DEVICE_API(uart, usart_wch_driver_api) = {
 #define USART_WCH_IRQ_HANDLER_DECL(idx)
 #define USART_WCH_IRQ_HANDLER_FUNC(idx)
 #define USART_WCH_IRQ_HANDLER(idx)
+#endif
+
+#ifdef CONFIG_UART_WCH_USART_RESET
+#define USART_WCH_RESET(idx) .reset = RESET_DT_SPEC_INST_GET(idx),
+#else
+#define USART_WCH_RESET(_)
 #endif
 
 #define USART_WCH_INIT(idx)                                                                        \
@@ -333,8 +348,8 @@ static DEVICE_API(uart, usart_wch_driver_api) = {
 		.clock_dev = DEVICE_DT_GET(DT_INST_CLOCKS_CTLR(idx)),                              \
 		.clock_id = DT_INST_CLOCKS_CELL(idx, id),                                          \
 		.pin_cfg = PINCTRL_DT_INST_DEV_CONFIG_GET(idx),                                    \
-		USART_WCH_IRQ_HANDLER_FUNC(idx)};                                                  \
-	DEVICE_DT_INST_DEFINE(idx, &usart_wch_init, NULL, &usart_wch_##idx##_data,                 \
+		USART_WCH_RESET(idx) USART_WCH_IRQ_HANDLER_FUNC(idx)};                             \
+	DEVICE_DT_INST_DEFINE(idx, usart_wch_init, NULL, &usart_wch_##idx##_data,                  \
 			      &usart_wch_##idx##_config, PRE_KERNEL_1,                             \
 			      CONFIG_SERIAL_INIT_PRIORITY, &usart_wch_driver_api);                 \
 	USART_WCH_IRQ_HANDLER(idx)

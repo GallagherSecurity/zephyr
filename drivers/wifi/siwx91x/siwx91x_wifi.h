@@ -26,6 +26,8 @@ struct siwx91x_dev {
 	uint8_t max_num_sta;
 	bool reboot_needed;
 	bool hidden_ssid;
+	/* Runs net_if_dormant_off / IP / PS off the WiseConnect event engine */
+	struct k_work on_join_work;
 
 #ifdef CONFIG_WIFI_SILABS_SIWX91X_NET_STACK_OFFLOAD
 	struct k_event fds_recv_event;
@@ -38,7 +40,8 @@ struct siwx91x_dev {
 #endif
 };
 
-int siwx91x_status(const struct device *dev, struct wifi_iface_status *status);
+int siwx91x_status(const struct device *dev, struct net_if *iface,
+		   struct wifi_iface_status *status);
 bool siwx91x_param_changed(struct wifi_iface_status *prev_params,
 			   struct wifi_connect_req_params *new_params);
 

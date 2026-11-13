@@ -95,6 +95,20 @@ struct fd_op_vtable {
 	int (*ioctl)(void *obj, unsigned int request, va_list args);
 };
 
+/** @cond INTERNAL_HIDDEN */
+
+/* Called by zvfs_close() for every ZVFS_MODE_IFSOCK descriptor, implemented by the socket layer. */
+#if defined(CONFIG_NET_SOCKETS)
+void zvfs_socket_close_hook(int fd);
+#else
+static inline void zvfs_socket_close_hook(int fd)
+{
+	ARG_UNUSED(fd);
+}
+#endif /* CONFIG_NET_SOCKETS */
+
+/** @endcond */
+
 /**
  * @brief Reserve file descriptor.
  *
@@ -298,8 +312,12 @@ enum {
 	ZFD_IOCTL_MMAP,
 
 	/* Codes above 0x5400 and below 0x5500 are reserved for termios, FIO, etc */
+	/** Get the number of bytes available to read */
 	ZFD_IOCTL_FIONREAD = 0x541B,
+	/** Set non-blocking mode */
 	ZFD_IOCTL_FIONBIO = 0x5421,
+	/** Get the number of bytes queued for TCP TX which have not yet been acknowledged */
+	ZFD_IOCTL_FIONWRITE = 0x5411,
 };
 
 /**

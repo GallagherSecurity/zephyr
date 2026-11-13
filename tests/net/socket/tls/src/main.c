@@ -11,6 +11,14 @@ LOG_MODULE_REGISTER(net_test, CONFIG_NET_SOCKETS_LOG_LEVEL);
 #include <zephyr/net/loopback.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/tls_credentials.h>
+
+/* The BIO callbacks of a socket are needed to build a datagram that carries
+ * two DTLS records.
+ */
+#if !defined(MBEDTLS_ALLOW_PRIVATE_ACCESS)
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS
+#endif
+
 #include <mbedtls/ssl.h>
 
 #include "../../socket_helpers.h"
@@ -35,7 +43,7 @@ uint32_t ztls_get_session_count(void);
 
 #define TCP_TEARDOWN_TIMEOUT K_MSEC(CONFIG_NET_TCP_TIME_WAIT_DELAY)
 
-#define TLS_TEST_WORK_QUEUE_STACK_SIZE 3072
+#define TLS_TEST_WORK_QUEUE_STACK_SIZE 4096
 
 K_THREAD_STACK_DEFINE(tls_test_work_queue_stack, TLS_TEST_WORK_QUEUE_STACK_SIZE);
 static struct k_work_q tls_test_work_queue;
@@ -66,6 +74,9 @@ static void test_config_psk(int s_sock, int c_sock)
 	sec_tag_t sec_tag_list[] = {
 		PSK_TAG
 	};
+	const int cipher_list[] = {
+		MBEDTLS_TLS_PSK_WITH_AES_256_CBC_SHA384,
+	};
 
 	(void)tls_credential_delete(PSK_TAG, TLS_CREDENTIAL_PSK);
 	(void)tls_credential_delete(PSK_TAG, TLS_CREDENTIAL_PSK_ID);
@@ -81,12 +92,18 @@ static void test_config_psk(int s_sock, int c_sock)
 		zassert_equal(zsock_setsockopt(s_sock, ZSOCK_SOL_TLS, ZSOCK_TLS_SEC_TAG_LIST,
 					 sec_tag_list, sizeof(sec_tag_list)),
 			      0, "Failed to set PSK on server socket");
+		zassert_equal(zsock_setsockopt(s_sock, ZSOCK_SOL_TLS, ZSOCK_TLS_CIPHERSUITE_LIST,
+					 cipher_list, sizeof(cipher_list)),
+			      0, "Failed to set ciphersuite list on server socket");
 	}
 
 	if (c_sock >= 0) {
 		zassert_equal(zsock_setsockopt(c_sock, ZSOCK_SOL_TLS, ZSOCK_TLS_SEC_TAG_LIST,
 					 sec_tag_list, sizeof(sec_tag_list)),
 			      0, "Failed to set PSK on client socket");
+		zassert_equal(zsock_setsockopt(c_sock, ZSOCK_SOL_TLS, ZSOCK_TLS_CIPHERSUITE_LIST,
+					 cipher_list, sizeof(cipher_list)),
+			      0, "Failed to set ciphersuite list on client socket");
 	}
 }
 
@@ -136,19 +153,6 @@ static void test_sendto(int sock, const void *buf, size_t len, int flags,
 		      "sendto failed");
 }
 
-static void test_sendmsg(int sock, const struct net_msghdr *msg, int flags)
-{
-	size_t total_len = 0;
-
-	for (int i = 0; i < msg->msg_iovlen; i++) {
-		struct net_iovec *vec = msg->msg_iov + i;
-
-		total_len += vec->iov_len;
-	}
-
-	zassert_equal(zsock_sendmsg(sock, msg, flags), total_len, "zsock_sendmsg() failed");
-}
-
 static void test_accept(int sock, int *new_sock, struct net_sockaddr *addr,
 			net_socklen_t *addrlen)
 {
@@ -193,6 +197,12 @@ static void test_sockets_close(void)
 		test_close(new_sock);
 		new_sock = -1;
 	}
+}
+
+static void close_and_invalidate(int *sock)
+{
+	(void)zsock_close(*sock);
+	*sock = -1;
 }
 
 static void test_eof(int sock)
@@ -267,6 +277,7 @@ ZTEST(net_socket_tls, test_so_protocol)
 struct test_msg_waitall_data {
 	struct k_work_delayable tx_work;
 	int sock;
+	int *peer_sock;
 	const uint8_t *data;
 	size_t offset;
 	int retries;
@@ -277,18 +288,31 @@ static void test_msg_waitall_tx_work_handler(struct k_work *work)
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
 	struct test_msg_waitall_data *test_data =
 		CONTAINER_OF(dwork, struct test_msg_waitall_data, tx_work);
+	int ret;
 
-	if (test_data->retries > 0) {
-		test_send(test_data->sock, test_data->data + test_data->offset, 1, 0);
+	while (test_data->retries > 0) {
+		ret = zsock_send(test_data->sock, test_data->data + test_data->offset, 1, 0);
+		if (ret < 0) {
+			printk("zsock_send() failed (%d)\n", errno);
+			close_and_invalidate(test_data->peer_sock);
+			return;
+		}
+		if (ret != 1) {
+			printk("zsock_send() sent %d instead of 1\n", ret);
+			close_and_invalidate(test_data->peer_sock);
+			return;
+		}
+
 		test_data->offset++;
 		test_data->retries--;
-		test_work_reschedule(&test_data->tx_work, K_MSEC(10));
+		k_msleep(10);
 	}
 }
 
 struct connect_data {
 	struct k_work_delayable work;
 	int sock;
+	int *peer_sock;
 	struct net_sockaddr *addr;
 };
 
@@ -297,9 +321,15 @@ static void client_connect_work_handler(struct k_work *work)
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
 	struct connect_data *data =
 		CONTAINER_OF(dwork, struct connect_data, work);
+	int ret;
 
-	test_connect(data->sock, data->addr, data->addr->sa_family == NET_AF_INET ?
-		     sizeof(struct net_sockaddr_in) : sizeof(struct net_sockaddr_in6));
+	ret = zsock_connect(data->sock, data->addr, data->addr->sa_family == NET_AF_INET ?
+			    sizeof(struct net_sockaddr_in) : sizeof(struct net_sockaddr_in6));
+	if (ret < 0) {
+		printk("zsock_connect() failed (%d)\n", errno);
+		close_and_invalidate(data->peer_sock);
+		return;
+	}
 }
 
 static void dtls_client_connect_send_work_handler(struct k_work *work)
@@ -308,10 +338,27 @@ static void dtls_client_connect_send_work_handler(struct k_work *work)
 	struct connect_data *data =
 		CONTAINER_OF(dwork, struct connect_data, work);
 	uint8_t tx_buf = 0;
+	int ret;
 
-	test_connect(data->sock, data->addr, data->addr->sa_family == NET_AF_INET ?
-		     sizeof(struct net_sockaddr_in) : sizeof(struct net_sockaddr_in6));
-	test_send(data->sock, &tx_buf, sizeof(tx_buf), 0);
+	ret = zsock_connect(data->sock, data->addr, data->addr->sa_family == NET_AF_INET ?
+			    sizeof(struct net_sockaddr_in) : sizeof(struct net_sockaddr_in6));
+	if (ret < 0) {
+		printk("zsock_connect() failed (%d)\n", errno);
+		close_and_invalidate(data->peer_sock);
+		return;
+	}
+
+	ret = zsock_send(data->sock, &tx_buf, sizeof(tx_buf), 0);
+	if (ret < 0) {
+		printk("zsock_send() failed (%d)\n", errno);
+		close_and_invalidate(data->peer_sock);
+		return;
+	}
+	if (ret != sizeof(tx_buf)) {
+		printk("zsock_send() sent %d instead of %zu\n", ret, sizeof(tx_buf));
+		close_and_invalidate(data->peer_sock);
+		return;
+	}
 }
 
 static void test_prepare_tls_connection(net_sa_family_t family)
@@ -350,6 +397,7 @@ static void test_prepare_tls_connection(net_sa_family_t family)
 	 * in parallel due to handshake.
 	 */
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = &s_saddr;
 	k_work_init_delayable(&test_data.work, client_connect_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -399,6 +447,7 @@ static void test_prepare_dtls_connection(net_sa_family_t family)
 	test_bind(s_sock, &s_saddr, exp_addrlen);
 
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = &s_saddr;
 	k_work_init_delayable(&test_data.work, dtls_client_connect_send_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -439,6 +488,7 @@ ZTEST(net_socket_tls, test_v4_msg_waitall)
 	test_data.offset = 0;
 	test_data.retries = sizeof(rx_buf);
 	test_data.sock = c_sock;
+	test_data.peer_sock = &new_sock;
 	k_work_init_delayable(&test_data.tx_work,
 			      test_msg_waitall_tx_work_handler);
 	test_work_reschedule(&test_data.tx_work, K_MSEC(10));
@@ -460,6 +510,7 @@ ZTEST(net_socket_tls, test_v4_msg_waitall)
 	test_data.offset = 0;
 	test_data.retries = sizeof(rx_buf) - 1;
 	test_data.sock = c_sock;
+	test_data.peer_sock = &new_sock;
 	k_work_init_delayable(&test_data.tx_work,
 			      test_msg_waitall_tx_work_handler);
 	test_work_reschedule(&test_data.tx_work, K_MSEC(10));
@@ -495,6 +546,7 @@ ZTEST(net_socket_tls, test_v6_msg_waitall)
 	test_data.offset = 0;
 	test_data.retries = sizeof(rx_buf);
 	test_data.sock = c_sock;
+	test_data.peer_sock = &new_sock;
 	k_work_init_delayable(&test_data.tx_work,
 			      test_msg_waitall_tx_work_handler);
 	test_work_reschedule(&test_data.tx_work, K_MSEC(10));
@@ -516,6 +568,7 @@ ZTEST(net_socket_tls, test_v6_msg_waitall)
 	test_data.offset = 0;
 	test_data.retries = sizeof(rx_buf) - 1;
 	test_data.sock = c_sock;
+	test_data.peer_sock = &new_sock;
 	k_work_init_delayable(&test_data.tx_work,
 			      test_msg_waitall_tx_work_handler);
 	test_work_reschedule(&test_data.tx_work, K_MSEC(10));
@@ -534,6 +587,7 @@ ZTEST(net_socket_tls, test_v6_msg_waitall)
 struct send_data {
 	struct k_work_delayable tx_work;
 	int sock;
+	int *peer_sock;
 	const uint8_t *data;
 	size_t datalen;
 };
@@ -543,8 +597,19 @@ static void send_work_handler(struct k_work *work)
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
 	struct send_data *test_data =
 		CONTAINER_OF(dwork, struct send_data, tx_work);
+	int ret;
 
-	test_send(test_data->sock, test_data->data, test_data->datalen, 0);
+	ret = zsock_send(test_data->sock, test_data->data, test_data->datalen, 0);
+	if (ret < 0) {
+		printk("zsock_send() failed (%d)\n", errno);
+		close_and_invalidate(test_data->peer_sock);
+		return;
+	}
+	if (ret != test_data->datalen) {
+		printk("zsock_send() sent %d instead of %zu\n", ret, test_data->datalen);
+		close_and_invalidate(test_data->peer_sock);
+		return;
+	}
 }
 
 void test_msg_trunc(net_sa_family_t family)
@@ -561,6 +626,7 @@ void test_msg_trunc(net_sa_family_t family)
 	/* MSG_TRUNC */
 
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	k_work_init_delayable(&test_data.tx_work, send_work_handler);
 	test_work_reschedule(&test_data.tx_work, K_MSEC(10));
 
@@ -598,6 +664,7 @@ ZTEST(net_socket_tls, test_v6_msg_trunc)
 struct test_sendmsg_data {
 	struct k_work_delayable tx_work;
 	int sock;
+	int *peer_sock;
 	const struct net_msghdr *msg;
 };
 
@@ -606,8 +673,26 @@ static void test_sendmsg_tx_work_handler(struct k_work *work)
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
 	struct test_sendmsg_data *test_data =
 		CONTAINER_OF(dwork, struct test_sendmsg_data, tx_work);
+	size_t total_len = 0;
+	int ret;
 
-	test_sendmsg(test_data->sock, test_data->msg, 0);
+	for (int i = 0; i < test_data->msg->msg_iovlen; i++) {
+		struct net_iovec *vec = test_data->msg->msg_iov + i;
+
+		total_len += vec->iov_len;
+	}
+
+	ret = zsock_sendmsg(test_data->sock, test_data->msg, 0);
+	if (ret < 0) {
+		printk("zsock_sendmsg() failed (%d)\n", errno);
+		close_and_invalidate(test_data->peer_sock);
+		return;
+	}
+	if (ret != total_len) {
+		printk("zsock_sendmsg() sent %d instead of %zu\n", ret, total_len);
+		close_and_invalidate(test_data->peer_sock);
+		return;
+	}
 }
 
 static void test_dtls_sendmsg_no_buf(net_sa_family_t family)
@@ -630,6 +715,7 @@ static void test_dtls_sendmsg_no_buf(net_sa_family_t family)
 	test_prepare_dtls_connection(family);
 
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	k_work_init_delayable(&test_data.tx_work, test_sendmsg_tx_work_handler);
 
 	/* sendmsg() with single fragment */
@@ -717,6 +803,7 @@ static void test_dtls_sendmsg(net_sa_family_t family)
 	test_prepare_dtls_connection(family);
 
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	k_work_init_delayable(&test_data.tx_work, test_sendmsg_tx_work_handler);
 
 	/* sendmsg() with multiple fragments */
@@ -781,6 +868,7 @@ static void test_dtls_sendmsg_overflow(net_sa_family_t family)
 	test_prepare_dtls_connection(family);
 
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	k_work_init_delayable(&test_data.tx_work, test_sendmsg_tx_work_handler);
 
 	/* sendmsg() with single fragment should still work even if larger than
@@ -985,6 +1073,7 @@ ZTEST(net_socket_tls, test_connect_closed_port)
 struct fake_tcp_server_data {
 	struct k_work_delayable work;
 	int sock;
+	int *peer_sock;
 	bool reply;
 };
 
@@ -993,8 +1082,14 @@ static void fake_tcp_server_work(struct k_work *work)
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
 	struct fake_tcp_server_data *data =
 		CONTAINER_OF(dwork, struct fake_tcp_server_data, work);
+	int ret;
 
-	test_accept(data->sock, &new_sock, NULL, 0);
+	new_sock = zsock_accept(data->sock, NULL, 0);
+	if (new_sock < 0) {
+		printk("zsock_accept() failed (%d)\n", errno);
+		close_and_invalidate(data->peer_sock);
+		return;
+	}
 
 	if (!data->reply) {
 		/* Add small delay to avoid race between incoming data and
@@ -1005,7 +1100,6 @@ static void fake_tcp_server_work(struct k_work *work)
 	}
 
 	while (true) {
-		int ret;
 		char rx_buf[32];
 
 		ret = zsock_recv(new_sock, rx_buf, sizeof(rx_buf), 0);
@@ -1013,11 +1107,26 @@ static void fake_tcp_server_work(struct k_work *work)
 			break;
 		}
 
-		(void)zsock_send(new_sock, TEST_STR_SMALL, sizeof(TEST_STR_SMALL), 0);
+		ret = zsock_send(new_sock, TEST_STR_SMALL, sizeof(TEST_STR_SMALL), 0);
+		if (ret < 0) {
+			printk("zsock_send() failed (%d)\n", errno);
+			close_and_invalidate(data->peer_sock);
+			break;
+		}
+		if (ret != sizeof(TEST_STR_SMALL)) {
+			printk("zsock_send() sent %d instead of %zu\n", ret,
+			       sizeof(TEST_STR_SMALL));
+			close_and_invalidate(data->peer_sock);
+			break;
+		}
 	}
 
 out:
-	test_close(new_sock);
+	ret = zsock_close(new_sock);
+	if (ret < 0) {
+		printk("zsock_close() failed (%d)\n", errno);
+	}
+
 	new_sock = -1;
 }
 
@@ -1041,6 +1150,7 @@ static void test_prepare_fake_tcp_server(struct fake_tcp_server_data *s_data,
 	test_listen(*s_sock);
 
 	s_data->sock = *s_sock;
+	s_data->peer_sock = &c_sock;
 	s_data->reply = reply;
 	k_work_init_delayable(&s_data->work, fake_tcp_server_work);
 	test_work_reschedule(&s_data->work, K_NO_WAIT);
@@ -1192,6 +1302,7 @@ ZTEST(net_socket_tls, test_recv_block)
 	test_prepare_tls_connection(NET_AF_INET6);
 
 	test_data.sock = c_sock;
+	test_data.peer_sock = &new_sock;
 	k_work_init_delayable(&test_data.tx_work, send_work_handler);
 	test_work_reschedule(&test_data.tx_work, K_MSEC(10));
 
@@ -1285,8 +1396,10 @@ ZTEST(net_socket_tls, test_send_non_block)
 struct recv_data {
 	struct k_work_delayable work;
 	int sock;
+	int *peer_sock;
 	const uint8_t *data;
 	size_t datalen;
+	bool failed;
 };
 
 static void recv_work_handler(struct k_work *work)
@@ -1301,13 +1414,27 @@ static void recv_work_handler(struct k_work *work)
 		size_t recvlen = MIN(sizeof(rx_buf), test_data->datalen - off);
 
 		ret = zsock_recv(test_data->sock, rx_buf, recvlen, 0);
-		zassert_true(ret > 0, "zsock_recv() error");
-		zassert_mem_equal(rx_buf, test_data->data + off, ret,
-				  "unexpected data");
+		if (ret <= 0) {
+			test_data->failed = true;
+			printk("zsock_recv() failed (%d/%d)\n", ret, errno);
+			close_and_invalidate(test_data->peer_sock);
+			return;
+		}
+
+		if (memcmp(rx_buf, test_data->data + off, ret) != 0) {
+			test_data->failed = true;
+			printk("unexpected data at offset %zu\n", off);
+			close_and_invalidate(test_data->peer_sock);
+			return;
+		}
 
 		off += ret;
-		zassert_true(off <= test_data->datalen,
-			     "received more than expected");
+		if (off > test_data->datalen) {
+			test_data->failed = true;
+			printk("received more than expected\n");
+			close_and_invalidate(test_data->peer_sock);
+			return;
+		}
 	}
 }
 
@@ -1338,6 +1465,7 @@ ZTEST(net_socket_tls, test_send_block)
 	k_sleep(K_MSEC(150));
 
 	test_data.sock = new_sock;
+	test_data.peer_sock = &c_sock;
 	k_work_init_delayable(&test_data.work, recv_work_handler);
 	test_work_reschedule(&test_data.work, K_MSEC(10));
 
@@ -1354,6 +1482,10 @@ ZTEST(net_socket_tls, test_send_block)
 	ret = zsock_recv(new_sock, rx_buf, sizeof(rx_buf), ZSOCK_MSG_DONTWAIT);
 	zassert_equal(ret, -1, "zsock_recv() should've failed");
 	zassert_equal(errno, EAGAIN, "Unexpected errno value: %d", errno);
+
+	/* Check that the recv work received correct data */
+	test_work_wait(&test_data.work);
+	zassert_false(test_data.failed);
 
 	test_sockets_close();
 
@@ -1439,6 +1571,7 @@ ZTEST(net_socket_tls, test_so_rcvtimeo)
 		     "was %dms", time_diff);
 
 	test_data.sock = c_sock;
+	test_data.peer_sock = &new_sock;
 	k_work_init_delayable(&test_data.tx_work, send_work_handler);
 	test_work_reschedule(&test_data.tx_work, K_MSEC(10));
 
@@ -1494,12 +1627,17 @@ ZTEST(net_socket_tls, test_so_sndtimeo)
 			"was %dms", time_diff);
 
 	test_data.sock = new_sock;
+	test_data.peer_sock = &c_sock;
 	k_work_init_delayable(&test_data.work, recv_work_handler);
 	test_work_reschedule(&test_data.work, K_MSEC(10));
 
 	/* Should block and succeed. */
 	ret = zsock_send(c_sock, TEST_STR_SMALL, strlen(TEST_STR_SMALL), 0);
 	zassert_equal(ret, strlen(TEST_STR_SMALL), "zsock_send() failed");
+
+	/* Check that the recv work received correct data */
+	test_work_wait(&test_data.work);
+	zassert_false(test_data.failed);
 
 	test_sockets_close();
 
@@ -1573,10 +1711,12 @@ ZTEST(net_socket_tls, test_send_while_recv)
 	test_prepare_tls_connection(NET_AF_INET6);
 
 	test_data_c.sock = c_sock;
+	test_data_c.peer_sock = &new_sock;
 	k_work_init_delayable(&test_data_c.tx_work, send_work_handler);
 	test_work_reschedule(&test_data_c.tx_work, K_MSEC(10));
 
 	test_data_s.sock = new_sock;
+	test_data_s.peer_sock = &c_sock;
 	k_work_init_delayable(&test_data_s.tx_work, send_work_handler);
 	test_work_reschedule(&test_data_s.tx_work, K_MSEC(20));
 
@@ -1647,6 +1787,7 @@ ZTEST(net_socket_tls, test_poll_dtls_pollin)
 	zassert_equal(ret, 0, "Unexpected poll() event");
 
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	k_work_init_delayable(&test_data.tx_work, send_work_handler);
 	test_work_reschedule(&test_data.tx_work, K_NO_WAIT);
 
@@ -1658,6 +1799,95 @@ ZTEST(net_socket_tls, test_poll_dtls_pollin)
 	ret = zsock_recv(s_sock, rx_buf, sizeof(rx_buf), ZSOCK_MSG_DONTWAIT);
 	zassert_equal(ret, sizeof(TEST_STR_SMALL) - 1, "zsock_recv() failed");
 	zassert_mem_equal(rx_buf, TEST_STR_SMALL, ret, "Invalid data received");
+
+	test_sockets_close();
+
+	/* Small delay for the final alert exchange */
+	k_msleep(10);
+}
+
+static uint8_t coalesce_buf[512];
+static size_t coalesce_len;
+
+/* Collect the ciphertext of a record instead of sending it. */
+static int coalesce_send(void *ctx, const unsigned char *buf, size_t len)
+{
+	ARG_UNUSED(ctx);
+
+	if (len > sizeof(coalesce_buf) - coalesce_len) {
+		return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+	}
+
+	memcpy(coalesce_buf + coalesce_len, buf, len);
+	coalesce_len += len;
+
+	return (int)len;
+}
+
+/* A datagram can carry more than one DTLS record. Mbed TLS reads the whole
+ * datagram in and processes one record at a time, so once the application
+ * has consumed the first record, the socket has no readiness left to report
+ * while Mbed TLS still holds the second one. poll() has to report that
+ * record instead of waiting for a datagram which never comes.
+ */
+ZTEST(net_socket_tls, test_poll_dtls_second_record_in_datagram)
+{
+	static const uint8_t rec_a = 'A';
+	static const uint8_t rec_b = 'B';
+	mbedtls_ssl_context *ssl;
+	mbedtls_ssl_send_t *orig_send;
+	mbedtls_ssl_recv_t *orig_recv;
+	struct zsock_pollfd fds[1];
+	void *p_bio;
+	uint8_t byte;
+	int ret;
+
+	test_prepare_dtls_connection(NET_AF_INET6);
+
+	ssl = ztls_get_mbedtls_ssl_context(s_sock);
+	zassert_not_null(ssl, "No Mbed TLS context for the server socket");
+
+	orig_send = ssl->MBEDTLS_PRIVATE(f_send);
+	orig_recv = ssl->MBEDTLS_PRIVATE(f_recv);
+	p_bio = ssl->MBEDTLS_PRIVATE(p_bio);
+
+	/* Hold both records back, so that they can be handed over in one
+	 * datagram below.
+	 */
+	coalesce_len = 0;
+	mbedtls_ssl_set_bio(ssl, p_bio, coalesce_send, orig_recv, NULL);
+
+	ret = zsock_send(s_sock, &rec_a, sizeof(rec_a), 0);
+	zassert_equal(ret, sizeof(rec_a), "Cannot write the first record");
+
+	ret = zsock_send(s_sock, &rec_b, sizeof(rec_b), 0);
+	zassert_equal(ret, sizeof(rec_b), "Cannot write the second record");
+
+	mbedtls_ssl_set_bio(ssl, p_bio, orig_send, orig_recv, NULL);
+
+	ret = orig_send(p_bio, coalesce_buf, coalesce_len);
+	zassert_equal(ret, coalesce_len, "Cannot send the records");
+
+	fds[0].fd = c_sock;
+	fds[0].events = ZSOCK_POLLIN;
+
+	ret = zsock_poll(fds, 1, 500);
+	zassert_equal(ret, 1, "poll() did not report the datagram");
+
+	ret = zsock_recv(c_sock, &byte, 1, 0);
+	zassert_equal(ret, 1, "Cannot read the first record");
+	zassert_equal(byte, rec_a, "Wrong first record");
+
+	/* The datagram is gone from the socket at this point, the second
+	 * record only exists inside Mbed TLS.
+	 */
+	ret = zsock_poll(fds, 1, 500);
+	zassert_equal(ret, 1, "poll() did not report the second record");
+	zassert_true(fds[0].revents & ZSOCK_POLLIN, "No POLLIN event");
+
+	ret = zsock_recv(c_sock, &byte, 1, 0);
+	zassert_equal(ret, 1, "Cannot read the second record");
+	zassert_equal(byte, rec_b, "Wrong second record");
 
 	test_sockets_close();
 
@@ -1959,10 +2189,22 @@ static void dtls_client_connect_send_no_assert_work_handler(struct k_work *work)
 	ret = zsock_connect(data->sock, data->addr, data->addr->sa_family == NET_AF_INET ?
 			    sizeof(struct net_sockaddr_in) : sizeof(struct net_sockaddr_in6));
 	if (ret < 0) {
+		printk("zsock_connect() failed (%d)\n", errno);
+		close_and_invalidate(data->peer_sock);
 		return;
 	}
 
-	zsock_send(data->sock, &tx_buf, sizeof(tx_buf), 0);
+	ret = zsock_send(data->sock, &tx_buf, sizeof(tx_buf), 0);
+	if (ret < 0) {
+		printk("zsock_send() failed (%d)\n", errno);
+		close_and_invalidate(data->peer_sock);
+		return;
+	}
+	if (ret != sizeof(tx_buf)) {
+		printk("zsock_send() sent %d instead of %zu\n", ret, sizeof(tx_buf));
+		close_and_invalidate(data->peer_sock);
+		return;
+	}
 }
 
 static void dtls_verify_address(struct net_sockaddr *addr, net_socklen_t addrlen,
@@ -2062,6 +2304,7 @@ static void test_dtls_server_multi_client_hs_in_poll(net_sa_family_t family)
 
 	/* Client 1 handshake */
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = &s_saddr;
 	k_work_init_delayable(&test_data.work, dtls_client_connect_send_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -2086,6 +2329,7 @@ static void test_dtls_server_multi_client_hs_in_poll(net_sa_family_t family)
 
 	/* Client 2 handshake */
 	test_data.sock = c_sock_2;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = &s_saddr;
 	k_work_init_delayable(&test_data.work, dtls_client_connect_send_no_assert_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -2213,6 +2457,7 @@ static void test_dtls_server_multi_client_hs_in_recvfrom(net_sa_family_t family)
 
 	/* Client 1 handshake */
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = &s_saddr;
 	k_work_init_delayable(&test_data.work, dtls_client_connect_send_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -2228,6 +2473,7 @@ static void test_dtls_server_multi_client_hs_in_recvfrom(net_sa_family_t family)
 
 	/* Client 2 handshake */
 	test_data.sock = c_sock_2;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = &s_saddr;
 	k_work_init_delayable(&test_data.work, dtls_client_connect_send_no_assert_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -2328,6 +2574,7 @@ static void test_dtls_server_multi_client_prepare_two_connections(
 						    c_saddr_2);
 	/* Client 1 handshake */
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = s_saddr;
 	k_work_init_delayable(&test_data.work, dtls_client_connect_send_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -2342,6 +2589,7 @@ static void test_dtls_server_multi_client_prepare_two_connections(
 
 	/* Client 2 handshake */
 	test_data.sock = c_sock_2;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = s_saddr;
 	k_work_init_delayable(&test_data.work, dtls_client_connect_send_no_assert_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -2482,6 +2730,7 @@ static void test_dtls_server_cid_matching_on_addr_change(net_sa_family_t family)
 
 	/* Client 1 handshake */
 	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = &s_saddr;
 	k_work_init_delayable(&test_data.work, dtls_client_connect_send_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -2536,6 +2785,7 @@ static void test_dtls_server_cid_matching_on_addr_change(net_sa_family_t family)
 
 	/* Client 2 handshake */
 	test_data.sock = c_sock_2;
+	test_data.peer_sock = &s_sock;
 	test_data.addr = &s_saddr;
 	k_work_init_delayable(&test_data.work, dtls_client_connect_send_work_handler);
 	test_work_reschedule(&test_data.work, K_NO_WAIT);
@@ -2728,6 +2978,173 @@ ZTEST(net_socket_tls, test_v4_dtls_server_session_timeout_recvfrom)
 ZTEST(net_socket_tls, test_v6_dtls_server_session_timeout_recvfrom)
 {
 	test_dtls_server_session_timeout_recvfrom(NET_AF_INET6);
+}
+
+ZTEST(net_socket_tls, test_mfl_sockopt)
+{
+	int sock;
+	int mfl;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_NET_SOCKETS_TLS_SET_MAX_FRAGMENT_LENGTH)) {
+		ztest_test_skip();
+	}
+
+	sock = zsock_socket(NET_AF_INET, NET_SOCK_STREAM, NET_IPPROTO_TLS_1_2);
+	zassert_not_equal(sock, -1, "socket() failed (%d)", errno);
+
+	/* Valid values */
+	mfl = ZSOCK_TLS_MFL_DEFAULT;
+	ret = zsock_setsockopt(sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+			      &mfl, sizeof(mfl));
+	zassert_equal(ret, 0, "setsockopt(MFL_DEFAULT) failed (%d)", errno);
+
+	mfl = ZSOCK_TLS_MFL_DISABLED;
+	ret = zsock_setsockopt(sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+			      &mfl, sizeof(mfl));
+	zassert_equal(ret, 0, "setsockopt(MFL_DISABLED) failed (%d)", errno);
+
+	mfl = ZSOCK_TLS_MFL_512;
+	ret = zsock_setsockopt(sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+			      &mfl, sizeof(mfl));
+	zassert_equal(ret, 0, "setsockopt(MFL_512) failed (%d)", errno);
+
+	mfl = ZSOCK_TLS_MFL_4096;
+	ret = zsock_setsockopt(sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+			      &mfl, sizeof(mfl));
+	zassert_equal(ret, 0, "setsockopt(MFL_4096) failed (%d)", errno);
+
+	/* Out-of-range code */
+	mfl = ZSOCK_TLS_MFL_4096 + 1;
+	ret = zsock_setsockopt(sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+			      &mfl, sizeof(mfl));
+	zassert_equal(ret, -1, "setsockopt(invalid) should have failed");
+	zassert_equal(errno, EINVAL, "expected EINVAL, got %d", errno);
+
+	mfl = ZSOCK_TLS_MFL_DEFAULT - 1;
+	ret = zsock_setsockopt(sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+			      &mfl, sizeof(mfl));
+	zassert_equal(ret, -1, "setsockopt(below MFL_DEFAULT) should have failed");
+	zassert_equal(errno, EINVAL, "expected EINVAL, got %d", errno);
+
+	/* Wrong optlen */
+	mfl = ZSOCK_TLS_MFL_512;
+	ret = zsock_setsockopt(sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+			      &mfl, sizeof(uint8_t));
+	zassert_equal(ret, -1, "setsockopt(wrong len) should have failed");
+	zassert_equal(errno, EINVAL, "expected EINVAL, got %d", errno);
+
+	test_close(sock);
+}
+
+static void prepare_tls_client_with_sockopt_mfl(int *client_sock,
+						struct net_sockaddr *s_saddr, int mfl_value)
+{
+	struct net_sockaddr c_saddr, addr;
+	net_socklen_t addrlen = sizeof(addr);
+	struct connect_data test_data;
+	int accepted;
+	int mfl = mfl_value;
+
+	prepare_sock_tls_v4(MY_IPV4_ADDR, ANY_PORT, client_sock,
+			    (struct net_sockaddr_in *)&c_saddr, NET_IPPROTO_TLS_1_2);
+	test_config_psk(-1, *client_sock);
+	zassert_ok(zsock_setsockopt(*client_sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+				    &mfl, sizeof(mfl)), "setsockopt(MFL) failed (%d)", errno);
+
+	test_data.sock = *client_sock;
+	test_data.peer_sock = &s_sock;
+	test_data.addr = s_saddr;
+	k_work_init_delayable(&test_data.work, client_connect_work_handler);
+	test_work_reschedule(&test_data.work, K_NO_WAIT);
+
+	test_accept(s_sock, &accepted, &addr, &addrlen);
+	test_work_wait(&test_data.work);
+	test_close(accepted);
+}
+
+ZTEST(net_socket_tls, test_mfl_handshake)
+{
+	struct net_sockaddr s_saddr;
+	mbedtls_ssl_context *ssl;
+
+	if (!IS_ENABLED(CONFIG_NET_SOCKETS_TLS_SET_MAX_FRAGMENT_LENGTH)) {
+		ztest_test_skip();
+	}
+
+	prepare_sock_tls_v4(MY_IPV4_ADDR, ANY_PORT, &s_sock,
+			    (struct net_sockaddr_in *)&s_saddr, NET_IPPROTO_TLS_1_2);
+	test_config_psk(s_sock, -1);
+	test_bind(s_sock, &s_saddr, sizeof(struct net_sockaddr_in));
+	test_listen(s_sock);
+
+	prepare_tls_client_with_sockopt_mfl(&c_sock, &s_saddr, ZSOCK_TLS_MFL_512);
+	prepare_tls_client_with_sockopt_mfl(&c_sock_2, &s_saddr, ZSOCK_TLS_MFL_1024);
+
+	ssl = ztls_get_mbedtls_ssl_context(c_sock);
+	zassert_not_null(ssl, "Failed to get mbedTLS context for client 1");
+	zassert_equal(mbedtls_ssl_get_max_out_record_payload(ssl), 512,
+		      "MFL not negotiated to 512");
+
+	ssl = ztls_get_mbedtls_ssl_context(c_sock_2);
+	zassert_not_null(ssl, "Failed to get mbedTLS context for client 2");
+	zassert_equal(mbedtls_ssl_get_max_out_record_payload(ssl), 1024,
+		      "MFL not negotiated to 1024");
+}
+
+ZTEST(net_socket_tls, test_mfl_reset_to_default)
+{
+	struct net_sockaddr s_saddr, c_saddr, addr;
+	net_socklen_t addrlen = sizeof(addr);
+	struct connect_data test_data;
+	mbedtls_ssl_context *ssl;
+	int accepted;
+	int mfl;
+
+	if (!IS_ENABLED(CONFIG_NET_SOCKETS_TLS_SET_MAX_FRAGMENT_LENGTH)) {
+		ztest_test_skip();
+	}
+
+	prepare_sock_tls_v4(MY_IPV4_ADDR, ANY_PORT, &s_sock,
+			    (struct net_sockaddr_in *)&s_saddr, NET_IPPROTO_TLS_1_2);
+	test_config_psk(s_sock, -1);
+	test_bind(s_sock, &s_saddr, sizeof(struct net_sockaddr_in));
+	test_listen(s_sock);
+
+	prepare_sock_tls_v4(MY_IPV4_ADDR, ANY_PORT, &c_sock,
+			    (struct net_sockaddr_in *)&c_saddr, NET_IPPROTO_TLS_1_2);
+	test_config_psk(-1, c_sock);
+
+	/* Override to MFL_512, then reset back to the global default before
+	 * connecting, the handshake should reflect the reset, not the
+	 * earlier override.
+	 */
+	mfl = ZSOCK_TLS_MFL_512;
+	zassert_ok(zsock_setsockopt(c_sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+				    &mfl, sizeof(mfl)), "setsockopt(MFL_512) failed (%d)", errno);
+
+	mfl = ZSOCK_TLS_MFL_DEFAULT;
+	zassert_ok(zsock_setsockopt(c_sock, ZSOCK_SOL_TLS, ZSOCK_TLS_MAX_FRAGMENT_LENGTH,
+				    &mfl, sizeof(mfl)),
+		   "setsockopt(MFL_DEFAULT) failed (%d)", errno);
+
+	test_data.sock = c_sock;
+	test_data.peer_sock = &s_sock;
+	test_data.addr = &s_saddr;
+	k_work_init_delayable(&test_data.work, client_connect_work_handler);
+	test_work_reschedule(&test_data.work, K_NO_WAIT);
+
+	test_accept(s_sock, &accepted, &addr, &addrlen);
+	test_work_wait(&test_data.work);
+	test_close(accepted);
+
+	/* CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN and CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN
+	 * default to 1500, which auto-derives to MFL_1024.
+	 */
+	ssl = ztls_get_mbedtls_ssl_context(c_sock);
+	zassert_not_null(ssl, "Failed to get mbedTLS context");
+	zassert_equal(mbedtls_ssl_get_max_out_record_payload(ssl), 1024,
+		      "MFL not reset to global default (1024)");
 }
 
 static void *tls_tests_setup(void)

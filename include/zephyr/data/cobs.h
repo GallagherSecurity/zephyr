@@ -5,18 +5,40 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @file
+ * @brief Header file for the Consistent Overhead Byte Stuffing (COBS) encoding API.
+ * @ingroup cobs
+ */
+
 #ifndef ZEPHYR_INCLUDE_DATA_COBS_H_
 #define ZEPHYR_INCLUDE_DATA_COBS_H_
 
 #include <stddef.h>
 #include <sys/types.h>
 #include <zephyr/sys/util.h>
+
+#if defined(CONFIG_NET_BUF)
 #include <zephyr/net_buf.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/**
+ * @defgroup cobs COBS (Consistent Overhead Byte Stuffing)
+ * @since 4.2
+ * @version 0.1.0
+ * @ingroup utilities
+ * @{
+ *
+ * @brief COBS encoding and decoding functions with custom delimiter support
+ *
+ * Provides functions for COBS encoding/decoding with configurable delimiters.
+ * The implementation handles both standard zero-delimited COBS and custom
+ * delimiter variants.
+ */
 
 /**
  * @name COBS Encoder/Decoder Flags
@@ -37,7 +59,7 @@ extern "C" {
  * @brief Flag indicating that encode or decode should include a trailing delimiter
  *
  * When set, the encoder will append a delimiter byte after the encoded data,
- * and the decoder will accept a delimiter byte at the end of the encoded data.
+ * and the decoder will require a delimiter byte at the end of each frame.
  */
 #define COBS_FLAG_TRAILING_DELIMITER BIT(8)
 
@@ -65,18 +87,6 @@ extern "C" {
  */
 
 /**
- * @defgroup cobs COBS (Consistent Overhead Byte Stuffing)
- * @ingroup utilities
- * @{
- *
- * @brief COBS encoding and decoding functions with custom delimiter support
- *
- * Provides functions for COBS encoding/decoding with configurable delimiters.
- * The implementation handles both standard zero-delimited COBS and custom
- * delimiter variants.
- */
-
-/**
  * @brief Calculate maximum encoded buffer size
  *
  * @param decoded_size  Size of input data to be encoded
@@ -86,17 +96,23 @@ extern "C" {
  */
 static inline size_t cobs_max_encoded_len(size_t decoded_size, uint32_t flags)
 {
-	if (flags & COBS_FLAG_TRAILING_DELIMITER) {
-		return decoded_size + decoded_size / 254 + 1 + 1;
-	} else {
-		return decoded_size + decoded_size / 254 + 1;
+	size_t len = decoded_size + decoded_size / 254U + 1U;
+
+	if ((flags & COBS_FLAG_TRAILING_DELIMITER) != 0U) {
+		len++;
 	}
+
+	return len;
 }
+
+#if defined(CONFIG_NET_BUF) || defined(__DOXYGEN__)
 
 /**
  * @brief COBS encoding
  *
  * Encodes data from source buffer to destination buffer using COBS encoding.
+ * On success the source buffer is pulled completely, on error neither buffer
+ * is modified.
  *
  * @param src        Source buffer to encode
  * @param dst        Destination buffer for encoded data
@@ -104,25 +120,37 @@ static inline size_t cobs_max_encoded_len(size_t decoded_size, uint32_t flags)
  *
  * @retval 0        Success
  * @retval -ENOMEM  Insufficient destination space
- * @retval -EINVAL  Invalid COBS structure or parameters
+ *
+ * @kconfig_dep{CONFIG_NET_BUF}
  */
-
 int cobs_encode(struct net_buf *src, struct net_buf *dst, uint32_t flags);
 
 /**
  * @brief COBS decoding
  *
- * Decodes COBS-encoded data from source buffer to destination buffer.
+ * Decodes a single COBS frame from source buffer to destination buffer. On
+ * success the frame is pulled from the source buffer, on error neither buffer
+ * is modified.
+ *
+ * With @ref COBS_FLAG_TRAILING_DELIMITER decoding stops at the delimiter ending
+ * the first frame, and the data following it is left in the source buffer.
+ * Delimiters before the frame are pulled with it.
  *
  * @param src        Source buffer to decode
  * @param dst        Destination buffer for decoded data
  * @param flags      Decoding flags @ref COBS_FLAGS
  *
  * @retval 0        Success
+ * @retval -EAGAIN  No complete frame in the source buffer, only with
+ *                  @ref COBS_FLAG_TRAILING_DELIMITER
  * @retval -ENOMEM  Insufficient destination space
  * @retval -EINVAL  Invalid COBS structure or parameters
+ *
+ * @kconfig_dep{CONFIG_NET_BUF}
  */
 int cobs_decode(struct net_buf *src, struct net_buf *dst, uint32_t flags);
+
+#endif /* defined(CONFIG_NET_BUF) || defined(__DOXYGEN__) */
 
 /**
  * @brief Callback function type for streaming COBS encoder/decoder
@@ -131,15 +159,23 @@ int cobs_decode(struct net_buf *src, struct net_buf *dst, uint32_t flags);
  * processed data chunks.
  * A decoder that allows trailing delimiters and encounters one will invoke
  * this callback with a NULL pointer and zero length indicating a completed frame.
+ * Delimiters that do not end a frame, such as consecutive delimiters, are ignored.
  *
  * When this callback function returns a negative error value, the encoder or decoder
  * stream is aborted and the error will be propagated.
+ *
+ * When this callback function returns a positive value for a completed frame, the
+ * decoder stops after the frame's delimiter, see cobs_decoder_write(). Positive
+ * values returned for data chunks, or by an encoder callback, are ignored.
+ *
+ * @p buf is only valid for the duration of the call.
  *
  * @param buf        Buffer containing processed data
  * @param len        Length of data in buffer
  * @param user_data  User-provided context pointer
  *
- * @return 0 on success, negative errno code on failure
+ * @return 0 on success, positive value to stop decoding at a frame end,
+ *         negative errno code on failure
  */
 typedef int (*cobs_stream_cb)(const uint8_t *buf, size_t len, void *user_data);
 
@@ -176,7 +212,7 @@ struct cobs_decoder {
 	/** User data pointer passed to callback */
 	void *cb_user_data;
 
-	/** Current COBS code byte being processed */
+	/** Current COBS code byte being processed, 0 if no frame was started */
 	uint8_t code;
 	/** Position within current code block */
 	uint8_t code_index;
@@ -197,7 +233,8 @@ struct cobs_decoder {
  * @param user_data  User data pointer passed to callback
  * @param flags      Encoding flags @ref COBS_FLAGS
  *
- * @return 0 on success, negative errno code on failure
+ * @retval 0        Success
+ * @retval -EINVAL  @p cb is NULL
  */
 int cobs_encoder_init(struct cobs_encoder *enc, cobs_stream_cb cb, void *user_data, uint32_t flags);
 
@@ -211,7 +248,8 @@ int cobs_encoder_init(struct cobs_encoder *enc, cobs_stream_cb cb, void *user_da
  *
  * @param enc Pointer to encoder structure
  *
- * @return 0 on success, negative errno code on failure
+ * @retval 0       Success
+ * @retval -errno  Negative errno code returned by the callback
  */
 int cobs_encoder_close(struct cobs_encoder *enc);
 
@@ -222,13 +260,14 @@ int cobs_encoder_close(struct cobs_encoder *enc);
  * callback function. This function can be called multiple times to encode
  * data incrementally.
  *
- * In case an error is returned, the encoder state will be reset.
+ * In case an error is returned, the encoder state will be reset. Encoded groups of
+ * the current frame may already have been passed to the callback.
  *
  * @param enc Pointer to encoder structure
  * @param buf Buffer containing data to encode
  * @param len Length of data in buffer
  *
- * @return Number of bytes used from @p buf on success, negative errno code on failure
+ * @return @p len on success, negative errno code returned by the callback on failure
  */
 int cobs_encoder_write(struct cobs_encoder *enc, const uint8_t *buf, size_t len);
 
@@ -244,7 +283,8 @@ int cobs_encoder_write(struct cobs_encoder *enc, const uint8_t *buf, size_t len)
  * @param user_data  User data pointer passed to callback
  * @param flags      Decoding flags @ref COBS_FLAGS
  *
- * @return 0 on success, negative errno code on failure
+ * @retval 0        Success
+ * @retval -EINVAL  @p cb is NULL
  */
 int cobs_decoder_init(struct cobs_decoder *dec, cobs_stream_cb cb, void *user_data, uint32_t flags);
 
@@ -254,12 +294,16 @@ int cobs_decoder_init(struct cobs_decoder *dec, cobs_stream_cb cb, void *user_da
  * Completes the decoding process and verifies that the stream ended properly.
  * Should be called after all data has been written to the decoder.
  *
+ * Without @ref COBS_FLAG_TRAILING_DELIMITER the stream must hold exactly one
+ * complete frame. With @ref COBS_FLAG_TRAILING_DELIMITER the stream must end
+ * with a delimiter, or hold no frame at all.
+ *
  * The decoder state will be reset.
  *
  * @param dec Pointer to decoder structure
  *
  * @retval 0        Success
- * @retval -EINVAL  More data was expected before closing
+ * @retval -EINVAL  Missing, incomplete or unterminated frame
  */
 int cobs_decoder_close(struct cobs_decoder *dec);
 
@@ -274,13 +318,17 @@ int cobs_decoder_close(struct cobs_decoder *dec);
  *
  * @note If a delimiter is encountered, and the @ref COBS_FLAG_TRAILING_DELIMITER flag
  *       is set, the registered callback function will be called with a NULL pointer
- *       indicating a frame end.
+ *       indicating a frame end. Delimiters received before the first code byte of a
+ *       frame are ignored. If the callback returns a positive value, decoding stops
+ *       after the delimiter and the remaining data in @p buf is not used.
  *
  * @param dec Pointer to decoder structure
  * @param buf Buffer containing encoded data
  * @param len Length of data in buffer
  *
- * @return Number of bytes used from @p buf on success, negative errno code on failure
+ * @return Number of bytes used from @p buf on success, which is @p len unless the
+ *         callback stopped at a frame end, -EINVAL on an unexpected delimiter, or a
+ *         negative errno code returned by the callback
  */
 int cobs_decoder_write(struct cobs_decoder *dec, const uint8_t *buf, size_t len);
 

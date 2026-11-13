@@ -40,10 +40,18 @@ void z_shell_log_backend_enable(const struct shell_log_backend *backend,
 
 	if (err == 0) {
 		fifo_reset(backend);
-		log_backend_enable(backend->backend, ctx, init_log_level);
 		log_output_ctx_set(backend->log_output, ctx);
 		backend->control_block->dropped_cnt = 0;
 		backend->control_block->state = SHELL_LOG_BACKEND_ENABLED;
+		/*
+		 * Activate the backend in the logging core as the last step.
+		 * The core dispatches messages only to active backends, so
+		 * once this call returns process() may be invoked from any
+		 * context and must already see a fully initialized backend.
+		 * Otherwise a message processed before the state is set would
+		 * hit the SHELL_LOG_BACKEND_DISABLED case and be lost.
+		 */
+		log_backend_enable(backend->backend, ctx, init_log_level);
 	}
 }
 
@@ -172,6 +180,7 @@ static void process_log_msg(const struct shell *sh,
 {
 	unsigned int key = 0;
 	uint32_t flags = SHELL_LOG_BASE_FLAGS;
+	bool readline_active = sh->ctx->readline_state == SHELL_READLINE_ACTIVE;
 
 	if (colors) {
 		flags |= LOG_OUTPUT_FLAG_COLORS;
@@ -189,7 +198,10 @@ static void process_log_msg(const struct shell *sh,
 		} else {
 			z_shell_lock(sh);
 		}
-		if (!z_flag_cmd_ctx_get(sh)) {
+		if (readline_active) {
+			z_cursor_restore(sh);
+			z_clear_eos(sh);
+		} else if (!z_flag_cmd_ctx_get(sh) && !sh->ctx->bypass) {
 			z_shell_cmd_line_erase(sh);
 		}
 	}
@@ -197,7 +209,15 @@ static void process_log_msg(const struct shell *sh,
 	log_output_msg_process(log_output, &msg->log, flags);
 
 	if (locked) {
-		if (!z_flag_cmd_ctx_get(sh)) {
+		if (readline_active) {
+			z_cursor_save(sh);
+			if (sh->ctx->readline_prompt != NULL) {
+				z_shell_fprintf(sh, SHELL_NORMAL, "%s",
+						sh->ctx->readline_prompt);
+			}
+			z_shell_print_cmd(sh);
+			z_shell_op_cursor_position_synchronize(sh);
+		} else if (!z_flag_cmd_ctx_get(sh) && !sh->ctx->bypass) {
 			z_shell_print_prompt_and_cmd(sh);
 		}
 		if (k_is_in_isr()) {

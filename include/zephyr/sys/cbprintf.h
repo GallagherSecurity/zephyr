@@ -17,19 +17,6 @@
 #include <stdio.h>
 #endif /* CONFIG_CBPRINTF_LIBC_SUBSTS */
 
-/* Determine if _Generic is supported using macro from toolchain.h.
- *
- * @note Z_C_GENERIC is also set for C++ where functionality is implemented
- * using overloading and templates.
- */
-#ifndef Z_C_GENERIC
-#if defined(__cplusplus) || TOOLCHAIN_HAS_C_GENERIC
-#define Z_C_GENERIC 1
-#else
-#define Z_C_GENERIC 0
-#endif
-#endif
-
 #ifdef __xtensa__
 #define Z_PKG_HDR_EXT_XTENSA_ALIGNMENT 8
 #ifdef CONFIG_CBPRINTF_PACKAGE_HEADER_STORE_CREATION_FLAGS
@@ -120,7 +107,6 @@ BUILD_ASSERT(sizeof(struct cbprintf_package_hdr_ext) % Z_PKG_HDR_EXT_XTENSA_ALIG
  * @endcond
  */
 
-/* Z_C_GENERIC is used there */
 #include <zephyr/sys/cbprintf_internal.h>
 
 #ifdef __cplusplus
@@ -277,30 +263,19 @@ BUILD_ASSERT(Z_IS_POW2(CBPRINTF_PACKAGE_ALIGNMENT));
  *
  * This function expects two parameters:
  *
- * * @p c a character to output.  The output behavior should be as if
+ * @param c a character to output.  The output behavior should be as if
  *   this was cast to an unsigned char.
- * * @p ctx a pointer to an object that provides context for the
+ * @param ctx a pointer to an object that provides context for the
  *   output operation.
  *
- * The declaration does not specify the parameter types.  This allows a
- * function like @c fputc to be used without requiring all context pointers to
- * be to a @c FILE object.
+ * A function like @c fputc can be used by casting it to @c cbprintf_cb,
+ * e.g. @c (cbprintf_cb)fputc.
  *
  * @return the value of @p c cast to an unsigned char then back to
  * int, or a negative error code that will be returned from
  * cbprintf().
  */
-#ifdef __CHECKER__
 typedef int (*cbprintf_cb)(int c, void *ctx);
-#else
-typedef int (*cbprintf_cb)(/* int c, void *ctx */);
-#endif
-
-/* Create local cbprintf_cb type to make calng-based compilers happy when handles
- * OUTC() macro (see below). With strict rules (Wincompatible-function-pointer-types-strict)
- * it's prohibited to pass arguments with mismatched types.
- */
-typedef int (*cbprintf_cb_local)(int c, void *ctx);
 
 /** @brief Signature for a cbprintf multibyte callback function.
  *

@@ -187,15 +187,18 @@ int adt7420_trigger_set(const struct device *dev,
 		return -ENOTSUP;
 	}
 
-	setup_int(dev, false);
-	setup_ct(dev, false);
-
 	if (trig->type != SENSOR_TRIG_THRESHOLD) {
 		LOG_ERR("Unsupported sensor trigger");
 		return -ENOTSUP;
 	}
 
 	if (trig->chan == SENSOR_CHAN_ADT7420_CRIT_TEMP) {
+		if (cfg->ct_gpio.port == NULL) {
+			return -ENOTSUP;
+		}
+
+		setup_ct(dev, false);
+
 		drv_data->ct_handler = handler;
 		if (handler != NULL) {
 			drv_data->ct_trigger = trig;
@@ -210,6 +213,12 @@ int adt7420_trigger_set(const struct device *dev,
 			}
 		}
 	} else {
+		if (cfg->int_gpio.port == NULL) {
+			return -ENOTSUP;
+		}
+
+		setup_int(dev, false);
+
 		drv_data->th_handler = handler;
 
 		if (handler != NULL) {
@@ -240,8 +249,7 @@ int adt7420_init_interrupt(const struct device *dev)
 	/* INT GPIO */
 	if (cfg->int_gpio.port) {
 		if (!gpio_is_ready_dt(&cfg->int_gpio)) {
-			LOG_ERR("%s: device %s is not ready", dev->name,
-				cfg->int_gpio.port->name);
+			LOG_ERR_DEVICE_NOT_READY(cfg->int_gpio.port);
 			return -ENODEV;
 		}
 		gpio_init_callback(&drv_data->int_gpio_cb,
@@ -265,8 +273,7 @@ int adt7420_init_interrupt(const struct device *dev)
 	/* CT GPIO */
 	if (cfg->ct_gpio.port) {
 		if (!gpio_is_ready_dt(&cfg->ct_gpio)) {
-			LOG_ERR("%s: device %s is not ready", dev->name,
-				cfg->ct_gpio.port->name);
+			LOG_ERR_DEVICE_NOT_READY(cfg->ct_gpio.port);
 			return -ENODEV;
 		}
 		gpio_init_callback(&drv_data->ct_gpio_cb,

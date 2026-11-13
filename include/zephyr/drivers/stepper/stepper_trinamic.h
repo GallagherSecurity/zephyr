@@ -2,6 +2,7 @@
  * @file drivers/stepper/stepper_trinamic.h
  *
  * @brief Public API for Trinamic Stepper Controller Specific Functions
+ * @ingroup trinamic_stepper_ctrl
  *
  */
 
@@ -18,7 +19,7 @@
 /**
  * @brief Trinamic Stepper Controller
  * @defgroup trinamic_stepper_ctrl Trinamic Stepper Controller
- * @ingroup stepper_ctrl
+ * @ingroup stepper_interface_ext
  * @since 4.0
  * @version 0.9.0
  * @{
@@ -31,140 +32,73 @@
 extern "C" {
 #endif
 
-/**
- * @brief Trinamic stepper controller ramp generator data limits
- */
-#define TMC_RAMP_VSTART_MAX     GENMASK(17, 0)
-#define TMC_RAMP_VSTART_MIN     0
-#define TMC_RAMP_V1_MAX         GENMASK(19, 0)
-#define TMC_RAMP_V1_MIN         0
-#define TMC_RAMP_VMAX_MAX       (GENMASK(22, 0) - 512)
-#define TMC_RAMP_VMAX_MIN       0
-#define TMC_RAMP_A1_MAX         GENMASK(15, 0)
-#define TMC_RAMP_A1_MIN         0
-#define TMC_RAMP_AMAX_MAX       GENMASK(15, 0)
-#define TMC_RAMP_AMAX_MIN       0
-#define TMC_RAMP_D1_MAX         GENMASK(15, 0)
-#define TMC_RAMP_D1_MIN         1
-#define TMC_RAMP_DMAX_MAX       GENMASK(15, 0)
-#define TMC_RAMP_DMAX_MIN       0
-#define TMC_RAMP_VSTOP_MAX      GENMASK(17, 0)
-#define TMC_RAMP_VSTOP_MIN      1
-#define TMC_RAMP_TZEROWAIT_MAX  (GENMASK(15, 0) - 512)
-#define TMC_RAMP_TZEROWAIT_MIN  0
-#define TMC_RAMP_IHOLD_IRUN_MAX GENMASK(4, 0)
-#define TMC_RAMP_IHOLD_IRUN_MIN 0
-#define TMC_RAMP_IHOLDDELAY_MAX GENMASK(3, 0)
-#define TMC_RAMP_IHOLDDELAY_MIN 0
-#define TMC_RAMP_VACTUAL_SHIFT  22
+/** @cond INTERNAL_HIDDEN */
+#define TMC_RAMP_VACTUAL_SHIFT  23
 #define TMC_RAMP_XACTUAL_SHIFT  31
+/** @endcond */
 
-/* TMC50XX specific */
-#define TMC_RAMP_VCOOLTHRS_MAX  GENMASK(22, 0)
-#define TMC_RAMP_VCOOLTHRS_MIN  0
-#define TMC_RAMP_VHIGH_MAX      GENMASK(22, 0)
-#define TMC_RAMP_VHIGH_MIN      0
-
-/* TMC51XX specific */
-#define TMC_RAMP_TPOWERDOWN_MAX	GENMASK(7, 0)
-#define TMC_RAMP_TPOWERDOWN_MIN	0
-#define TMC_RAMP_TPWMTHRS_MAX	GENMASK(19, 0)
-#define TMC_RAMP_TPWMTHRS_MIN	0
-#define TMC_RAMP_TCOOLTHRS_MAX	GENMASK(19, 0)
-#define TMC_RAMP_TCOOLTHRS_MIN	0
-#define TMC_RAMP_THIGH_MAX	GENMASK(19, 0)
-#define TMC_RAMP_THIGH_MIN	0
+/**
+ * @brief Trinamic Stepper StallGuard Settings
+ */
+struct tmc_stallguard_settings {
+	/** Enable StallGuard2 feature*/
+	bool is_sg_enabled;
+	/**
+	 * Stallguard should not be enabled during motor spin-up.
+	 * This delay is used to check if the actual stepper velocity is greater than
+	 * stallguard-threshold-velocity before enabling stallguard.
+	 */
+	uint16_t sg_velocity_check_interval_ms;
+	/** StallGuard2 threshold velocity */
+	uint32_t sg_threshold_velocity;
+};
 
 /**
  * @brief Trinamic Stepper Ramp Generator data
  */
 struct tmc_ramp_generator_data {
+	/** Motor start velocity */
 	uint32_t vstart;
+	/** First acceleration/deceleration phase threshold velocity */
 	uint32_t v1;
+	/** Motion ramp target velocity */
 	uint32_t vmax;
+	/** First acceleration between VSTART and V1 */
 	uint16_t a1;
+	/** Second acceleration between V1 and VMAX */
 	uint16_t amax;
+	/** Deceleration between V1 and VSTOP */
 	uint16_t d1;
+	/** Deceleration between VMAX and V1 */
 	uint16_t dmax;
+	/** Motor stop velocity */
 	uint32_t vstop;
+	/** Waiting time after ramping down to zero velocity before next movement */
 	uint16_t tzerowait;
+	/** Hold and run current settings (combined IHOLD_IRUN register value) */
 	uint32_t iholdrun;
+	/** Controller family specific ramp parameters */
 	union {
-		/* TMC50XX specific */
+		/** TMC50XX specific ramp parameters */
 		struct {
+			/** Lower threshold velocity for switching on CoolStep and StallGuard */
 			uint32_t vcoolthrs;
+			/** Velocity threshold for switching to a different chopper mode */
 			uint32_t vhigh;
 		};
-		/* TMC51XX specific */
+		/** TMC51XX specific ramp parameters */
 		struct {
+			/** Delay time from stand still to motor current power down */
 			uint32_t tpowerdown;
+			/** Upper velocity threshold for StealthChop voltage PWM mode */
 			uint32_t tpwmthrs;
+			/** Lower threshold velocity for switching on CoolStep and StallGuard */
 			uint32_t tcoolthrs;
+			/** Velocity threshold for switching to a different chopper mode */
 			uint32_t thigh;
 		};
 	};
 };
-
-/**
- * @brief Check if Ramp DT data is within limits
- */
-#define CHECK_RAMP_DT_DATA(node)							\
-	COND_CODE_1(DT_PROP_EXISTS(node, vstart),					\
-		BUILD_ASSERT(IN_RANGE(DT_PROP(node, vstart), TMC_RAMP_VSTART_MIN,	\
-			      TMC_RAMP_VSTART_MAX), "vstart out of range"), ());	\
-	COND_CODE_1(DT_PROP_EXISTS(node, v1),						\
-		BUILD_ASSERT(IN_RANGE(DT_PROP(node, v1), TMC_RAMP_V1_MIN,		\
-			      TMC_RAMP_V1_MAX), "v1 out of range"), ());		\
-	COND_CODE_1(DT_PROP_EXISTS(node, vmax),						\
-		BUILD_ASSERT(IN_RANGE(DT_PROP(node, vmax), TMC_RAMP_VMAX_MIN,		\
-			      TMC_RAMP_VMAX_MAX), "vmax out of range"), ());		\
-	COND_CODE_1(DT_PROP_EXISTS(node, a1),						\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, a1), TMC_RAMP_A1_MIN,			\
-			      TMC_RAMP_A1_MAX), "a1 out of range"), ());		\
-	COND_CODE_1(DT_PROP_EXISTS(node, amax),						\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, amax), TMC_RAMP_AMAX_MIN,			\
-			      TMC_RAMP_AMAX_MAX), "amax out of range"), ());		\
-	COND_CODE_1(DT_PROP_EXISTS(node, d1),						\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, d1), TMC_RAMP_D1_MIN,			\
-			      TMC_RAMP_D1_MAX), "d1 out of range"), ());		\
-	COND_CODE_1(DT_PROP_EXISTS(node, dmax),						\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, dmax), TMC_RAMP_DMAX_MIN,			\
-			      TMC_RAMP_DMAX_MAX), "dmax out of range"), ());		\
-	COND_CODE_1(DT_PROP_EXISTS(node, vstop),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, vstop), TMC_RAMP_VSTOP_MIN,			\
-			      TMC_RAMP_VSTOP_MAX), "vstop out of range"), ());		\
-	COND_CODE_1(DT_PROP_EXISTS(node, tzerowait),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, tzerowait), TMC_RAMP_TZEROWAIT_MIN,		\
-			      TMC_RAMP_TZEROWAIT_MAX), "tzerowait out of range"), ());	\
-	COND_CODE_1(DT_PROP_EXISTS(node, ihold),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, ihold), TMC_RAMP_IHOLD_IRUN_MIN,		\
-			      TMC_RAMP_IHOLD_IRUN_MAX), "ihold out of range"), ());	\
-	COND_CODE_1(DT_PROP_EXISTS(node, irun),						\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, irun), TMC_RAMP_IHOLD_IRUN_MIN,		\
-			      TMC_RAMP_IHOLD_IRUN_MAX), "irun out of range"), ());	\
-	COND_CODE_1(DT_PROP_EXISTS(node, iholddelay),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, iholddelay), TMC_RAMP_IHOLDDELAY_MIN,	\
-			      TMC_RAMP_IHOLDDELAY_MAX), "iholddelay out of range"), ());\
-	/* TMC50XX specific */								\
-	COND_CODE_1(DT_PROP_EXISTS(node, vcoolthrs),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, vcoolthrs), TMC_RAMP_VCOOLTHRS_MIN,		\
-			      TMC_RAMP_VCOOLTHRS_MAX), "vcoolthrs out of range"), ());	\
-	COND_CODE_1(DT_PROP_EXISTS(node, vhigh),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, vhigh), TMC_RAMP_VHIGH_MIN,			\
-			      TMC_RAMP_VHIGH_MAX), "vhigh out of range"), ());		\
-	/* TMC51XX specific */								\
-	COND_CODE_1(DT_PROP_EXISTS(node, tpowerdown),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, tpowerdown), TMC_RAMP_TPOWERDOWN_MIN,	\
-			      TMC_RAMP_TPOWERDOWN_MAX), "tpowerdown out of range"), ());\
-	COND_CODE_1(DT_PROP_EXISTS(node, tpwmthrs),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, tpwmthrs), TMC_RAMP_TPWMTHRS_MIN,		\
-			      TMC_RAMP_TPWMTHRS_MAX), "tpwmthrs out of range"), ());	\
-	COND_CODE_1(DT_PROP_EXISTS(node, tcoolthrs),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, tcoolthrs), TMC_RAMP_TCOOLTHRS_MIN,		\
-			      TMC_RAMP_TCOOLTHRS_MAX), "tcoolthrs out of range"), ());	\
-	COND_CODE_1(DT_PROP_EXISTS(node, thigh),					\
-	BUILD_ASSERT(IN_RANGE(DT_PROP(node, thigh), TMC_RAMP_THIGH_MIN,			\
-			      TMC_RAMP_THIGH_MAX), "thigh out of range"), ());
 
 /**
  * @brief Get Trinamic Stepper Ramp Generator data from DT
@@ -187,6 +121,13 @@ struct tmc_ramp_generator_data {
 			     TMC5XXX_IHOLD(DT_PROP(node, ihold)) |		\
 			     TMC5XXX_IHOLDDELAY(DT_PROP(node, iholddelay))),
 
+/**
+ * @brief Get TMC50XX Stepper Ramp Generator data from DT
+ *
+ * @param node DT node identifier
+ *
+ * @return struct tmc_ramp_generator_data
+ */
 #define TMC_RAMP_DT_SPEC_GET_TMC50XX(node)					\
 	{									\
 		TMC_RAMP_DT_SPEC_GET_COMMON(node)				\
@@ -194,6 +135,13 @@ struct tmc_ramp_generator_data {
 		.vcoolthrs = DT_PROP(node, vcoolthrs),				\
 	}
 
+/**
+ * @brief Get TMC51XX Stepper Ramp Generator data from DT
+ *
+ * @param node DT driver instance number
+ *
+ * @return struct tmc_ramp_generator_data
+ */
 #define TMC_RAMP_DT_SPEC_GET_TMC51XX(node)					\
 	{									\
 		TMC_RAMP_DT_SPEC_GET_COMMON(DT_DRV_INST(node))			\
@@ -226,6 +174,25 @@ int tmc50xx_stepper_ctrl_set_ramp(const struct device *dev,
  * @retval 0 Success
  */
 int tmc50xx_stepper_ctrl_set_max_velocity(const struct device *dev, uint32_t velocity);
+
+/**
+ * @brief Configure TMC50XX Stepper StallGuard settings
+ *
+ * @param dev Pointer to the stepper motor controller instance
+ * @param sg_settings Pointer to a struct containing the required StallGuard parameters
+ *
+ */
+void tmc50xx_stepper_ctrl_configure_stallguard(const struct device *dev,
+					       const struct tmc_stallguard_settings *sg_settings);
+
+/**
+ * @brief Configure TMC51XX Stepper StallGuard settings
+ *
+ * @param dev Pointer to the stepper motor controller instance
+ * @param sg_settings Pointer to a struct containing the required StallGuard parameters
+ */
+void tmc51xx_stepper_ctrl_configure_stallguard(const struct device *dev,
+					       const struct tmc_stallguard_settings *sg_settings);
 
 /**
  * @brief Set the maximum velocity of the stepper motor

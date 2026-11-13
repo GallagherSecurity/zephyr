@@ -33,7 +33,10 @@
 extern "C" {
 #endif
 
-/** @brief Driver is allowed to busy-wait for random data to be ready */
+/** @brief Driver is allowed to busy-wait for random data to be ready
+ *
+ * Flag possibly set in @p flags argument of entropy_get_entropy_isr().
+ */
 #define ENTROPY_BUSYWAIT  BIT(0)
 
 /**
@@ -43,7 +46,6 @@ extern "C" {
  */
 
 /**
- * @typedef entropy_get_entropy_t
  * @brief Callback API to get entropy.
  *
  * @note This call has to be thread safe to satisfy requirements
@@ -56,7 +58,6 @@ typedef int (*entropy_get_entropy_t)(const struct device *dev,
 				     uint16_t length);
 
 /**
- * @typedef entropy_get_entropy_isr_t
  * @brief Callback API to get entropy from an ISR.
  *
  * See entropy_get_entropy_isr() for argument description
@@ -79,6 +80,33 @@ __subsystem struct entropy_driver_api {
 /** @} */
 
 /**
+ * @brief Return the default entropy device if available.
+ *
+ * Returns in the following order:
+ *
+ * - The device chosen as "zephyr,entropy", if available.
+ * - The architectural entropy device, if enabled.
+ * - NULL.
+ *
+ * @retval Pointer to default entropy device.
+ * @retval NULL if not available.
+ */
+static inline const struct device *entropy_get_default_device(void)
+{
+	const struct device *device = DEVICE_DT_GET_OR_NULL(DT_CHOSEN(zephyr_entropy));
+
+#ifdef CONFIG_ARCH_HAS_ENTROPY
+	if (device == NULL) {
+		extern const struct device *const z_arch_entropy_dev;
+
+		device = z_arch_entropy_dev;
+	}
+#endif
+
+	return device;
+}
+
+/**
  * @brief Fills a buffer with entropy. Blocks if required in order to
  *        generate the necessary random data.
  *
@@ -96,8 +124,7 @@ static inline int z_impl_entropy_get_entropy(const struct device *dev,
 					     uint8_t *buffer,
 					     uint16_t length)
 {
-	const struct entropy_driver_api *api =
-		(const struct entropy_driver_api *)dev->api;
+	const struct entropy_driver_api *api = DEVICE_API_GET(entropy, dev);
 
 	__ASSERT(api->get_entropy != NULL,
 		"Callback pointer should not be NULL");
@@ -111,7 +138,7 @@ static inline int z_impl_entropy_get_entropy(const struct device *dev,
  * @param dev Pointer to the device structure.
  * @param buffer Buffer to fill with entropy.
  * @param length Buffer length.
- * @param flags Flags to modify the behavior of the call.
+ * @param flags Flags to modify the behavior of the call: ENTROPY_BUSYWAIT.
  * @return number of bytes filled with entropy or -error.
  * @retval -ENOSYS Driver does not implement the function
  */
@@ -120,8 +147,7 @@ static inline int entropy_get_entropy_isr(const struct device *dev,
 					  uint16_t length,
 					  uint32_t flags)
 {
-	const struct entropy_driver_api *api =
-		(const struct entropy_driver_api *)dev->api;
+	const struct entropy_driver_api *api = DEVICE_API_GET(entropy, dev);
 
 	if (unlikely(api->get_entropy_isr == NULL)) {
 		return -ENOSYS;

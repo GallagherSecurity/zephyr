@@ -50,21 +50,6 @@
 #define SPI_NOR_WRITEOC_NONE 0xFF
 
 #ifdef CONFIG_FLASH_STM32_XSPI_DMA
-/* Lookup table to set dma priority from the DTS */
-static const uint32_t table_priority[] = {
-	DMA_LOW_PRIORITY_LOW_WEIGHT,
-	DMA_LOW_PRIORITY_MID_WEIGHT,
-	DMA_LOW_PRIORITY_HIGH_WEIGHT,
-	DMA_HIGH_PRIORITY,
-};
-
-/* Lookup table to set dma channel direction from the DTS */
-static const uint32_t table_direction[] = {
-	DMA_MEMORY_TO_MEMORY,
-	DMA_MEMORY_TO_PERIPH,
-	DMA_PERIPH_TO_MEMORY,
-};
-
 struct stream {
 	DMA_TypeDef *reg;
 	const struct device *dev;
@@ -81,7 +66,6 @@ typedef void (*irq_config_func_t)(const struct device *dev);
 struct flash_stm32_xspi_config {
 	const struct stm32_pclken pclken;
 	const struct stm32_pclken pclken_ker;
-	const struct stm32_pclken pclken_mgr;
 	irq_config_func_t irq_config;
 	size_t flash_size;
 	uint32_t max_frequency;
@@ -96,7 +80,6 @@ struct flash_stm32_xspi_config {
 	int reset_gpios_duration;
 #endif /* STM32_XSPI_RESET_GPIO */
 	bool has_pclken_ker;
-	bool has_pclken_mgr;
 };
 
 struct flash_stm32_xspi_data {

@@ -7,10 +7,10 @@
 #include <soc.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/spi/rtio.h>
+#include "spi_rtio.h"
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/clock_control/mchp_clock_control.h>
-#if CONFIG_SPI_MCHP_DMA_DRIVEN
+#ifdef CONFIG_SPI_MCHP_DMA_DRIVEN
 #include <zephyr/drivers/dma.h>
 #include <mchp_dt_helper.h>
 #endif /* CONFIG_SPI_MCHP_DMA_DRIVEN */
@@ -53,29 +53,27 @@ struct spi_mchp_dev_config {
 	struct mchp_spi_reg_config reg_cfg;
 	const struct pinctrl_dev_config *pcfg;
 
-#if CONFIG_SPI_MCHP_DMA_DRIVEN
+#ifdef CONFIG_SPI_MCHP_DMA_DRIVEN
 	struct mchp_spi_dma spi_dma;
-#else
-	void (*irq_config_func)(const struct device *dev);
 #endif /* CONFIG_SPI_MCHP_DMA_DRIVEN */
+	void (*irq_config_func)(const struct device *dev);
 	struct mchp_spi_clock spi_clock;
 };
 
 struct spi_mchp_dev_data {
 	struct spi_context ctx;
 
-#if CONFIG_SPI_MCHP_DMA_DRIVEN
+#ifdef CONFIG_SPI_MCHP_DMA_DRIVEN
 	const struct device *dev;
 	uint32_t dma_segment_len;
-#else
-	uint16_t dummysize;
 #endif /* CONFIG_SPI_MCHP_DMA_DRIVEN */
+	uint16_t dummysize;
 };
 
 /*Wait for synchronization*/
 static inline void spi_wait_sync(const struct mchp_spi_reg_config *spi_reg_cfg, uint32_t sync_flag)
 {
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_CONTROLLER);
 
 	if (WAIT_FOR(((spi->SERCOM_SYNCBUSY & sync_flag) == 0), TIMEOUT_VALUE_US,
 		     k_busy_wait(DELAY_US)) == false) {
@@ -87,7 +85,7 @@ static inline void spi_wait_sync(const struct mchp_spi_reg_config *spi_reg_cfg, 
 static void spi_enable(const struct mchp_spi_reg_config *spi_reg_cfg, spi_operation_t op)
 {
 	sercom_spi_registers_t *spi =
-		SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_GET(op) == SPI_OP_MODE_SLAVE);
+		SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_GET(op) == SPI_OP_MODE_PERIPHERAL);
 
 	spi->SERCOM_CTRLA |= SERCOM_SPI_CTRLA_ENABLE_Msk;
 	spi_wait_sync(spi_reg_cfg, SERCOM_SPI_SYNCBUSY_ENABLE_Msk);
@@ -96,7 +94,7 @@ static void spi_enable(const struct mchp_spi_reg_config *spi_reg_cfg, spi_operat
 /*Disable the SPI peripheral*/
 static void spi_disable(const struct mchp_spi_reg_config *spi_reg_cfg)
 {
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_CONTROLLER);
 
 	spi->SERCOM_CTRLA &= ~SERCOM_SPI_CTRLA_ENABLE_Msk;
 	spi_wait_sync(spi_reg_cfg, SERCOM_SPI_SYNCBUSY_ENABLE_Msk);
@@ -111,7 +109,7 @@ static void spi_set_baudrate(const struct mchp_spi_reg_config *spi_reg_cfg,
 	/* Use the requested or next highest possible frequency */
 	uint32_t baud_value = (clk_freq_hz / divisor) - 1;
 
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_CONTROLLER);
 
 	if ((clk_freq_hz % divisor) >= (divisor / 2U)) {
 		/* Round up the baud_value to ensures SPI clock is as close as possible to
@@ -128,31 +126,32 @@ static void spi_set_baudrate(const struct mchp_spi_reg_config *spi_reg_cfg,
 /*Write Data into DATA register*/
 static inline void spi_write_data(const struct mchp_spi_reg_config *spi_reg_cfg, uint8_t data)
 {
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_CONTROLLER);
 
 	spi->SERCOM_DATA = data;
 }
 
-/*Read Data from the SPI MASTER DATA register*/
+/*Read Data from the SPI controller DATA register*/
 static inline uint8_t spi_read_data(const struct mchp_spi_reg_config *spi_reg_cfg)
 {
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_CONTROLLER);
 
 	return (uint8_t)spi->SERCOM_DATA;
 }
 
 /*Return true if data register empty flag is set*/
-static inline bool spi_slave_is_data_reg_empty(const struct mchp_spi_reg_config *spi_reg_cfg)
+static inline bool spi_peripheral_is_data_reg_empty(const struct mchp_spi_reg_config *spi_reg_cfg)
 {
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_SLAVE);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_PERIPHERAL);
 
 	return (spi->SERCOM_INTFLAG & SERCOM_SPI_INTFLAG_DRE_Msk) == SERCOM_SPI_INTFLAG_DRE_Msk;
 }
 
 /*Write Data into DATA register*/
-static inline void spi_slave_write_data(const struct mchp_spi_reg_config *spi_reg_cfg, uint8_t data)
+static inline void spi_peripheral_write_data(const struct mchp_spi_reg_config *spi_reg_cfg,
+					     uint8_t data)
 {
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_SLAVE);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_PERIPHERAL);
 
 	spi->SERCOM_DATA = data;
 }
@@ -161,11 +160,11 @@ static int spi_configure_pinout(const struct mchp_spi_reg_config *spi_reg_cfg,
 				const struct spi_config *config)
 {
 	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(
-		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE);
+		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_PERIPHERAL);
 
 	if ((config->operation & SPI_MODE_LOOP) != 0U) {
-		if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE) {
-			LOG_ERR("For slave Loopback mode is not supported");
+		if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_PERIPHERAL) {
+			LOG_ERR("For peripheral Loopback mode is not supported");
 
 			return -ENOTSUP;
 		}
@@ -187,7 +186,7 @@ static void spi_configure_cpol(const struct mchp_spi_reg_config *spi_reg_cfg,
 			       const struct spi_config *config)
 {
 	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(
-		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE);
+		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_PERIPHERAL);
 
 	uint32_t reg = spi->SERCOM_CTRLA;
 
@@ -200,13 +199,14 @@ static void spi_configure_cpol(const struct mchp_spi_reg_config *spi_reg_cfg,
 		/* Clear the CPOL bit field and set clock polarity to Idle Low */
 		reg |= SERCOM_SPI_CTRLA_CPOL_IDLE_LOW;
 	}
+	spi->SERCOM_CTRLA = reg;
 }
 
 static void spi_configure_cpha(const struct mchp_spi_reg_config *spi_reg_cfg,
 			       const struct spi_config *config)
 {
 	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(
-		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE);
+		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_PERIPHERAL);
 
 	uint32_t reg = spi->SERCOM_CTRLA;
 
@@ -219,13 +219,14 @@ static void spi_configure_cpha(const struct mchp_spi_reg_config *spi_reg_cfg,
 		/* Clear the CPHA bit field and set clock phase to Leading Edge */
 		reg |= SERCOM_SPI_CTRLA_CPHA_LEADING_EDGE;
 	}
+	spi->SERCOM_CTRLA = reg;
 }
 
 static void spi_configure_bit_order(const struct mchp_spi_reg_config *spi_reg_cfg,
 				    const struct spi_config *config)
 {
 	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(
-		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE);
+		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_PERIPHERAL);
 
 	uint32_t reg = spi->SERCOM_CTRLA;
 
@@ -237,6 +238,7 @@ static void spi_configure_bit_order(const struct mchp_spi_reg_config *spi_reg_cf
 	} else {
 		reg |= SERCOM_SPI_CTRLA_DORD_MSB;
 	}
+	spi->SERCOM_CTRLA = reg;
 }
 
 static int spi_configure(const struct device *dev, const struct spi_config *config)
@@ -248,7 +250,7 @@ static int spi_configure(const struct device *dev, const struct spi_config *conf
 	uint32_t clock_rate;
 	bool has_cs = false;
 	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(
-		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE);
+		spi_reg_cfg->regs, SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_PERIPHERAL);
 
 	spi_disable(spi_reg_cfg);
 
@@ -272,21 +274,22 @@ static int spi_configure(const struct device *dev, const struct spi_config *conf
 	/*Enable the Receiver in SPI peripheral*/
 	spi->SERCOM_CTRLB |= SERCOM_SPI_CTRLB_RXEN_Msk;
 	spi_wait_sync(spi_reg_cfg, SERCOM_SPI_SYNCBUSY_CTRLB_Msk);
-#if CONFIG_SPI_SLAVE
-	if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE) {
-		/* Enable the preload slave data*/
+#ifdef CONFIG_SPI_PERIPHERAL
+	if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_PERIPHERAL) {
+		/* Enable the preload peripheral data*/
 		spi->SERCOM_CTRLB |= SERCOM_SPI_CTRLB_PLOADEN_Msk;
-		/* Enable the slave select detection*/
+		/* Enable the peripheral select detection*/
 		spi->SERCOM_CTRLB |= SERCOM_SPI_CTRLB_SSDE_Msk;
+		spi_wait_sync(spi_reg_cfg, SERCOM_SPI_SYNCBUSY_CTRLB_Msk);
 		/* Enable the Immediate buffer overflow*/
 		spi->SERCOM_CTRLA |= SERCOM_SPI_CTRLA_IBON_Msk;
-		/*Set the SPI Slave Mode*/
+		/*Set the SPI Peripheral Mode*/
 		spi->SERCOM_CTRLA = (spi->SERCOM_CTRLA & ~SERCOM_SPI_CTRLA_MODE_Msk) |
 				    SERCOM_SPI_CTRLA_MODE_SPI_SLAVE;
 	}
-#endif /* CONFIG_SPI_SLAVE */
+#endif /* CONFIG_SPI_PERIPHERAL */
 
-	if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_MASTER) {
+	if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_CONTROLLER) {
 
 #ifdef CONFIG_SPI_MCHP_INTER_CHARACTER_SPACE
 		spi_reg_cfg->regs->SPIM.SERCOM_CTRLC =
@@ -303,7 +306,7 @@ static int spi_configure(const struct device *dev, const struct spi_config *conf
 			return -ENOTSUP;
 		}
 
-		/* Clear the MODE bit field and set it to SPI Master mode */
+		/* Clear the MODE bit field and set it to SPI Controller mode */
 		spi->SERCOM_CTRLA = (spi->SERCOM_CTRLA & ~SERCOM_SPI_CTRLA_MODE_Msk) |
 				    SERCOM_SPI_CTRLA_MODE_SPI_MASTER;
 
@@ -317,8 +320,7 @@ static int spi_configure(const struct device *dev, const struct spi_config *conf
 				return retval;
 			}
 		} else if (cfg->pcfg->states->pin_cnt == SPI_PIN_CNT) {
-			spi_wait_sync(spi_reg_cfg, SERCOM_SPI_SYNCBUSY_CTRLB_Msk);
-			/* Enable Master Slave Select */
+			/* Enable hardware-controlled chip select (MSSEN) */
 			spi->SERCOM_CTRLB |= SERCOM_SPI_CTRLB_MSSEN_Msk;
 			spi_wait_sync(spi_reg_cfg, SERCOM_SPI_SYNCBUSY_CTRLB_Msk);
 		} else {
@@ -348,13 +350,11 @@ static int spi_configure(const struct device *dev, const struct spi_config *conf
 
 	spi_enable(spi_reg_cfg, config->operation);
 
-#if CONFIG_SPI_MCHP_DMA_DRIVEN
+#ifdef CONFIG_SPI_MCHP_DMA_DRIVEN
 	if (device_is_ready(cfg->spi_dma.dma_dev) != true) {
 		return -ENODEV;
 	}
 	data->dev = dev;
-#else
-	cfg->irq_config_func(dev);
 #endif /* CONFIG_SPI_MCHP_DMA_DRIVEN */
 
 	data->ctx.config = config;
@@ -362,14 +362,19 @@ static int spi_configure(const struct device *dev, const struct spi_config *conf
 	return 0;
 }
 
-#if CONFIG_SPI_MCHP_DMA_DRIVEN
+#ifdef CONFIG_SPI_MCHP_DMA_DRIVEN
 static void spi_dma_rx_done(const struct device *dma_dev, void *arg, uint32_t id, int error_code);
 
 static int spi_dma_tx_load(const struct device *dev, const uint8_t *buf, size_t len)
 {
 	const struct spi_mchp_dev_config *cfg = dev->config;
 	const struct mchp_spi_reg_config *spi_reg_cfg = &cfg->reg_cfg;
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	struct spi_mchp_dev_data *data = dev->data;
+	bool is_peripheral = spi_context_is_peripheral(&data->ctx);
+
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(
+		spi_reg_cfg->regs,
+		(is_peripheral ? SPI_OP_MODE_PERIPHERAL : SPI_OP_MODE_CONTROLLER));
 
 	struct dma_config dma_cfg = {0};
 	struct dma_block_config dma_blk = {0};
@@ -412,7 +417,11 @@ static int spi_dma_rx_load(const struct device *dev, uint8_t *buf, size_t len)
 	const struct spi_mchp_dev_config *cfg = dev->config;
 	const struct mchp_spi_reg_config *spi_reg_cfg = &cfg->reg_cfg;
 	struct spi_mchp_dev_data *data = dev->data;
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	bool is_peripheral = spi_context_is_peripheral(&data->ctx);
+
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(
+		spi_reg_cfg->regs,
+		(is_peripheral ? SPI_OP_MODE_PERIPHERAL : SPI_OP_MODE_CONTROLLER));
 
 	struct dma_config dma_cfg = {0};
 	struct dma_block_config dma_blk = {0};
@@ -483,6 +492,7 @@ static bool spi_dma_select_segment(const struct device *dev)
 static int spi_dma_setup_buffers(const struct device *dev)
 {
 	struct spi_mchp_dev_data *data = dev->data;
+	const struct spi_mchp_dev_config *cfg = dev->config;
 	int retval;
 
 	if (data->dma_segment_len == 0) {
@@ -508,6 +518,7 @@ static int spi_dma_setup_buffers(const struct device *dev)
 	}
 
 	if (retval != 0) {
+		dma_stop(cfg->spi_dma.dma_dev, cfg->spi_dma.rx_dma_channel);
 		return retval;
 	}
 
@@ -522,7 +533,16 @@ static void spi_dma_rx_done(const struct device *dma_dev, void *arg, uint32_t id
 	int retval;
 
 	ARG_UNUSED(id);
-	ARG_UNUSED(error_code);
+
+	if (error_code != 0) {
+		dma_stop(cfg->spi_dma.dma_dev, cfg->spi_dma.tx_dma_channel);
+		dma_stop(cfg->spi_dma.dma_dev, cfg->spi_dma.rx_dma_channel);
+		if (spi_context_is_peripheral(&data->ctx) == false) {
+			spi_context_cs_control(&data->ctx, false);
+		}
+		spi_context_complete(&data->ctx, dev, -EIO);
+		return;
+	}
 
 	/* Update TX and RX context with the completed DMA segment */
 	spi_context_update_tx(&data->ctx, 1, data->dma_segment_len);
@@ -530,7 +550,7 @@ static void spi_dma_rx_done(const struct device *dma_dev, void *arg, uint32_t id
 
 	/* Check if more segments need to be transferred */
 	if (spi_dma_select_segment(dev) == false) {
-		if (spi_context_is_slave(&data->ctx) == false) {
+		if (spi_context_is_peripheral(&data->ctx) == false) {
 			spi_context_cs_control(&data->ctx, false);
 		}
 		/* Transmission complete */
@@ -545,7 +565,7 @@ static void spi_dma_rx_done(const struct device *dma_dev, void *arg, uint32_t id
 		/* Stop DMA and terminate the SPI transaction in case of failure */
 		dma_stop(cfg->spi_dma.dma_dev, cfg->spi_dma.tx_dma_channel);
 		dma_stop(cfg->spi_dma.dma_dev, cfg->spi_dma.rx_dma_channel);
-		if (spi_context_is_slave(&data->ctx) == false) {
+		if (spi_context_is_peripheral(&data->ctx) == false) {
 			spi_context_cs_control(&data->ctx, false);
 		}
 		spi_context_complete(&data->ctx, dev, retval);
@@ -573,7 +593,6 @@ static int spi_check_buf_len(const struct spi_buf_set *buf_set)
 	return 0;
 }
 
-#ifndef CONFIG_SPI_MCHP_DMA_DRIVEN
 static int spi_transceive_interrupt(const struct device *dev, const struct spi_config *config,
 				    const struct spi_buf_set *tx_bufs,
 				    const struct spi_buf_set *rx_bufs)
@@ -582,98 +601,123 @@ static int spi_transceive_interrupt(const struct device *dev, const struct spi_c
 	const struct mchp_spi_reg_config *spi_reg_cfg = &cfg->reg_cfg;
 	struct spi_mchp_dev_data *const data = dev->data;
 	uint8_t tx_data;
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_CONTROLLER);
 
 	/* Prepare first byte for transmission */
 	if (spi_context_tx_buf_on(&data->ctx) == true) {
 		tx_data = *data->ctx.tx_buf;
 	} else {
-		tx_data = 0U;
+		tx_data = DUMMY_DATA;
 	}
 
-	/*Clear the DATA register until the RXC flag is cleared*/
+	/* Clear the DATA register until the RXC flag is cleared */
 	if (WAIT_FOR(((spi->SERCOM_INTFLAG & SERCOM_SPI_INTFLAG_RXC_Msk) == 0), TIMEOUT_VALUE_US,
 		     ((void)spi->SERCOM_DATA, k_busy_wait(DELAY_US))) == false) {
 		LOG_ERR("Timeout while clearing RXC");
 	}
 
-	/* Get the dummysize */
-	if ((data->ctx.rx_len) > (data->ctx.tx_len)) {
-		data->dummysize = (data->ctx.rx_len) - (data->ctx.tx_len);
+	/* Get the dummysize: use spi_context helpers for total buffer lengths */
+	size_t total_tx_len = spi_context_total_tx_len(&data->ctx);
+	size_t total_rx_len = spi_context_total_rx_len(&data->ctx);
+
+	if (total_rx_len > total_tx_len) {
+		data->dummysize = total_rx_len - total_tx_len;
 	} else {
 		data->dummysize = 0;
 	}
 
 	/* Write first data byte to the SPI data register */
-	spi_context_update_tx(&data->ctx, 1, 1);
+	if (spi_context_tx_on(&data->ctx) == true) {
+		spi_context_update_tx(&data->ctx, 1, 1);
+	} else if (data->dummysize > 0) {
+		data->dummysize--;
+	} else {
+		/* Do Nothing */
+	}
 	spi_write_data(spi_reg_cfg, tx_data);
 
 	/* Enable SPI interrupts for RX, TX completion, and data empty events */
 	if (data->ctx.rx_len > 0) {
-		/*Enable the Receive Complete Interrupt*/
+		/* Enable the Receive Complete Interrupt */
 		spi->SERCOM_INTENSET = SERCOM_SPI_INTENSET_RXC_Msk;
 	} else {
-		/*Enable the Data Register Empty Interrupt*/
+		/* Enable the Data Register Empty Interrupt */
 		spi->SERCOM_INTENSET = SERCOM_SPI_INTENSET_DRE_Msk;
 	}
 
 	return 0;
 }
 
-#if CONFIG_SPI_SLAVE
-static void spi_slave_write(const struct device *dev)
+#ifdef CONFIG_SPI_PERIPHERAL
+static void spi_peripheral_write(const struct device *dev)
 {
 	const struct spi_mchp_dev_config *cfg = dev->config;
 	const struct mchp_spi_reg_config *spi_reg_cfg = &cfg->reg_cfg;
 	struct spi_mchp_dev_data *const data = dev->data;
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_SLAVE);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_PERIPHERAL);
 
 	/* Prepare initial bytes for transmission */
 	if (spi_context_tx_buf_on(&data->ctx) == true) {
 		while ((spi_context_tx_buf_on(&data->ctx) == true) &&
-		       (spi_slave_is_data_reg_empty(spi_reg_cfg) == true)) {
-			spi_slave_write_data(spi_reg_cfg, *data->ctx.tx_buf);
+		       (spi_peripheral_is_data_reg_empty(spi_reg_cfg) == true)) {
+			spi_peripheral_write_data(spi_reg_cfg, *data->ctx.tx_buf);
 
 			/* Write data byte to the SPI data register */
 			spi_context_update_tx(&data->ctx, 1, 1);
 		}
 	} else {
-		if (spi_slave_is_data_reg_empty(spi_reg_cfg) == true) {
-			spi_slave_write_data(spi_reg_cfg, 0);
+		if (spi_peripheral_is_data_reg_empty(spi_reg_cfg) == true) {
+			spi_peripheral_write_data(spi_reg_cfg, 0);
 		}
 	}
 	/*Enable the Data Register Empty Interrupt*/
 	spi->SERCOM_INTENSET = SERCOM_SPI_INTENSET_DRE_Msk;
 }
 
-static int spi_slave_transceive_interrupt(const struct device *dev, const struct spi_config *config,
-					  const struct spi_buf_set *tx_bufs,
-					  const struct spi_buf_set *rx_bufs)
+static int spi_peripheral_transceive_interrupt(const struct device *dev,
+					       const struct spi_config *config,
+					       const struct spi_buf_set *tx_bufs,
+					       const struct spi_buf_set *rx_bufs)
 {
 	const struct spi_mchp_dev_config *cfg = dev->config;
 	const struct mchp_spi_reg_config *spi_reg_cfg = &cfg->reg_cfg;
 	int ret = 0;
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_SLAVE);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_PERIPHERAL);
+
+	/* Start clean */
+	if (WAIT_FOR(((spi->SERCOM_INTFLAG & SERCOM_SPI_INTFLAG_RXC_Msk) == 0), TIMEOUT_VALUE_US,
+		     (void)spi->SERCOM_DATA) == false) {
+		LOG_ERR("Timeout draining stale RX at peripheral setup");
+	}
+	spi->SERCOM_STATUS = SERCOM_SPI_STATUS_BUFOVF_Msk;
+	spi->SERCOM_INTFLAG = (uint8_t)(SERCOM_SPI_INTFLAG_ERROR_Msk | SERCOM_SPI_INTFLAG_TXC_Msk);
 
 	/* Prepare for transmission */
-	spi_slave_write(dev);
+	spi_peripheral_write(dev);
 
 	/*Enable the Receive Complete Interrupt*/
 	spi->SERCOM_INTENSET = SERCOM_SPI_INTENSET_RXC_Msk;
-	/* Enable slave select line interrupt */
+	/* Enable peripheral select line interrupt */
 	spi->SERCOM_INTENSET = SERCOM_SPI_INTENSET_SSL_Msk;
 
 	return ret;
 }
-#endif /* CONFIG_SPI_SLAVE */
-#endif /* CONFIG_SPI_MCHP_DMA_DRIVEN*/
+#endif /* CONFIG_SPI_PERIPHERAL */
 
 static int spi_transfer(const struct device *dev, const struct spi_config *config,
 			const struct spi_buf_set *tx_bufs, const struct spi_buf_set *rx_bufs,
 			spi_callback_t spi_callback, void *userdata, bool asynchronous)
 {
+	const struct spi_mchp_dev_config *cfg = dev->config;
 	struct spi_mchp_dev_data *data = dev->data;
+	bool use_dma = false;
+	bool dma_started = false;
 	int retval;
+
+#ifndef CONFIG_SPI_MCHP_DMA_DRIVEN
+	ARG_UNUSED(cfg);
+	ARG_UNUSED(dma_started);
+#endif
 
 	retval = spi_check_buf_len(tx_bufs);
 	if (retval < 0) {
@@ -685,19 +729,17 @@ static int spi_transfer(const struct device *dev, const struct spi_config *confi
 		return retval;
 	}
 
-/*
- * Transmit clocks the output, and we use receive to
- * determine when the transmit is done, so we
- * always need both TX and RX DMA channels.
- */
-#if CONFIG_SPI_MCHP_DMA_DRIVEN
-	const struct spi_mchp_dev_config *cfg = dev->config;
-
-	if (cfg->spi_dma.tx_dma_channel == DMA_CHANNEL_INVALID ||
-	    cfg->spi_dma.rx_dma_channel == DMA_CHANNEL_INVALID) {
+#ifdef CONFIG_SPI_PERIPHERAL
+	/* Sync peripheral mode not supported */
+	if (!asynchronous && SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_PERIPHERAL) {
 		return -ENOTSUP;
 	}
-#endif /* CONFIG_SPI_MCHP_DMA_DRIVEN */
+#endif
+
+#ifdef CONFIG_SPI_MCHP_DMA_DRIVEN
+	use_dma = (cfg->spi_dma.tx_dma_channel != DMA_CHANNEL_INVALID) &&
+		  (cfg->spi_dma.rx_dma_channel != DMA_CHANNEL_INVALID);
+#endif
 
 	spi_context_lock(&data->ctx, asynchronous, spi_callback, userdata, config);
 
@@ -708,37 +750,41 @@ static int spi_transfer(const struct device *dev, const struct spi_config *confi
 		return retval;
 	}
 
-	if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_MASTER) {
+	if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_CONTROLLER) {
 		spi_context_cs_control(&data->ctx, true);
 	}
 
 	spi_context_buffers_setup(&data->ctx, tx_bufs, rx_bufs, 1);
 
-/* Prepare and start DMA transfers */
-#if CONFIG_SPI_MCHP_DMA_DRIVEN
-	spi_dma_select_segment(dev);
-	retval = spi_dma_setup_buffers(dev);
-#else
-	if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_MASTER) {
-		retval = spi_transceive_interrupt(dev, config, tx_bufs, rx_bufs);
-	}
-#if CONFIG_SPI_SLAVE
-	if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE) {
-		retval = spi_slave_transceive_interrupt(dev, config, tx_bufs, rx_bufs);
-	}
-#endif /* CONFIG_SPI_SLAVE */
-#endif /* CONFIG_SPI_MCHP_DMA_DRIVEN */
-
-	retval = spi_context_wait_for_completion(&data->ctx);
-
-	if (asynchronous == false) {
-		if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_SLAVE) {
-			spi_context_release(&data->ctx, retval);
-
-			return -ENOTSUP;
+	/* Trigger hardware transfer */
+	if (use_dma) {
+#ifdef CONFIG_SPI_MCHP_DMA_DRIVEN
+		spi_dma_select_segment(dev);
+		retval = spi_dma_setup_buffers(dev);
+		if (retval == 0) {
+			dma_started = true;
 		}
+#endif
+	} else {
+		if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_CONTROLLER) {
+			retval = spi_transceive_interrupt(dev, config, tx_bufs, rx_bufs);
+		}
+#ifdef CONFIG_SPI_PERIPHERAL
+		else {
+			retval = spi_peripheral_transceive_interrupt(dev, config, tx_bufs, rx_bufs);
+		}
+#endif
+	}
 
-		if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_MASTER) {
+	if (retval != 0) {
+#ifdef CONFIG_SPI_MCHP_DMA_DRIVEN
+		if (dma_started) {
+			/* Stop TX before RX (reverse of setup order) */
+			dma_stop(cfg->spi_dma.dma_dev, cfg->spi_dma.tx_dma_channel);
+			dma_stop(cfg->spi_dma.dma_dev, cfg->spi_dma.rx_dma_channel);
+		}
+#endif
+		if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_CONTROLLER) {
 			spi_context_cs_control(&data->ctx, false);
 		}
 
@@ -746,14 +792,12 @@ static int spi_transfer(const struct device *dev, const struct spi_config *confi
 		return retval;
 	}
 
-	if (retval != 0) {
-#if CONFIG_SPI_MCHP_DMA_DRIVEN
-		/* Stop DMA transfers in case of failure */
-		dma_stop(cfg->spi_dma.dma_dev, cfg->spi_dma.tx_dma_channel);
-		dma_stop(cfg->spi_dma.dma_dev, cfg->spi_dma.rx_dma_channel);
-#endif /* CONFIG_SPI_MCHP_DMA_DRIVEN */
+	/* Completion handling */
+	if (!asynchronous) {
+		/* Sync path: wait for ISR/DMA to signal completion */
+		retval = spi_context_wait_for_completion(&data->ctx);
 
-		if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_MASTER) {
+		if (SPI_OP_MODE_GET(config->operation) == SPI_OP_MODE_CONTROLLER) {
 			spi_context_cs_control(&data->ctx, false);
 		}
 
@@ -769,7 +813,7 @@ static int spi_mchp_transceive(const struct device *dev, const struct spi_config
 	return spi_transfer(dev, config, tx_bufs, rx_bufs, NULL, NULL, false);
 }
 
-#if CONFIG_SPI_ASYNC
+#ifdef CONFIG_SPI_ASYNC
 static int spi_mchp_transceive_async(const struct device *dev, const struct spi_config *config,
 				     const struct spi_buf_set *tx_bufs,
 				     const struct spi_buf_set *rx_bufs, spi_callback_t spi_callback,
@@ -777,11 +821,11 @@ static int spi_mchp_transceive_async(const struct device *dev, const struct spi_
 {
 	if (spi_callback == NULL) {
 		return -EINVAL;
-	} else {
-		return spi_transfer(dev, config, tx_bufs, rx_bufs, spi_callback, userdata, true);
 	}
+
+	return spi_transfer(dev, config, tx_bufs, rx_bufs, spi_callback, userdata, true);
 }
-#endif /*CONFIG_SPI_ASYNC*/
+#endif /* CONFIG_SPI_ASYNC */
 
 static int spi_mchp_release(const struct device *dev, const struct spi_config *config)
 {
@@ -792,44 +836,35 @@ static int spi_mchp_release(const struct device *dev, const struct spi_config *c
 	return 0;
 }
 
-#ifndef CONFIG_SPI_MCHP_DMA_DRIVEN
-#if CONFIG_SPI_SLAVE
-static void spi_mchp_isr_slave(const struct device *dev)
+#ifdef CONFIG_SPI_PERIPHERAL
+static void spi_mchp_isr_peripheral(const struct device *dev)
 {
 	struct spi_mchp_dev_data *data = dev->data;
 	const struct spi_mchp_dev_config *cfg = dev->config;
 	const struct mchp_spi_reg_config *spi_reg_cfg = &cfg->reg_cfg;
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_SLAVE);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_PERIPHERAL);
 
 	uint8_t intFlag = spi->SERCOM_INTFLAG;
+	spi->SERCOM_INTFLAG = intFlag;
 	uint8_t tx_data = 0U;
 	uint8_t rx_data = 0U;
 
-	/* Handle slave select */
-	if ((spi->SERCOM_INTFLAG & SERCOM_SPI_INTFLAG_SSL_Msk) == SERCOM_SPI_INTFLAG_SSL_Msk) {
-		/* Clear the slave select line interrupt */
-		spi->SERCOM_INTFLAG = SERCOM_SPI_INTFLAG_SSL_Msk;
+	/* Handle peripheral select */
+	if ((intFlag & SERCOM_SPI_INTFLAG_SSL_Msk) == SERCOM_SPI_INTFLAG_SSL_Msk) {
 		/* Enable the Transmit Complete Interrupt */
 		spi->SERCOM_INTENSET = SERCOM_SPI_INTENSET_TXC_Msk;
-		return;
 	}
 
 	/* Handle buffer overflow error */
 	if ((spi->SERCOM_STATUS & SERCOM_SPI_STATUS_BUFOVF_Msk) == SERCOM_SPI_STATUS_BUFOVF_Msk) {
 		/* Clear buffer overflow flag */
 		spi->SERCOM_STATUS = SERCOM_SPI_STATUS_BUFOVF_Msk;
-		/* Clear the DATA register */
-		if (WAIT_FOR(((spi->SERCOM_INTFLAG & SERCOM_SPI_INTFLAG_RXC_Msk) == 0),
-			     TIMEOUT_VALUE_US, (void)spi->SERCOM_DATA) == false) {
-			LOG_ERR("Timeout while clearing RXC");
-		}
-		/*Clear the Error Interrupt Flag */
-		spi->SERCOM_INTFLAG = (uint8_t)SERCOM_SPI_INTFLAG_ERROR_Msk;
+		spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_Msk;
 		spi_context_complete(&data->ctx, dev, -EIO);
 		return;
 	}
 
-	if ((spi->SERCOM_INTFLAG & SERCOM_SPI_INTFLAG_RXC_Msk) == SERCOM_SPI_INTFLAG_RXC_Msk) {
+	if ((intFlag & SERCOM_SPI_INTFLAG_RXC_Msk) == SERCOM_SPI_INTFLAG_RXC_Msk) {
 		/* Handle received data */
 		rx_data = (uint8_t)spi->SERCOM_DATA;
 		if (spi_context_rx_buf_on(&data->ctx)) {
@@ -839,7 +874,7 @@ static void spi_mchp_isr_slave(const struct device *dev)
 	}
 
 	/* Handle transmit data */
-	if (spi_slave_is_data_reg_empty(spi_reg_cfg) == true) {
+	if (spi_peripheral_is_data_reg_empty(spi_reg_cfg) == true) {
 		if (spi_context_tx_on(&data->ctx) == true) {
 			tx_data = *data->ctx.tx_buf;
 			spi_context_update_tx(&data->ctx, 1, 1);
@@ -848,33 +883,61 @@ static void spi_mchp_isr_slave(const struct device *dev)
 			/*Disable DRE interrupt*/
 			spi->SERCOM_INTENCLR = (uint8_t)SERCOM_SPI_INTENCLR_DRE_Msk;
 		}
-		spi_slave_write_data(spi_reg_cfg, tx_data);
+		spi_peripheral_write_data(spi_reg_cfg, tx_data);
 	}
 
 	/* Handle transaction complete */
 	if ((intFlag & SERCOM_SPI_INTFLAG_TXC_Msk) == SERCOM_SPI_INTFLAG_TXC_Msk) {
-		/*Clear transmit complete flag*/
-		spi->SERCOM_INTFLAG = SERCOM_SPI_INTFLAG_TXC_Msk;
-
-		/* If both TX and RX are done, complete the transaction */
-		if ((spi_context_rx_on(&data->ctx) == false) &&
-		    (spi_context_tx_on(&data->ctx) == false)) {
-			/*Disable all SPI Interrupts*/
-			spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_Msk;
-			/*Clear all SPI Interrupt*/
-			spi->SERCOM_INTFLAG = SERCOM_SPI_INTFLAG_Msk;
-			spi_context_complete(&data->ctx, dev, 0);
-		}
+		/*Disable all SPI Interrupts*/
+		spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_Msk;
+		spi_context_complete(&data->ctx, dev, 0);
 	}
 }
-#endif /* CONFIG_SPI_SLAVE */
+#endif /* CONFIG_SPI_PERIPHERAL */
 
-static void spi_mchp_isr_master(const struct device *dev)
+static inline bool spi_mchp_controller_handle_overflow(struct spi_mchp_dev_data *data,
+						       const struct device *dev,
+						       sercom_spi_registers_t *spi)
+{
+	if ((spi->SERCOM_STATUS & SERCOM_SPI_STATUS_BUFOVF_Msk) == 0U) {
+		return false;
+	}
+
+	spi->SERCOM_STATUS = SERCOM_SPI_STATUS_BUFOVF_Msk;
+	spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_RXC_Msk | SERCOM_SPI_INTENCLR_DRE_Msk |
+			       SERCOM_SPI_INTENCLR_TXC_Msk;
+	spi_context_cs_control(&data->ctx, false);
+	spi_context_complete(&data->ctx, dev, -EIO);
+
+	return true;
+}
+
+static inline uint8_t spi_mchp_controller_next_tx_byte(struct spi_mchp_dev_data *data)
+{
+	uint8_t tx_data;
+
+	if (spi_context_tx_buf_on(&data->ctx) == true) {
+		tx_data = *data->ctx.tx_buf;
+		spi_context_update_tx(&data->ctx, 1, 1);
+	} else if (spi_context_tx_on(&data->ctx) == true) {
+		tx_data = DUMMY_DATA;
+		spi_context_update_tx(&data->ctx, 1, 1);
+	} else if (data->dummysize > 0U) {
+		tx_data = DUMMY_DATA;
+		data->dummysize--;
+	} else {
+		tx_data = DUMMY_DATA;
+	}
+
+	return tx_data;
+}
+
+static void spi_mchp_isr_controller(const struct device *dev)
 {
 	struct spi_mchp_dev_data *data = dev->data;
 	const struct spi_mchp_dev_config *cfg = dev->config;
 	const struct mchp_spi_reg_config *spi_reg_cfg = &cfg->reg_cfg;
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_CONTROLLER);
 
 	uint8_t tx_data = 0U;
 
@@ -883,33 +946,29 @@ static void spi_mchp_isr_master(const struct device *dev)
 	}
 
 	uint8_t intflag = spi->SERCOM_INTFLAG;
+	spi->SERCOM_INTFLAG = intflag;
 	bool rx_ready = ((intflag & SERCOM_SPI_INTFLAG_RXC_Msk) != 0U);
 	bool tx_ready = ((intflag & SERCOM_SPI_INTFLAG_DRE_Msk) != 0U);
 	bool tx_complete = ((intflag & SERCOM_SPI_INTFLAG_TXC_Msk) != 0U);
-
 	bool transmit_needed = (spi_context_tx_on(&data->ctx) == true) || (data->dummysize > 0);
-	bool receive_needed = (spi_context_rx_buf_on(&data->ctx) == true) && (rx_ready == true);
+	bool rx_buf_on = spi_context_rx_buf_on(&data->ctx);
+	bool rx_on = spi_context_rx_on(&data->ctx);
+	bool receive_needed = rx_ready && rx_on;
 
 	/* 1. Handle buffer overflow error (Early Return) */
-	if ((spi->SERCOM_STATUS & SERCOM_SPI_STATUS_BUFOVF_Msk) != 0U) {
-		spi->SERCOM_STATUS = SERCOM_SPI_STATUS_BUFOVF_Msk;
-
-		if (WAIT_FOR(((spi->SERCOM_INTFLAG & SERCOM_SPI_INTFLAG_RXC_Msk) == 0),
-			     TIMEOUT_VALUE_US, (void)spi->SERCOM_DATA) == false) {
-			LOG_ERR("Timeout while clearing RXC");
-		}
-
-		spi->SERCOM_INTFLAG = (uint8_t)SERCOM_SPI_INTFLAG_ERROR_Msk;
-		spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_RXC_Msk | SERCOM_SPI_INTENCLR_DRE_Msk |
-				       SERCOM_SPI_INTENCLR_TXC_Msk;
-		spi_context_cs_control(&data->ctx, false);
-		spi_context_complete(&data->ctx, dev, -EIO);
+	if (spi_mchp_controller_handle_overflow(data, dev, spi)) {
 		return;
 	}
 
 	/* 2. Handle received data */
 	if (receive_needed == true) {
-		*data->ctx.rx_buf = spi_read_data(spi_reg_cfg);
+		uint8_t rx_data = spi_read_data(spi_reg_cfg);
+
+		if (rx_buf_on == true) {
+			/* Store data in buffer if available */
+			*data->ctx.rx_buf = rx_data;
+		}
+		/* Always update RX context to advance state machine, even for NOP buffers */
 		spi_context_update_rx(&data->ctx, 1, 1);
 
 		if (spi_context_rx_on(&data->ctx) != true) {
@@ -918,7 +977,6 @@ static void spi_mchp_isr_master(const struct device *dev)
 				spi->SERCOM_INTENSET = SERCOM_SPI_INTENSET_DRE_Msk;
 			} else {
 				/* Receive done and no transmit pending */
-				spi->SERCOM_INTFLAG = (uint8_t)SERCOM_SPI_INTFLAG_ERROR_Msk;
 				spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_RXC_Msk |
 						       SERCOM_SPI_INTENCLR_DRE_Msk |
 						       SERCOM_SPI_INTENCLR_TXC_Msk;
@@ -931,15 +989,10 @@ static void spi_mchp_isr_master(const struct device *dev)
 
 	/* 3. Handle transmit data */
 	if ((tx_ready == true) && (transmit_needed == true)) {
-		if (spi_context_tx_on(&data->ctx) == true) {
-			tx_data = *data->ctx.tx_buf;
-			spi_context_update_tx(&data->ctx, 1, 1);
-		} else {
-			tx_data = DUMMY_DATA;
-			data->dummysize--;
-		}
+		tx_data = spi_mchp_controller_next_tx_byte(data);
 
-		if ((data->dummysize == 0) && (spi_context_tx_on(&data->ctx) != true)) {
+		if ((data->dummysize == 0) && (spi_context_tx_on(&data->ctx) != true) &&
+		    (spi_context_rx_on(&data->ctx) != true)) {
 			spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_DRE_Msk;
 			spi->SERCOM_INTENSET = SERCOM_SPI_INTENSET_TXC_Msk;
 		}
@@ -948,12 +1001,12 @@ static void spi_mchp_isr_master(const struct device *dev)
 
 	/* 4. Handle transmit complete (Final Completion) */
 	if (tx_complete == true) {
+
 		spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_TXC_Msk;
 
 		if ((spi_context_rx_on(&data->ctx) != true) &&
 		    (spi_context_tx_on(&data->ctx) != true)) {
 
-			spi->SERCOM_INTFLAG = (uint8_t)SERCOM_SPI_INTFLAG_ERROR_Msk;
 			spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_RXC_Msk |
 					       SERCOM_SPI_INTENCLR_DRE_Msk |
 					       SERCOM_SPI_INTENCLR_TXC_Msk;
@@ -965,26 +1018,25 @@ static void spi_mchp_isr_master(const struct device *dev)
 
 static void spi_mchp_isr(const struct device *dev)
 {
-#if CONFIG_SPI_SLAVE
+#ifdef CONFIG_SPI_PERIPHERAL
 	struct spi_mchp_dev_data *data = dev->data;
 
-	if (spi_context_is_slave(&data->ctx) == true) {
-		spi_mchp_isr_slave(dev);
+	if (spi_context_is_peripheral(&data->ctx) == true) {
+		spi_mchp_isr_peripheral(dev);
 
 		return;
 	}
-#endif /* CONFIG_SPI_SLAVE */
+#endif /* CONFIG_SPI_PERIPHERAL */
 
-	spi_mchp_isr_master(dev);
+	spi_mchp_isr_controller(dev);
 }
-#endif /* CONFIG_SPI_MCHP_DMA_DRIVEN */
 
 static int spi_mchp_init(const struct device *dev)
 {
 	int retval;
 	const struct spi_mchp_dev_config *cfg = dev->config;
 	const struct mchp_spi_reg_config *spi_reg_cfg = &cfg->reg_cfg;
-	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_MASTER);
+	sercom_spi_registers_t *spi = SPI_GET_BASE_ADDR(spi_reg_cfg->regs, SPI_OP_MODE_CONTROLLER);
 	struct spi_mchp_dev_data *const data = dev->data;
 
 	retval = clock_control_on(cfg->spi_clock.clock_dev, cfg->spi_clock.gclk_sys);
@@ -1001,6 +1053,8 @@ static int spi_mchp_init(const struct device *dev)
 		return retval;
 	}
 
+	spi->SERCOM_CTRLA |= SERCOM_SPIM_CTRLA_SWRST_Msk;
+	spi_wait_sync(spi_reg_cfg, SERCOM_SPIM_SYNCBUSY_SWRST_Msk);
 	/* Disable all SPI Interrupts*/
 	spi->SERCOM_INTENCLR = SERCOM_SPI_INTENCLR_Msk;
 
@@ -1011,6 +1065,8 @@ static int spi_mchp_init(const struct device *dev)
 		return retval;
 	}
 
+	cfg->irq_config_func(dev);
+
 	spi_context_unlock_unconditionally(&data->ctx);
 
 	return 0;
@@ -1019,11 +1075,11 @@ static int spi_mchp_init(const struct device *dev)
 static DEVICE_API(spi, spi_mchp_api) = {
 	.transceive = spi_mchp_transceive,
 
-#if CONFIG_SPI_ASYNC
+#ifdef CONFIG_SPI_ASYNC
 	.transceive_async = spi_mchp_transceive_async,
 #endif /*CONFIG_SPI_ASYNC*/
 
-#if CONFIG_SPI_RTIO
+#ifdef CONFIG_SPI_RTIO
 	.iodev_submit = spi_rtio_iodev_default_submit,
 #endif /*CONFIG_SPI_RTIO*/
 
@@ -1037,34 +1093,22 @@ static DEVICE_API(spi, spi_mchp_api) = {
 	.reg_cfg.regs = (sercom_registers_t *)DT_INST_REG_ADDR(n),                                 \
 	.reg_cfg.pads = SPI_MCHP_SERCOM_PADS(n),
 
-#ifndef CONFIG_SPI_MCHP_DMA_DRIVEN
-#if DT_INST_IRQ_HAS_IDX(0, 3)
 #define SPI_MCHP_IRQ_HANDLER(n)                                                                    \
 	static void spi_mchp_irq_config_##n(const struct device *dev)                              \
 	{                                                                                          \
-		MCHP_SPI_IRQ_CONNECT(n, 0);                                                        \
-		MCHP_SPI_IRQ_CONNECT(n, 1);                                                        \
-		MCHP_SPI_IRQ_CONNECT(n, 2);                                                        \
-		MCHP_SPI_IRQ_CONNECT(n, 3);                                                        \
+		LISTIFY(                                         \
+		DT_INST_NUM_IRQS(n),                    \
+		MCHP_SPI_IRQ_CONNECT,                   \
+		(;),                                    \
+		n);                           \
 	}
-#else
-#define SPI_MCHP_IRQ_HANDLER(n)                                                                    \
-	static void spi_mchp_irq_config_##n(const struct device *dev)                              \
-	{                                                                                          \
-		MCHP_SPI_IRQ_CONNECT(n, 0);                                                        \
-	}
-#endif
-#else
-#define SPI_MCHP_IRQ_HANDLER(n)
-#endif /* CONFIG_SPI_MCHP_DMA_DRIVEN  */
 
 #define SPI_MCHP_CLOCK_DEFN(n)                                                                     \
 	.spi_clock.clock_dev = DEVICE_DT_GET(DT_NODELABEL(clock)),                                 \
 	.spi_clock.mclk_sys = (void *)(DT_INST_CLOCKS_CELL_BY_NAME(n, mclk, subsystem)),           \
 	.spi_clock.gclk_sys = (void *)(DT_INST_CLOCKS_CELL_BY_NAME(n, gclk, subsystem))
 
-#ifndef CONFIG_SPI_MCHP_DMA_DRIVEN
-#define MCHP_SPI_IRQ_CONNECT(n, m)                                                                 \
+#define MCHP_SPI_IRQ_CONNECT(m, n)                                                                 \
 	do {                                                                                       \
 		IRQ_CONNECT(DT_INST_IRQ_BY_IDX(n, m, irq), DT_INST_IRQ_BY_IDX(n, m, priority),     \
 			    spi_mchp_isr, DEVICE_DT_INST_GET(n), 0);                               \
@@ -1073,12 +1117,8 @@ static DEVICE_API(spi, spi_mchp_api) = {
 
 #define SPI_MCHP_IRQ_HANDLER_DECL(n) static void spi_mchp_irq_config_##n(const struct device *dev)
 #define SPI_MCHP_IRQ_HANDLER_FUNC(n) .irq_config_func = spi_mchp_irq_config_##n,
-#else
-#define SPI_MCHP_IRQ_HANDLER_DECL(n)
-#define SPI_MCHP_IRQ_HANDLER_FUNC(n)
-#endif /* CONFIG_SPI_MCHP_DMA_DRIVEN  */
 
-#if CONFIG_SPI_MCHP_DMA_DRIVEN
+#ifdef CONFIG_SPI_MCHP_DMA_DRIVEN
 #define SPI_MCHP_DMA_CHANNELS(n)                                                                   \
 	.spi_dma.dma_dev = DEVICE_DT_GET(MCHP_DT_INST_DMA_CTLR(n, tx)),                            \
 	.spi_dma.tx_dma_request = MCHP_DT_INST_DMA_TRIGSRC(n, tx),                                 \

@@ -269,8 +269,7 @@ static void tx_work_handler(struct k_work *work)
 		return;
 	}
 
-	len = ring_buf_get_claim(dev_data->tx_ringbuf, &data,
-				 CONFIG_USB_CDC_ACM_RINGBUF_SIZE);
+	len = ring_buf_get_ptr(dev_data->tx_ringbuf, &data, 0);
 
 	if (!len) {
 		LOG_DBG("Nothing to send");
@@ -294,7 +293,7 @@ static void tx_work_handler(struct k_work *work)
 	usb_transfer(ep, data, len, USB_TRANS_WRITE,
 		     cdc_acm_write_cb, dev_data);
 
-	ring_buf_get_finish(dev_data->tx_ringbuf, len);
+	ring_buf_consume(dev_data->tx_ringbuf, len);
 }
 
 static void cdc_acm_read_cb(uint8_t ep, int size, void *priv)
@@ -687,10 +686,8 @@ static int cdc_acm_irq_is_pending(const struct device *dev)
  * @brief Update IRQ status
  *
  * @param dev CDC ACM device struct.
- *
- * @return Always 1
  */
-static int cdc_acm_irq_update(const struct device *dev)
+static void cdc_acm_irq_update(const struct device *dev)
 {
 	struct cdc_acm_dev_data_t * const dev_data = dev->data;
 
@@ -701,8 +698,6 @@ static int cdc_acm_irq_update(const struct device *dev)
 	if (ring_buf_is_empty(dev_data->rx_ringbuf)) {
 		dev_data->rx_ready = false;
 	}
-
-	return 1;
 }
 
 /**

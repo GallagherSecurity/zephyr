@@ -9,8 +9,11 @@ config SOC_SERIES_ESP32S2
 	select PINCTRL
 	select HAS_ESPRESSIF_HAL
 	select ARCH_SUPPORTS_COREDUMP
+	select ARCH_HAS_WORD_GRANULAR_ACCESS_INSTR_MEM
+	select CPU_HAS_DCACHE
 	select HAS_PM
 	select HAS_POWEROFF
+	imply XTENSA_ENABLE_BACKTRACE
 
 if SOC_SERIES_ESP32S2
 
@@ -82,5 +85,7 @@ config ESP32S2_DATA_CACHE_SIZE
 	default 0x0000
 
 endmenu  # Cache config
+
+rsource "Kconfig.caps"
 
 endif # SOC_SERIES_ESP32S2

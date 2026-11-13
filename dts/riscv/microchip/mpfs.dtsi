@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <freq.h>
 #include <skeleton.dtsi>
 #include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/reset/mchp_mss_reset.h>
@@ -15,6 +16,8 @@
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
+		/* mtimer clock is configured to 1 MHz, independent of the CPU clock */
+		timebase-frequency = <DT_FREQ_M(1)>;
 
 		cpu@0 {
 			clock-frequency = <0>;
@@ -39,6 +42,7 @@
 			reg = <0x1>;
 			riscv,isa-base = "rv64i";
 			riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+			riscv,privilege-modes = "m", "s";
 
 			hlic1: interrupt-controller {
 				compatible = "riscv,cpu-intc";
@@ -55,6 +59,7 @@
 			reg = <0x2>;
 			riscv,isa-base = "rv64i";
 			riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+			riscv,privilege-modes = "m", "s";
 
 			hlic2: interrupt-controller {
 				compatible = "riscv,cpu-intc";
@@ -71,6 +76,7 @@
 			reg = <0x3>;
 			riscv,isa-base = "rv64i";
 			riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+			riscv,privilege-modes = "m", "s";
 
 			hlic3: interrupt-controller {
 				compatible = "riscv,cpu-intc";
@@ -87,6 +93,7 @@
 			reg = <0x4>;
 			riscv,isa-base = "rv64i";
 			riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr", "zifencei";
+			riscv,privilege-modes = "m", "s";
 
 			hlic4: interrupt-controller {
 				compatible = "riscv,cpu-intc";
@@ -266,8 +273,6 @@
 			reg = <0x20120000 0x1000>;
 			interrupt-parent = <&plic>;
 			interrupts = <51 1>;
-			interrupt-controller;
-			#interrupt-cells = <1>;
 			gpio-controller;
 			#gpio-cells = <2>;
 			ngpios = <32>;
@@ -279,8 +284,6 @@
 			reg = <0x20121000 0x1000>;
 			interrupt-parent = <&plic>;
 			interrupts = <52 1>;
-			interrupt-controller;
-			#interrupt-cells = <1>;
 			gpio-controller;
 			#gpio-cells = <2>;
 			ngpios = <32>;
@@ -292,8 +295,6 @@
 			reg = <0x20122000 0x1000>;
 			interrupt-parent = <&plic>;
 			interrupts = <53 1>;
-			interrupt-controller;
-			#interrupt-cells = <1>;
 			gpio-controller;
 			#gpio-cells = <2>;
 			ngpios = <32>;
@@ -319,6 +320,17 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 			clock-frequency = <100000>;
+			status = "disabled";
+		};
+
+		rtc: rtc@20124000 {
+			compatible = "microchip,rtc-mss";
+			reg = <0x20124000 0x1000>;
+			interrupt-parent = <&plic>;
+			interrupts = <80 1>, <81 1>;
+			clock-frequency = <125000000>;
+			prescaler = <786432>;
+			alarms-count = <2>;
 			status = "disabled";
 		};
 	};

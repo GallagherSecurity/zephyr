@@ -6,14 +6,15 @@
 /**
  * @file
  * @brief Helper functions to use by the TCPCI-compliant drivers
+ * @ingroup usb_type_c_port_controller_api
  *
  * This file contains generic TCPCI functions that may be used by the drivers to TCPCI-compliant
  * devices that want to implement vendor-specific functionality without the need to reimplement the
  * TCPCI generic functionality and register operations.
  */
 
-#ifndef ZEPHYR_INCLUDE_DRIVERS_USBC_TCPCI_PRIV_H_
-#define ZEPHYR_INCLUDE_DRIVERS_USBC_TCPCI_PRIV_H_
+#ifndef ZEPHYR_INCLUDE_DRIVERS_USB_C_TCPCI_PRIV_H_
+#define ZEPHYR_INCLUDE_DRIVERS_USB_C_TCPCI_PRIV_H_
 
 #include <stdint.h>
 #include <zephyr/drivers/i2c.h>
@@ -41,9 +42,10 @@ struct tcpci_reg_dump_map {
  */
 extern const struct tcpci_reg_dump_map tcpci_std_regs[TCPCI_STD_REGS_SIZE];
 
-/** Type-C Port Controller Interface Specification Revision */
-#define PD_INT_REV10 0x10 /* Revision 1.0 */
-#define PD_INT_REV20 0x20 /* Revision 2.0 */
+/** Type-C Port Controller Interface Specification Revision 1.0 */
+#define PD_INT_REV10 0x10
+/** Type-C Port Controller Interface Specification Revision 2.0 */
+#define PD_INT_REV20 0x20
 
 /**
  * @brief Function to read the 8-bit register of TCPCI device
@@ -235,15 +237,58 @@ int tcpci_tcpm_set_cc_polarity(const struct i2c_dt_spec *bus, enum tc_cc_polarit
 int tcpci_tcpm_set_vconn(const struct i2c_dt_spec *bus, bool enable);
 
 /**
- * @brief Function to get the status of a specific TCPCI status register.
+ * @brief Function to get the status of the TCPCI alert register.
  *
  * @param bus I2C bus
- * @param reg Enum representing the status register to be read
  * @param status Pointer to the variable where the status will be stored
  * @return int Status of I2C operation, 0 in case of success
  */
-int tcpci_tcpm_get_status_register(const struct i2c_dt_spec *bus, enum tcpc_status_reg reg,
-				   uint16_t *status);
+int tcpci_tcpm_get_alert_status(const struct i2c_dt_spec *bus, uint16_t *status);
+
+/**
+ * @brief Function to get the status of the TCPCI CC status register.
+ *
+ * @param bus I2C bus
+ * @param status Pointer to the variable where the status will be stored
+ * @return int Status of I2C operation, 0 in case of success
+ */
+int tcpci_tcpm_get_cc_status(const struct i2c_dt_spec *bus, uint8_t *status);
+
+/**
+ * @brief Function to get the status of the TCPCI power status register.
+ *
+ * @param bus I2C bus
+ * @param status Pointer to the variable where the status will be stored
+ * @return int Status of I2C operation, 0 in case of success
+ */
+int tcpci_tcpm_get_power_status(const struct i2c_dt_spec *bus, uint8_t *status);
+
+/**
+ * @brief Function to get the status of the TCPCI fault status register.
+ *
+ * @param bus I2C bus
+ * @param status Pointer to the variable where the status will be stored
+ * @return int Status of I2C operation, 0 in case of success
+ */
+int tcpci_tcpm_get_fault_status(const struct i2c_dt_spec *bus, uint8_t *status);
+
+/**
+ * @brief Function to get the status of the TCPCI extended status register.
+ *
+ * @param bus I2C bus
+ * @param status Pointer to the variable where the status will be stored
+ * @return int Status of I2C operation, 0 in case of success
+ */
+int tcpci_tcpm_get_extended_status(const struct i2c_dt_spec *bus, uint8_t *status);
+
+/**
+ * @brief Function to get the status of the TCPCI extended alert status register.
+ *
+ * @param bus I2C bus
+ * @param status Pointer to the variable where the status will be stored
+ * @return int Status of I2C operation, 0 in case of success
+ */
+int tcpci_tcpm_get_extended_alert_status(const struct i2c_dt_spec *bus, uint8_t *status);
 
 /**
  * @brief Function to clear specific bits in a TCPCI status register.
@@ -325,4 +370,4 @@ int tcpci_tcpm_set_debug_accessory(const struct i2c_dt_spec *bus, bool enable);
  */
 int tcpci_tcpm_set_low_power_mode(const struct i2c_dt_spec *bus, bool enable);
 
-#endif /* ZEPHYR_INCLUDE_DRIVERS_USBC_TCPCI_PRIV_H_ */
+#endif /* ZEPHYR_INCLUDE_DRIVERS_USB_C_TCPCI_PRIV_H_ */

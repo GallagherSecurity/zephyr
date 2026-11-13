@@ -22,6 +22,46 @@
 #include <soc_isr_stacking.h>
 #endif
 
+#ifdef CONFIG_RISCV_SOC_HAS_SYSCALL_INTMASK
+#include <soc_syscall.h>
+#endif
+
+/*
+* Privilege-level abstractions. When CONFIG_RISCV_S_MODE is set the
+* kernel runs in Supervisor mode and must use S-mode CSRs. Otherwise
+* it runs in Machine mode and uses M-mode CSRs.
+*/
+#ifdef CONFIG_RISCV_S_MODE
+#define RV_SCRATCH   sscratch
+#define RV_CAUSE     scause
+#define RV_EPC       sepc
+#define RV_STATUS    sstatus
+#define RV_TVAL      stval
+#define STATUS_IE    SSTATUS_SIE
+#define STATUS_PP    SSTATUS_SPP
+#define STATUS_PIE   SSTATUS_SPIE
+#define TRAP_RET     sret
+/*
+ * In S-mode, ecall (cause=9) is kept in M-mode for SBI.  ARCH_EXCEPT in
+ * kernel context uses ebreak (cause=3, breakpoint) which IS delegated to
+ * S-mode.  The is_kernel_syscall handler below recognises this via t0==0
+ * (RV_ECALL_RUNTIME_EXCEPT) and reads the reason from saved a0.
+ */
+#define EXC_SYSCALL  RISCV_EXC_BREAKPOINT
+#else
+#define RV_SCRATCH   mscratch
+#define RV_CAUSE     mcause
+#define RV_EPC       mepc
+#define RV_STATUS    mstatus
+#define RV_TVAL      mtval
+#define STATUS_IE    MSTATUS_IEN
+#define STATUS_PP    MSTATUS_MPP
+#define STATUS_PIE   MSTATUS_MPIE
+#define TRAP_RET     mret
+#define EXC_SYSCALL  RISCV_EXC_ECALLM
+#endif
+
+
 /* Convenience macro for loading/storing register states. */
 #define DO_CALLER_SAVED(op) \
 	RV_E(	op t0, __struct_arch_esf_t0_OFFSET(sp)	);\
@@ -67,14 +107,17 @@
 
 	.macro get_current_cpu dst
 #if defined(CONFIG_SMP) || defined(CONFIG_USERSPACE)
-	csrr \dst, mscratch
+	csrr \dst, RV_SCRATCH
 #else
 	la \dst, _kernel + ___kernel_t_cpus_OFFSET
 #endif
 	.endm
 
 /* imports */
+#if defined(CONFIG_GEN_SW_ISR_TABLE)
 GDATA(_sw_isr_table)
+#endif
+GDATA(_kernel)
 GTEXT(__soc_handle_irq)
 GTEXT(z_riscv_fault)
 GTEXT(z_irq_spurious)
@@ -141,15 +184,15 @@ SECTION_FUNC(exception.entry, _isr_wrapper)
 
 #ifdef CONFIG_USERSPACE
 	/* retrieve address of _current_cpu preserving s0 */
-	csrrw s0, mscratch, s0
+	csrrw s0, RV_SCRATCH, s0
 
 	/* preserve t0 and t1 temporarily */
 	sr t0, _curr_cpu_arch_user_exc_tmp0(s0)
 	sr t1, _curr_cpu_arch_user_exc_tmp1(s0)
 
 	/* determine if we come from user space */
-	csrr t0, mstatus
-	li t1, MSTATUS_MPP
+	csrr t0, RV_STATUS
+	li t1, STATUS_PP
 	and t0, t0, t1
 	bnez t0, 1f
 
@@ -185,8 +228,8 @@ SECTION_FUNC(exception.entry, _isr_wrapper)
 	lr t0, _curr_cpu_arch_user_exc_tmp0(s0)
 	lr t1, _curr_cpu_arch_user_exc_tmp1(s0)
 
-	/* retrieve original s0 and restore _current_cpu in mscratch */
-	csrrw s0, mscratch, s0
+	/* retrieve original s0 and restore _current_cpu in RV_SCRATCH */
+	csrrw s0, RV_SCRATCH, s0
 #endif
 
 #ifdef CONFIG_RISCV_SOC_HAS_ISR_STACKING
@@ -202,17 +245,17 @@ SECTION_FUNC(exception.entry, _isr_wrapper)
 	get_current_cpu s0
 
 #ifdef CONFIG_CLIC_SUPPORT_INTERRUPT_LEVEL
-	/* Save mcause register */
-	csrr t0, mcause
+	/* Save RV_CAUSE register */
+	csrr t0, RV_CAUSE
 	sr t0, __struct_arch_esf_mcause_OFFSET(sp)
 #endif /* CONFIG_CLIC_SUPPORT_INTERRUPT_LEVEL */
 
-	/* Save MEPC register */
-	csrr t0, mepc
+	/* Save RV_EPC register */
+	csrr t0, RV_EPC
 	sr t0, __struct_arch_esf_mepc_OFFSET(sp)
 
-	/* Save MSTATUS register */
-	csrr t2, mstatus
+	/* Save RV_STATUS register */
+	csrr t2, RV_STATUS
 	sr t2, __struct_arch_esf_mstatus_OFFSET(sp)
 
 #if defined(CONFIG_FPU_SHARING)
@@ -221,41 +264,76 @@ SECTION_FUNC(exception.entry, _isr_wrapper)
 	and t1, t1, t2
 	bnez t1, no_fp
 	/* determine if this is an Illegal Instruction exception */
-	csrr t2, mcause
+	csrr t2, RV_CAUSE
 	li t1, CONFIG_RISCV_MCAUSE_EXCEPTION_MASK
 	and t2, t2, t1
 	li t1, 2		/* 2 = illegal instruction */
 	bne t1, t2, no_fp
 	/* determine if we trapped on an FP instruction. */
-	csrr t2, mtval		/* get faulting instruction */
+	csrr t2, RV_TVAL	/* get faulting instruction */
 #ifdef CONFIG_RISCV_NO_MTVAL_ON_FP_TRAP
 	/*
 	 * Some implementations may not support MTVAL in this capacity.
 	 * Notably QEMU when a CSR instruction is involved.
 	 */
 	bnez t2, 1f
-	lw t2, 0(t0)		/* t0 = mepc */
+#ifdef CONFIG_RISCV_NO_MTVAL_ON_FP_TRAP_UNALIGNED
+	/* The CPU may not be capable of loading an unaligned instruction with lw,
+	 * but would've been capable of executing it.
+	 */
+	/* Check if instruction is word-aligned */
+	andi t2, t0, 3
+	beqz t2, 2f
+	/* Instruction is not aligned, fetch each halfword separately and concat into instruction */
+	lhu t2, 2(t0)
+	slli t2, t2, 16
+	lhu t1, 0(t0)
+	or t2, t2, t1
+	j 1f
+2:
+#endif
+	lw t2, 0(t0)		/* t0 = RV_EPC */
 1:
 #endif
-	andi t0, t2, 0x7f	/* keep only the opcode bits */
-	/*
+	/* Move to RVC check if the instruction is not 32-bit encoded */
+	andi t0, t2, 3
+	xori t0, t0, 3
+	bnez t0, 2f		/* not a 32-bit encoding, RVC check below */
+
+	/* RISC-V base floating-point opcodes are 7 bits long. We map them
+	 * into a 32-bit O(1) lookup table by shifting the opcode right by 2.
+	 *
+	 * Opcodes and their resulting lookup bit indices:
 	 * Major FP opcodes:
-	 * 0000111 = LOAD-FP
-	 * 0100111 = STORE-FP
-	 * 1000011 = MADD
-	 * 1000111 = MSUB
-	 * 1001011 = NMSUB
-	 * 1001111 = NMADD
-	 * 1010011 = OP-FP
+	 * 0000111 = LOAD-FP  >> 2 -> 1
+	 * 0100111 = STORE-FP >> 2 -> 9
+	 * 1000011 = MADD     >> 2 -> 16
+	 * 1000111 = MSUB     >> 2 -> 17
+	 * 1001011 = NMSUB    >> 2 -> 18
+	 * 1001111 = NMADD    >> 2 -> 19
+	 * 1010011 = OP-FP    >> 2 -> 20
+	 *
+	 * Combined Bitmask: 0x001F0202
+	 *
+	 * When funct3 is not 1, 2, 3 or 4, 0*00111 is not floating point
+	 * Combined Bitmask in this case: 0x001F0000
 	 */
-	xori t1, t0, 0b1010011	/* OP-FP */
-	beqz t1, is_fp
-	ori  t1, t0, 0b0100000
-	xori t1, t1, 0b0100111	/* LOAD-FP / STORE-FP */
-	beqz t1, is_fp
-	ori  t1, t0, 0b0001100
-	xori t1, t1, 0b1001111	/* MADD / MSUB / NMSUB / NMADD */
-	beqz t1, is_fp
+	/* 1. Preparing the Bitmask (Done first for efficient register usage) */
+	/* Lower 12 bit masks should be 0 for vector instructions */
+	li t0, 0x3c3c
+	srli t1, t2, 12
+	andi t1, t1, 7
+	srl t0, t0, t1
+	andi t0, t0, 0x202 /* 0 for vector instructions with opcode 0b0*00111 */
+	li   t1, 0x001F0000 /* Load the pre-calculated O(1) upper 20 bits of FP opcode bitmask */
+	or t1, t1, t0       /* Final bitmask which accounts for vector instructions */
+
+	/* 2. Perform the O(1) branchless lookup */
+	srli t0, t2, 2
+	andi t0, t0, 0x1f
+	srl  t1, t1, t0		/* bit 0 set = FP major opcode */
+	andi t1, t1, 1
+	bnez t1, is_fp
 	/*
 	 * The FRCSR, FSCSR, FRRM, FSRM, FSRMI, FRFLAGS, FSFLAGS and FSFLAGSI
 	 * are in fact CSR instructions targeting the fcsr, frm and fflags
@@ -265,7 +343,8 @@ SECTION_FUNC(exception.entry, _isr_wrapper)
 	 * SYSTEM = 0b1110011, op = 0b.xx where xx is never 0
 	 * The csr# of interest are: 1=fflags, 2=frm, 3=fcsr
 	 */
-	xori t1, t0, 0b1110011	/* SYSTEM opcode */
+	/* t0 holds t2[6:2]. Check for SYSTEM opcode (28) since its verified t2[1:0] == 0b11 */
+	xori t1, t0, 0b11100
 	bnez t1, 2f		/* not a CSR insn */
 	srli t0, t2, 12
 	andi t0, t0, 0x3
@@ -326,11 +405,11 @@ no_fp:	/* increment _current->arch.exception_depth */
 
 	/*
 	 * Check if exception is the result of an interrupt or not.
-	 * (SOC dependent). Following the RISC-V architecture spec, the MSB
-	 * of the mcause register is used to indicate whether an exception
+	 * Following the RISC-V architecture spec, the MSB
+	 * of the RV_CAUSE register is used to indicate whether an exception
 	 * is the result of an interrupt or an exception/fault.
 	 */
-	csrr t0, mcause
+	csrr t0, RV_CAUSE
 	bltz t0, is_interrupt
 
 	/*
@@ -338,15 +417,17 @@ no_fp:	/* increment _current->arch.exception_depth */
 	 * perform a context-switch or an IRQ offload. Otherwise call z_riscv_fault
 	 * to report the exception.
 	 */
+	csrr t0, RV_CAUSE
 #if CONFIG_RISCV_MCAUSE_EXCEPTION_MASK < ((1LLU << (__riscv_xlen - 1)) - 1LLU)
 	li t2, CONFIG_RISCV_MCAUSE_EXCEPTION_MASK
 	and t0, t0, t2
 #endif
 
-	/* If mcause == RISCV_EXC_ECALLM, handle system call from
+	/*
+	 * If RV_CAUSE == RISCV_EXC_ECALLM, handle system call from
 	 * kernel thread.
 	 */
-	li t1, RISCV_EXC_ECALLM
+	li t1, EXC_SYSCALL
 	beq t0, t1, is_kernel_syscall
 
 #ifdef CONFIG_USERSPACE
@@ -366,7 +447,7 @@ no_fp:	/* increment _current->arch.exception_depth */
 #endif /* CONFIG_CUSTOM_STACK_GUARD */
 
 	/*
-	 * If mcause == RISCV_EXC_ECALLU, handle system call
+	 * If RV_CAUSE == RISCV_EXC_ECALLU, handle system call
 	 * for user mode thread.
 	 */
 	li t1, RISCV_EXC_ECALLU
@@ -377,8 +458,8 @@ no_fp:	/* increment _current->arch.exception_depth */
 	 * Determine if we come from user space. If so, reconfigure the PMP for
 	 * kernel mode configuration.
 	 */
-	csrr t0, mstatus
-	li t1, MSTATUS_MPP
+	csrr t0, RV_STATUS
+	li t1, STATUS_PP
 	and t0, t0, t1
 	bnez t0, 1f
 	lr a0, ___cpu_t_current_OFFSET(s0)
@@ -415,8 +496,8 @@ no_fp:	/* increment _current->arch.exception_depth */
 is_kernel_syscall:
 	/*
 	 * A syscall is the result of an ecall instruction, in which case the
-	 * MEPC will contain the address of the ecall instruction.
-	 * Increment saved MEPC by 4 to prevent triggering the same ecall
+	 * RV_EPC will contain the address of the ecall instruction.
+	 * Increment saved RV_EPC by 4 to prevent triggering the same ecall
 	 * again upon exiting the ISR.
 	 *
 	 * It's safe to always increment by 4, even with compressed
@@ -428,10 +509,10 @@ is_kernel_syscall:
 
 #ifdef CONFIG_PMP_KERNEL_MODE_DYNAMIC
 	/* Re-activate PMP for m-mode */
-	li t1, MSTATUS_MPP
-	csrc mstatus, t1
+	li t1, STATUS_PP
+	csrc RV_STATUS, t1
 	li t1, MSTATUS_MPRV
-	csrs mstatus, t1
+	csrs RV_STATUS, t1
 #endif
 
 	/* Determine what to do. Operation code is in t0. */
@@ -546,13 +627,49 @@ is_user_syscall:
 	 */
 	lr a0, ___cpu_t_current_OFFSET(s0)
 	call z_riscv_pmp_kernelmode_enable
-#endif
+#endif /* CONFIG_PMP_KERNEL_MODE_DYNAMIC */
 
-	/* It is safe to re-enable IRQs now */
-	csrs mstatus, MSTATUS_IEN
+#ifdef CONFIG_RISCV_SOC_HAS_SYSCALL_INTMASK
+	/* On some SoCs an interrupt taken in the syscall body must be held off
+	 * without clearing mstatus.MIE. The SoC provides SOC_SYSCALL_INTMASK to
+	 * mask the body its own way, for example by raising a hardware
+	 * interrupt level threshold. The state it changes is part of the SoC
+	 * context saved on entry, so the exception exit path restores it on
+	 * syscall return, and a context switch out of the body lands in the
+	 * incoming thread's own exit path with its own saved state.
+	 *
+	 * The caller-saved temporaries are free here: the dispatch above is
+	 * done with them and the syscall arguments are reloaded from the ESF
+	 * below, so the macro may clobber them.
+	 */
+	SOC_SYSCALL_INTMASK
+#endif
+	/* It is safe to re-enable IRQs now. */
+	csrs RV_STATUS, STATUS_IE
+
+#ifdef CONFIG_RISCV_SOC_SYSCALL_CLOSE_ECALL
+	/*
+	 * Leave the ecall exception before running the syscall body. On some
+	 * SoCs a fault raised by the body itself, such as the stack guard
+	 * catching a call chain that runs too deep, cannot be delivered while
+	 * this exception is open and locks the core up instead.
+	 *
+	 * Return to the next instruction with the previous privilege set to
+	 * machine mode, so the body continues on this stack with these
+	 * privileges but outside the exception. The exception program counter
+	 * and status register are already saved in the frame and the exit path
+	 * reloads both, so borrowing them here is safe.
+	 */
+	la t0, close_ecall_done
+	csrw RV_EPC, t0
+	li t0, STATUS_PP | STATUS_PIE
+	csrs RV_STATUS, t0
+	TRAP_RET
+close_ecall_done:
+#endif /* CONFIG_RISCV_SOC_SYSCALL_CLOSE_ECALL */
 
 	/*
-	 * Same as for is_kernel_syscall: increment saved MEPC by 4 to
+	 * Same as for is_kernel_syscall: increment saved RV_EPC by 4 to
 	 * prevent triggering the same ecall again upon exiting the ISR.
 	 */
 	lr t1, __struct_arch_esf_mepc_OFFSET(sp)
@@ -603,7 +720,7 @@ valid_syscall_id:
 	sr a0, __struct_arch_esf_a0_OFFSET(sp)
 
 	/* Disable IRQs again before leaving */
-	csrc mstatus, MSTATUS_IEN
+	csrc RV_STATUS, STATUS_IE
 	j might_have_rescheduled
 #endif /* CONFIG_USERSPACE */
 
@@ -616,20 +733,24 @@ is_interrupt:
 	 * PMP for kernel mode configuration.
 	 */
 	lr t0, __struct_arch_esf_mstatus_OFFSET(sp)
-	li t1, MSTATUS_MPP
+	li t1, STATUS_PP
 	and t0, t0, t1
 	bnez t0, 1f
 	lr a0, ___cpu_t_current_OFFSET(s0)
 	call z_riscv_pmp_kernelmode_enable
 	j 2f
 #endif /* CONFIG_USERSPACE */
+#ifndef CONFIG_RISCV_S_MODE
 1:	/* Re-activate PMP for m-mode */
-	li t1, MSTATUS_MPP
-	csrc mstatus, t1
+	li t1, STATUS_PP
+	csrc RV_STATUS, t1
 	li t1, MSTATUS_MPRV
-	csrs mstatus, t1
-2:
+	csrs RV_STATUS, t1
+#else
+1:
 #endif
+2:
+#endif /* CONFIG_PMP_KERNEL_MODE_DYNAMIC */
 
 	/* Increment _current_cpu->nested */
 	lw t1, ___cpu_t_nested_OFFSET(s0)
@@ -670,7 +791,7 @@ on_irq_stack:
 #endif
 
 	/* Get IRQ causing interrupt */
-	csrr a0, mcause
+	csrr a0, RV_CAUSE
 	li t0, CONFIG_RISCV_MCAUSE_EXCEPTION_MASK
 	and a0, a0, t0
 
@@ -742,6 +863,20 @@ check_reschedule:
 	/* Get pointer to current thread on this CPU */
 	lr a1, ___cpu_t_current_OFFSET(s0)
 
+#if !defined(CONFIG_SMP) && !defined(CONFIG_SCHED_THREAD_USAGE)
+	/*
+	 * Fast path: when the scheduler's ready queue cache still designates
+	 * the current thread, no reschedule is needed.  In that case all of
+	 * the bookkeeping in z_get_next_switch_handle() reduces to no-ops on
+	 * uniprocessor builds (and the stack sentinel, when enabled, was
+	 * already checked above), so the call can be skipped altogether.
+	 * This is the common case when returning from an interrupt.
+	 */
+	la t0, _kernel
+	lr t0, _kernel_offset_to_ready_q_cache(t0)
+	beq t0, a1, no_reschedule
+#endif /* !CONFIG_SMP && !CONFIG_SCHED_THREAD_USAGE */
+
 	/*
 	 * Get next thread to schedule with z_get_next_switch_handle().
 	 * We pass it a NULL as we didn't save the whole thread context yet.
@@ -765,6 +900,7 @@ reschedule:
 	call z_riscv_switch
 
 z_riscv_thread_start:
+
 might_have_rescheduled:
 	/* reload s0 with &_current_cpu as it might have changed or be unset */
 	get_current_cpu s0
@@ -792,18 +928,18 @@ no_reschedule:
 fp_trap_exit:
 #endif
 
-	/* Restore MEPC and MSTATUS registers */
+	/* Restore RV_EPC and MSTATUS registers */
 	lr t0, __struct_arch_esf_mepc_OFFSET(sp)
 	lr t2, __struct_arch_esf_mstatus_OFFSET(sp)
 
 #ifdef CONFIG_CLIC_SUPPORT_INTERRUPT_LEVEL
-	/* Restore MCAUSE register for previous interrupt level. */
+	/* Restore RV_CAUSE register for previous interrupt level. */
 	lr t1, __struct_arch_esf_mcause_OFFSET(sp)
-	csrw mcause, t1
+	csrw RV_CAUSE, t1
 #endif /* CONFIG_CLIC_SUPPORT_INTERRUPT_LEVEL */
 
-	csrw mepc, t0
-	csrw mstatus, t2
+	csrw RV_EPC, t0
+	csrw RV_STATUS, t2
 
 #ifdef CONFIG_USERSPACE
 	/*
@@ -811,7 +947,7 @@ fp_trap_exit:
 	 * set is_user_mode to true and preserve our kernel mode stack for
 	 * the next exception to come.
 	 */
-	li t1, MSTATUS_MPP
+	li t1, STATUS_PP
 	and t0, t2, t1
 	bnez t0, 1f
 
@@ -819,7 +955,7 @@ fp_trap_exit:
 	/* Remove kernel mode configuration and Reconfigure PMP for user mode */
 	lr a0, ___cpu_t_current_OFFSET(s0)
 	call z_riscv_pmp_usermode_enable
-#endif
+#endif /* CONFIG_PMP_KERNEL_MODE_DYNAMIC */
 
 #ifdef CONFIG_CUSTOM_STACK_GUARD
 	/* Disable the custom stack guard in user mode */
@@ -866,4 +1002,4 @@ fp_trap_exit:
 
 #endif /* CONFIG_RISCV_SOC_HAS_ISR_STACKING */
 
-	mret
+	TRAP_RET

@@ -15,8 +15,9 @@ supported:
   - gpio
   - spi
   - i2c
+  - i2c_target
   - clock_control
-  - ble
+  - bluetooth
   - usbd
 testing:
   ignore_tags:

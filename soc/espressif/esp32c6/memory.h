@@ -37,7 +37,6 @@
 
 #define DRAM_SHARED_BUFFERS_START      0x4086ad08
 #define DRAM_SHARED_BUFFERS_END        0x4087c610
-#define DRAM_STACK_START        DRAM_SHARED_BUFFERS_END
 #define DRAM_ROM_BSS_DATA_START 0x4087e610
 
 /* Upper boundary of user-usable SRAM */
@@ -45,37 +44,47 @@
 
 /* Safety margin between MCUboot segments and ROM stack */
 #define BOOTLOADER_STACK_OVERHEAD      0x2000
-#define BOOTLOADER_IRAM_LOADER_SEG_LEN 0x3000
+
+#define BOOTLOADER_IRAM_LOADER_SEG_LEN 0x1C00
+#define BOOTLOADER_DRAM_LOADER_SEG_LEN 0x0C00
 
 /* Upper limit of SRAM available for MCUboot bootloader segments */
 #define BOOTLOADER_USER_DRAM_END (DRAM_SHARED_BUFFERS_END - BOOTLOADER_STACK_OVERHEAD)
 
-#define BOOTLOADER_IRAM_LOADER_SEG_START (BOOTLOADER_USER_DRAM_END - BOOTLOADER_IRAM_LOADER_SEG_LEN)
-
-/* MCUboot iram/dram segments: placed in upper half of SRAM, below iram_loader_seg.
+/* MCUboot iram/dram segments: placed in upper half of SRAM, below dram_loader_seg.
  * On unified-address SoCs (C6, H2) these are the same physical memory.
  * The lower half is reserved for the application image.
  */
+#define BOOTLOADER_IRAM_LOADER_SEG_START \
+	(BOOTLOADER_USER_DRAM_END - BOOTLOADER_IRAM_LOADER_SEG_LEN)
+#define BOOTLOADER_DRAM_LOADER_SEG_START \
+	(BOOTLOADER_IRAM_LOADER_SEG_START - BOOTLOADER_DRAM_LOADER_SEG_LEN)
 #define BOOTLOADER_IRAM_SEG_TARGET_LEN \
-	((BOOTLOADER_IRAM_LOADER_SEG_START - (HPSRAM_START + ICACHE_SIZE)) / 4)
+	((BOOTLOADER_DRAM_LOADER_SEG_START - (HPSRAM_START + ICACHE_SIZE)) / 4)
 #define BOOTLOADER_IRAM_SEG_START \
-	ALIGN_UP(BOOTLOADER_IRAM_LOADER_SEG_START - BOOTLOADER_IRAM_SEG_TARGET_LEN, 0x100)
+	ALIGN_UP(BOOTLOADER_DRAM_LOADER_SEG_START - BOOTLOADER_IRAM_SEG_TARGET_LEN, 0x100)
 #define BOOTLOADER_IRAM_SEG_LEN \
-	(BOOTLOADER_IRAM_LOADER_SEG_START - BOOTLOADER_IRAM_SEG_START)
+	(BOOTLOADER_DRAM_LOADER_SEG_START - BOOTLOADER_IRAM_SEG_START)
 #define BOOTLOADER_DRAM_SEG_LEN   BOOTLOADER_IRAM_SEG_LEN
 #define BOOTLOADER_DRAM_SEG_START \
 	(BOOTLOADER_IRAM_SEG_START - BOOTLOADER_DRAM_SEG_LEN)
 
 /* Flash */
-#ifdef CONFIG_FLASH_SIZE
-#define FLASH_SIZE CONFIG_FLASH_SIZE
-#else
-#define FLASH_SIZE 0x400000
-#endif
+#define FLASH_SIZE         DT_REG_SIZE(DT_CHOSEN(zephyr_flash))
+#define FLASH_BASE_ADDRESS DT_REG_ADDR(DT_CHOSEN(zephyr_flash))
 
-/* Cached memory */
+/* Cached memory - ESP32-C6 uses unified I/D address space
+ * From HAL ext_mem_defs.h: SOC_IRAM0_CACHE_ADDRESS_LOW = 0x42000000
+ */
 #define CACHE_ALIGN  CONFIG_MMU_PAGE_SIZE
 #define IROM_SEG_ORG 0x42000000
 #define IROM_SEG_LEN FLASH_SIZE
-#define DROM_SEG_ORG 0x42800000
+/* DROM shares the unified-cache linear address space with IROM. Placing
+ * drom0_0_seg at the same origin lets the linker emit .flash.rodata
+ * immediately after .text, so the linear range the memory mapper
+ * reserves for the image (irom_len + drom_len) matches the virtual
+ * range the image actually occupies and later mappings cannot land on
+ * it.
+ */
+#define DROM_SEG_ORG IROM_SEG_ORG
 #define DROM_SEG_LEN FLASH_SIZE

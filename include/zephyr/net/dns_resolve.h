@@ -19,6 +19,7 @@
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/socket_poll.h>
 #include <zephyr/net/net_core.h>
+#include <zephyr/sys/atomic.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,7 +29,7 @@ extern "C" {
  * @brief DNS resolving library
  * @defgroup dns_resolve DNS Resolve Library
  * @since 1.8
- * @version 0.8.0
+ * @version 0.9.0
  * @ingroup networking
  * @{
  */
@@ -48,8 +49,32 @@ enum dns_query_type {
 	/** IPv6 query */
 	DNS_QUERY_TYPE_AAAA = 28,
 	/** Service location query */
-	DNS_QUERY_TYPE_SRV = 33
+	DNS_QUERY_TYPE_SRV = 33,
+	/** Request all record types query */
+	DNS_QUERY_TYPE_ANY = 255,
+	/** Reserved query type value */
+	DNS_QUERY_TYPE_RESERVED = 65535,
 };
+
+
+/** Private RR type range start (@rfc{6895}) */
+#define DNS_RR_TYPE_PRIVATE_START_VALUE 65280
+/** Private RR type range end (@rfc{6895}) */
+#define DNS_RR_TYPE_PRIVATE_END_VALUE 65534
+
+/**
+ * @brief Check if query type is a private RR (@rfc{6895}: 65280-65534)
+ *
+ * @param type Query type to check
+ * @return true if type is in private RR range, false otherwise
+ */
+static inline bool dns_query_type_is_private(enum dns_query_type type)
+{
+	unsigned int val = (unsigned int)type;
+
+	return (val >= DNS_RR_TYPE_PRIVATE_START_VALUE &&
+		val <= DNS_RR_TYPE_PRIVATE_END_VALUE);
+}
 
 /**
  * Entity that added the DNS server.
@@ -82,6 +107,13 @@ enum dns_server_source {
 #else
 #define DNS_MAX_TEXT_SIZE 64
 #endif /* CONFIG_DNS_RESOLVER_MAX_TEXT_LEN */
+
+/** Max size of private RR data. */
+#if defined(CONFIG_DNS_RESOLVER_MAX_PRIVATE_DATA_LEN)
+#define DNS_MAX_PRIVATE_DATA_SIZE CONFIG_DNS_RESOLVER_MAX_PRIVATE_DATA_LEN
+#else
+#define DNS_MAX_PRIVATE_DATA_SIZE 128
+#endif /* CONFIG_DNS_RESOLVER_MAX_PRIVATE_DATA_LEN */
 
 /** @cond INTERNAL_HIDDEN */
 
@@ -179,6 +211,11 @@ enum dns_server_source {
 
 #define DNS_RESOLVER_MAX_POLL (DNS_RESOLVER_MAX_SERVERS + DNS_MAX_MCAST_SERVERS)
 
+/* Cap the max poll to 32 */
+BUILD_ASSERT(DNS_RESOLVER_MAX_POLL <= 32,
+	     "DNS_RESOLVER_MAX_POLL " STRINGIFY(DNS_RESOLVER_MAX_POLL)
+	     " must be smaller or equal than " STRINGIFY(32));
+
 /** How many sockets the dispatcher is able to poll. */
 #define DNS_DISPATCHER_MAX_POLL (DNS_RESOLVER_MAX_POLL + MDNS_MAX_POLL + LLMNR_MAX_POLL)
 
@@ -234,8 +271,15 @@ struct dns_socket_dispatcher {
 
 	/** Type of the socket (resolver / responder) */
 	enum dns_socket_type type;
-	/** Local endpoint address (used when binding the socket) */
-	struct net_sockaddr local_addr;
+	/** Local endpoint address storage */
+	union {
+		/** Local endpoint address (used when binding the socket) */
+		struct net_sockaddr_storage local_addr_storage;
+/** @cond INTERNAL_HIDDEN */
+		/* Use the local_addr_storage instead of this one. */
+		struct net_sockaddr local_addr;
+/** @endcond */
+	};
 	/** DNS socket dispatcher callback is called for incoming traffic */
 	dns_socket_dispatcher_cb cb;
 	/** Socket descriptors to poll */
@@ -250,6 +294,10 @@ struct dns_socket_dispatcher {
 	 * context if sharing the socket between resolver / responder.
 	 */
 	struct dns_socket_dispatcher *pair;
+	/** Registered as the pair of another context, which delegates to
+	 * this one and whose socket service delivers the traffic.
+	 */
+	bool paired;
 	/** Mutex lock protecting access to this dispatcher context */
 	struct k_mutex lock;
 	/** Buffer allocation timeout */
@@ -287,6 +335,7 @@ enum dns_resolve_extension {
 	DNS_RESOLVE_NONE = 0, /**< No extension in use   */
 	DNS_RESOLVE_TXT,      /**< TXT field is returned */
 	DNS_RESOLVE_SRV,      /**< SRV field is returned */
+	DNS_RESOLVE_PRIVATE,  /**< Private RR is returned */
 };
 
 /** TXT record information */
@@ -311,6 +360,16 @@ struct dns_resolve_srv {
 	char     target[DNS_MAX_NAME_SIZE + 1];
 };
 
+/** Private RR record information */
+struct dns_resolve_private {
+	/** RR type value (in private use range 65280-65534) */
+	uint16_t type;
+	/** Length of the data field */
+	size_t datalen;
+	/** Raw data from the private RR */
+	uint8_t data[DNS_MAX_PRIVATE_DATA_SIZE];
+};
+
 /**
  * Address info struct is passed to callback that gets all the results.
  */
@@ -325,7 +384,14 @@ struct dns_addrinfo {
 			net_socklen_t ai_addrlen;
 
 			/** NET_AF_INET or NET_AF_INET6 address info */
-			struct net_sockaddr ai_addr;
+			union {
+				/** Socket address info storage */
+				struct net_sockaddr_storage ai_addr_storage;
+/** @cond INTERNAL_HIDDEN */
+				/** Socket address info (use ai_addr_storage instead) */
+				struct net_sockaddr ai_addr;
+/** @endcond */
+			};
 
 			/** NET_AF_LOCAL Canonical name of the address */
 			char ai_canonname[DNS_MAX_NAME_SIZE + 1];
@@ -341,6 +407,10 @@ struct dns_addrinfo {
 				struct dns_resolve_txt ai_txt;
 				/** SRV record info */
 				struct dns_resolve_srv ai_srv;
+#if defined(CONFIG_DNS_RESOLVER_PRIVATE_RR_SUPPORT) || defined(__DOXYGEN__)
+				/** Private RR info */
+				struct dns_resolve_private ai_private;
+#endif /* CONFIG_DNS_RESOLVER_PRIVATE_RR_SUPPORT */
 			};
 		};
 	};
@@ -437,10 +507,16 @@ enum dns_resolve_context_state {
  * DNS resolve context structure.
  */
 struct dns_resolve_context {
-	/** List of configured DNS servers */
-	struct dns_server {
-		/** DNS server information */
-		struct net_sockaddr dns_server;
+	/** Information about one configured DNS server */
+	struct dns_server_info {
+		/** DNS server address storage */
+		union {
+			/** DNS server information */
+			struct net_sockaddr_storage dns_server_addr;
+/** @cond INTERNAL_HIDDEN */
+			struct net_sockaddr dns_server;
+/** @endcond */
+		};
 
 		/** Connection to the DNS server */
 		int sock;
@@ -462,8 +538,11 @@ struct dns_resolve_context {
 /** @cond INTERNAL_HIDDEN */
 		/** Dispatch DNS data between resolver and responder */
 		struct dns_socket_dispatcher dispatcher;
+
+		/** A reply from this server is being dispatched */
+		bool in_dispatch;
 /** @endcond */
-	} servers[DNS_RESOLVER_MAX_POLL];
+	} servers[DNS_RESOLVER_MAX_POLL]; /**< List of configured DNS servers */
 
 /** @cond INTERNAL_HIDDEN */
 	/** Socket polling for each server connection */
@@ -500,9 +579,6 @@ struct dns_resolve_context {
 		/** User data */
 		void *user_data;
 
-		/** TX timeout */
-		k_timeout_t timeout;
-
 		/** String containing the thing to resolve like www.example.com
 		 *
 		 * This is set to a non-null value when the query is started,
@@ -530,6 +606,12 @@ struct dns_resolve_context {
 		 */
 		uint16_t query_hash;
 
+		/** Hash of the original DNS name + query type as requested by
+		 * the caller. Unlike @ref query_hash, this remains constant
+		 * even as the query follows CNAME aliases.
+		 */
+		uint16_t orig_query_hash;
+
 		/* Number of additional queries sent to resolve CNAME record
 		 * name aliases.
 		 */
@@ -537,6 +619,24 @@ struct dns_resolve_context {
 
 		/** Flag to indicate that the callback has been called at least once. */
 		bool cb_called;
+
+		/** Query deadline used to keep server fallback within the original timeout. */
+		k_timepoint_t deadline;
+
+		/** Per-query state for configured DNS servers. */
+		struct {
+			/** Bitset of servers that have already been queried. */
+			atomic_t sent;
+
+			/** Bitset of servers currently awaiting a reply. */
+			atomic_t pending;
+
+			/** Bitset of servers that already failed this query. */
+			atomic_t failed;
+		} servers;
+
+		/** Most recent terminal status reported by an attempted server. */
+		enum dns_resolve_status last_status;
 	} queries[DNS_NUM_CONCUR_QUERIES];
 
 	/** Is this context in use */
@@ -562,7 +662,7 @@ struct mdns_probe_user_data {
 };
 
 struct mdns_responder_context {
-	struct net_sockaddr server_addr;
+	struct net_sockaddr_storage server_addr;
 	struct dns_socket_dispatcher dispatcher;
 	struct zsock_pollfd fds[1];
 	int sock;
@@ -627,6 +727,20 @@ int dns_resolve_init_default(struct dns_resolve_context *ctx);
  * @return 0 if ok, <0 if error.
  */
 int dns_resolve_close(struct dns_resolve_context *ctx);
+
+/**
+ * @brief Check if DNS resolving context is active.
+ *
+ * @details A context becomes active when it is initialized with at least one
+ * DNS server, and inactive when it is closed. The state says nothing about
+ * the servers themselves, for example whether they can be reached.
+ *
+ * @param ctx DNS context that dns_resolve_init() has been called on, or NULL.
+ *
+ * @retval true The context is active.
+ * @retval false The context is not active, or ctx is NULL.
+ */
+bool dns_resolve_is_active(struct dns_resolve_context *ctx);
 
 /**
  * @brief Reconfigure DNS resolving context.
@@ -758,9 +872,10 @@ int dns_resolve_cancel_with_name(struct dns_resolve_context *ctx,
  * Note that this is asynchronous call, the function will return immediately
  * and system will call the callback after resolving has finished or timeout
  * has occurred.
- * We might send the query to multiple servers (if there are more than one
- * server configured), but we only use the result of the first received
- * response.
+ * The resolver may query multiple configured servers. Depending on the
+ * configuration it will either send the request to all of them in parallel
+ * or advance through them one-by-one until one succeeds. Only the first
+ * successful response is reported to the caller.
  *
  * @param ctx DNS context
  * @param query What the caller wants to resolve.
@@ -861,9 +976,10 @@ static inline void dns_resolve_enable_packet_forwarding(struct dns_resolve_conte
  * Note that this is asynchronous call, the function will return immediately
  * and system will call the callback after resolving has finished or timeout
  * has occurred.
- * We might send the query to multiple servers (if there are more than one
- * server configured), but we only use the result of the first received
- * response.
+ * The resolver may query multiple configured servers. Depending on the
+ * configuration it will either send the request to all of them in parallel
+ * or advance through them one-by-one until one succeeds. Only the first
+ * successful response is reported to the caller.
  * This variant uses system wide DNS servers.
  *
  * @param query What the caller wants to resolve.
@@ -909,6 +1025,27 @@ static inline int dns_get_addr_info(const char *query,
 static inline int dns_cancel_addr_info(uint16_t dns_id)
 {
 	return dns_resolve_cancel(dns_resolve_get_default(), dns_id);
+}
+
+/**
+ * @brief Cancel a pending DNS query using id, name and type.
+ *
+ * @details This releases DNS resources used by a pending query.
+ *
+ * @param query_name Name of the resource we are trying to query (hostname)
+ * @param query_type Type of the query (A or AAAA)
+ * @param dns_id DNS id of the pending query
+ *
+ * @return 0 if ok, <0 if error.
+ */
+static inline int dns_cancel_addr_info_with_name(const char *query_name,
+					enum dns_query_type query_type,
+					uint16_t dns_id)
+{
+	return dns_resolve_cancel_with_name(dns_resolve_get_default(),
+				dns_id,
+				query_name,
+				query_type);
 }
 
 /**

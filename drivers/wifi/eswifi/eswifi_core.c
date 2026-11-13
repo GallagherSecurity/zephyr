@@ -537,6 +537,7 @@ static void eswifi_iface_init(struct net_if *iface)
 }
 
 int eswifi_mgmt_iface_status(const struct device *dev,
+			     struct net_if *iface __unused,
 			     struct wifi_iface_status *status)
 {
 	struct eswifi_dev *eswifi = dev->data;
@@ -553,6 +554,9 @@ int eswifi_mgmt_iface_status(const struct device *dev,
 	status->state = WIFI_STATE_COMPLETED;
 	status->ssid_len = strnlen(sta->ssid, WIFI_SSID_MAX_LEN);
 	strncpy(status->ssid, sta->ssid, status->ssid_len);
+	/* The ISM43362 is a 2.4 GHz only part and does not report the channel
+	 * it is on, so the band cannot be derived from the channel here.
+	 */
 	status->band = WIFI_FREQ_BAND_2_4_GHZ;
 	status->channel = 0;
 
@@ -582,6 +586,7 @@ int eswifi_mgmt_iface_status(const struct device *dev,
 }
 
 static int eswifi_mgmt_scan(const struct device *dev,
+			    struct net_if *iface __unused,
 			    struct wifi_scan_params *params,
 			    scan_result_cb_t cb)
 {
@@ -602,7 +607,7 @@ static int eswifi_mgmt_scan(const struct device *dev,
 	return 0;
 }
 
-static int eswifi_mgmt_disconnect(const struct device *dev)
+static int eswifi_mgmt_disconnect(const struct device *dev, struct net_if *iface __unused)
 {
 	struct eswifi_dev *eswifi = dev->data;
 
@@ -648,6 +653,7 @@ static int __eswifi_sta_config(struct eswifi_dev *eswifi,
 }
 
 static int eswifi_mgmt_connect(const struct device *dev,
+			       struct net_if *iface __unused,
 			       struct wifi_connect_req_params *params)
 {
 	struct eswifi_dev *eswifi = dev->data;
@@ -676,10 +682,11 @@ void eswifi_async_msg(struct eswifi_dev *eswifi, char *msg, size_t len)
 
 #if defined(CONFIG_NET_IPV4)
 static int eswifi_mgmt_ap_enable(const struct device *dev,
+				 struct net_if *iface,
 				 struct wifi_connect_req_params *params)
 {
 	struct eswifi_dev *eswifi = dev->data;
-	struct net_if_ipv4 *ipv4 = eswifi->iface->config.ip.ipv4;
+	struct net_if_ipv4 *ipv4 = net_if_get_config(iface)->ip.ipv4;
 	struct net_if_addr *unicast = NULL;
 	int err = -EIO, i;
 
@@ -775,6 +782,7 @@ error:
 }
 #else
 static int eswifi_mgmt_ap_enable(const struct device *dev,
+				 struct net_if *iface __unused,
 				 struct wifi_connect_req_params *params)
 {
 	LOG_ERR("IPv4 requested for AP mode");
@@ -782,7 +790,7 @@ static int eswifi_mgmt_ap_enable(const struct device *dev,
 }
 #endif /* CONFIG_NET_IPV4 */
 
-static int eswifi_mgmt_ap_disable(const struct device *dev)
+static int eswifi_mgmt_ap_disable(const struct device *dev, struct net_if *iface __unused)
 {
 	struct eswifi_dev *eswifi = dev->data;
 	char cmd[] = "AE\r";

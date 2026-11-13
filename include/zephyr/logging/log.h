@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @file
+ * @brief Header file for the logging subsystem.
+ * @ingroup log_api
+ */
+
 #ifndef ZEPHYR_INCLUDE_LOGGING_LOG_H_
 #define ZEPHYR_INCLUDE_LOGGING_LOG_H_
 
@@ -13,7 +19,7 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util_macro.h>
 
-#if CONFIG_USERSPACE && CONFIG_LOG_ALWAYS_RUNTIME
+#if defined(CONFIG_USERSPACE) && defined(CONFIG_LOG_ALWAYS_RUNTIME)
 #include <zephyr/app_memory/app_memdomain.h>
 #endif
 
@@ -23,14 +29,6 @@
 
 #ifdef __cplusplus
 extern "C" {
-#endif
-
-#ifdef CONFIG_LOG_RATELIMIT
-#define LOG_RATELIMIT_INTERVAL_MS CONFIG_LOG_RATELIMIT_INTERVAL_MS
-
-#else
-#define LOG_RATELIMIT_INTERVAL_MS 0
-
 #endif
 
 /**
@@ -47,6 +45,11 @@ extern "C" {
  * @brief Logger API
  * @defgroup log_api Logging API
  * @ingroup logger
+ * @{
+ */
+
+/**
+ * @name Standard logging
  * @{
  */
 
@@ -109,6 +112,34 @@ extern "C" {
 		}                                                                                  \
 	} while (0)
 
+/** @} */
+
+/**
+ * @name Rate-limited logging
+ *
+ * Rate-limited variants drop repeated messages so that a frequently-hit call
+ * site cannot flood the log. Each call site is limited independently using
+ * atomic operations for thread safety, and a summary of skipped messages is
+ * emitted when logging resumes. The plain variants use the default interval
+ * @ref LOG_RATELIMIT_INTERVAL_MS; the `_RATE` variants take an explicit
+ * interval.
+ * @{
+ */
+
+/**
+ * @brief Default interval for rate-limited log messages, in milliseconds.
+ *
+ * Period used by the rate-limited logging macros that do not take an explicit
+ * rate (for example @ref LOG_ERR_RATELIMIT). It evaluates to
+ * @kconfig{CONFIG_LOG_RATELIMIT_INTERVAL_MS} when @kconfig{CONFIG_LOG_RATELIMIT}
+ * is enabled, and to 0 (no rate limiting) otherwise.
+ */
+#ifdef CONFIG_LOG_RATELIMIT
+#define LOG_RATELIMIT_INTERVAL_MS CONFIG_LOG_RATELIMIT_INTERVAL_MS
+#else
+#define LOG_RATELIMIT_INTERVAL_MS 0
+#endif
+
 /**
  * @brief Core rate-limited logging macro for regular messages
  *
@@ -123,41 +154,27 @@ extern "C" {
  */
 #define _LOG_RATELIMIT_CORE(_level, _rate_ms, ...)                                                 \
 	do {                                                                                       \
-		static atomic_t __last_log_time;                                                   \
-		static atomic_t __skipped_count;                                                   \
-		uint32_t __now = k_uptime_get_32();                                                \
-		uint32_t __last = atomic_get(&__last_log_time);                                    \
-		uint32_t __diff = __now - __last;                                                  \
-		if (unlikely(__diff >= (_rate_ms))) {                                              \
-			if (atomic_cas(&__last_log_time, __last, __now)) {                         \
-				uint32_t __skipped = atomic_clear(&__skipped_count);               \
-				if (__skipped > 0) {                                               \
-					Z_LOG(_level, "Skipped %d messages", __skipped);           \
+		if (Z_LOG_CONST_LEVEL_CHECK(_level)) {                                             \
+			static atomic_t __last_log_time;                                           \
+			static atomic_t __skipped_count;                                           \
+			uint32_t __now = k_uptime_get_32();                                        \
+			uint32_t __last = atomic_get(&__last_log_time);                            \
+			uint32_t __diff = __now - __last;                                          \
+			if (unlikely(__last == 0 || __diff >= (_rate_ms))) {                       \
+				if (atomic_cas(&__last_log_time, __last, __now)) {                 \
+					uint32_t __skipped = atomic_clear(&__skipped_count);       \
+					if (__skipped > 0) {                                       \
+						Z_LOG(_level, "Skipped %d messages", __skipped);   \
+					}                                                          \
+					Z_LOG(_level, __VA_ARGS__);                                \
+				} else {                                                           \
+					atomic_inc(&__skipped_count);                              \
 				}                                                                  \
-				Z_LOG(_level, __VA_ARGS__);                                        \
 			} else {                                                                   \
 				atomic_inc(&__skipped_count);                                      \
 			}                                                                          \
-		} else {                                                                           \
-			atomic_inc(&__skipped_count);                                              \
 		}                                                                                  \
 	} while (0)
-
-/**
- * @brief Rate-limited logging macros
- *
- * @details These macros provide rate-limited logging functionality to prevent
- * log flooding when messages are generated frequently. Each macro ensures that
- * log messages are not output more frequently than a specified interval.
- * Rate limiting is per-macro-call-site, meaning each unique call has its own
- * independent rate limit.
- *
- * The macros use atomic operations to ensure thread safety in multi-threaded
- * environments. Only one thread can successfully log a message within the
- * specified rate limit period.
- *
- * @see CONFIG_LOG_RATELIMIT_INTERVAL_MS
- */
 
 /**
  * @brief Core rate-limited logging macro with level parameter
@@ -250,23 +267,26 @@ extern "C" {
  */
 #define _LOG_HEXDUMP_RATELIMIT_CORE(_level, _rate_ms, _data, _length, _str)                        \
 	do {                                                                                       \
-		static atomic_t __last_log_time;                                                   \
-		static atomic_t __skipped_count;                                                   \
-		uint32_t __now = k_uptime_get_32();                                                \
-		uint32_t __last = atomic_get(&__last_log_time);                                    \
-		uint32_t __diff = __now - __last;                                                  \
-		if (unlikely(__diff >= (_rate_ms))) {                                              \
-			if (atomic_cas(&__last_log_time, __last, __now)) {                         \
-				uint32_t __skipped = atomic_clear(&__skipped_count);               \
-				if (__skipped > 0) {                                               \
-					Z_LOG(_level, "Skipped %d hexdump messages", __skipped);   \
+		if (Z_LOG_CONST_LEVEL_CHECK(_level)) {                                             \
+			static atomic_t __last_log_time;                                           \
+			static atomic_t __skipped_count;                                           \
+			uint32_t __now = k_uptime_get_32();                                        \
+			uint32_t __last = atomic_get(&__last_log_time);                            \
+			uint32_t __diff = __now - __last;                                          \
+			if (unlikely(__last == 0 || __diff >= (_rate_ms))) {                       \
+				if (atomic_cas(&__last_log_time, __last, __now)) {                 \
+					uint32_t __skipped = atomic_clear(&__skipped_count);       \
+					if (__skipped > 0) {                                       \
+						Z_LOG(_level, "Skipped %d hexdump messages",       \
+						      __skipped);                                  \
+					}                                                          \
+					Z_LOG_HEXDUMP(_level, _data, _length, _str);               \
+				} else {                                                           \
+					atomic_inc(&__skipped_count);                              \
 				}                                                                  \
-				Z_LOG_HEXDUMP(_level, _data, _length, _str);                       \
 			} else {                                                                   \
 				atomic_inc(&__skipped_count);                                      \
 			}                                                                          \
-		} else {                                                                           \
-			atomic_inc(&__skipped_count);                                              \
 		}                                                                                  \
 	} while (0)
 
@@ -351,14 +371,6 @@ extern "C" {
  */
 #define LOG_HEXDUMP_DBG_RATELIMIT(_data, _length, _str)                                            \
 	_LOG_HEXDUMP_RATELIMIT_LVL(LOG_LEVEL_DBG, LOG_RATELIMIT_INTERVAL_MS, _data, _length, _str)
-
-/**
- * @brief Rate-limited logging macros with custom rate
- *
- * @details These macros provide rate-limited logging functionality with custom
- * rate intervals. They take an explicit rate parameter (in milliseconds) that
- * specifies the minimum interval between log messages.
- */
 
 /**
  * @brief Writes an ERROR level message to the log with custom rate limiting.
@@ -476,6 +488,13 @@ extern "C" {
 #define LOG_HEXDUMP_DBG_RATELIMIT_RATE(_rate_ms, _data, _length, _str)                             \
 	_LOG_HEXDUMP_RATELIMIT_LVL(LOG_LEVEL_DBG, _rate_ms, _data, _length, _str)
 
+/** @} */
+
+/**
+ * @name Raw output
+ * @{
+ */
+
 /**
  * @brief Unconditionally print raw log message.
  *
@@ -496,6 +515,13 @@ extern "C" {
  * followed by as many values as specifiers.
  */
 #define LOG_RAW(...) Z_LOG_PRINTK(1, __VA_ARGS__)
+
+/** @} */
+
+/**
+ * @name Instance logging
+ * @{
+ */
 
 /**
  * @brief Writes an ERROR level message associated with the instance to the log.
@@ -554,6 +580,13 @@ extern "C" {
  */
 #define LOG_INST_DBG(_log_inst, ...) Z_LOG_INSTANCE(LOG_LEVEL_DBG, _log_inst, __VA_ARGS__)
 
+/** @} */
+
+/**
+ * @name Hexdump logging
+ * @{
+ */
+
 /**
  * @brief Writes an ERROR level hexdump message to the log.
  *
@@ -599,6 +632,13 @@ extern "C" {
  * @param _str    Persistent, raw string.
  */
 #define LOG_HEXDUMP_DBG(_data, _length, _str) Z_LOG_HEXDUMP(LOG_LEVEL_DBG, _data, _length, (_str))
+
+/** @} */
+
+/**
+ * @name Instance hexdump logging
+ * @{
+ */
 
 /**
  * @brief Writes an ERROR hexdump message associated with the instance to the
@@ -659,6 +699,8 @@ extern "C" {
  */
 #define LOG_INST_HEXDUMP_DBG(_log_inst, _data, _length, _str)                                      \
 	Z_LOG_HEXDUMP_INSTANCE(LOG_LEVEL_DBG, _log_inst, _data, _length, _str)
+
+/** @} */
 
 /**
  * @brief Writes an formatted string to the log.
@@ -730,12 +772,44 @@ void z_log_vprintk(const char *fmt, va_list ap);
 /* Determine if the data of the log module shall be in the partition
  * 'k_log_partition' to allow a user mode thread access to this data.
  */
-#if CONFIG_USERSPACE && CONFIG_LOG_ALWAYS_RUNTIME
+#if defined(CONFIG_USERSPACE) && defined(CONFIG_LOG_ALWAYS_RUNTIME)
 extern struct k_mem_partition k_log_partition;
 #define Z_LOG_MODULE_PARTITION(_k_app_mem) _k_app_mem(k_log_partition)
 #else
 #define Z_LOG_MODULE_PARTITION(_k_app_mem)
 #endif
+
+/* Declare the data of the log module. The declarations must precede the
+ * definition created by LOG_MODULE_REGISTER(): redeclaring an object after its
+ * definition is reported by -Wtentative-definition-compat (Clang 21).
+ */
+#define Z_LOG_MODULE_DECLARE_EXTERN(...)                                                           \
+	extern const struct log_source_const_data Z_LOG_ITEM_CONST_DATA(                           \
+		GET_ARG_N(1, __VA_ARGS__));                                                        \
+	extern struct log_source_dynamic_data LOG_ITEM_DYNAMIC_DATA(GET_ARG_N(1, __VA_ARGS__))
+
+/* Create the file local pointers to the data of the log module. */
+#define Z_LOG_MODULE_DECLARE_LOCAL(...)                                                            \
+	Z_LOG_MODULE_PARTITION(K_APP_DMEM)                                                         \
+	static const struct log_source_const_data *__log_current_const_data __unused =             \
+		Z_DO_LOG_MODULE_REGISTER(__VA_ARGS__)                                              \
+			? &Z_LOG_ITEM_CONST_DATA(GET_ARG_N(1, __VA_ARGS__))                        \
+			: NULL;                                                                    \
+                                                                                                   \
+	Z_LOG_MODULE_PARTITION(K_APP_DMEM)                                                         \
+	static struct log_source_dynamic_data *__log_current_dynamic_data __unused =               \
+		(Z_DO_LOG_MODULE_REGISTER(__VA_ARGS__) &&                                          \
+		 IS_ENABLED(CONFIG_LOG_RUNTIME_FILTERING))                                         \
+			? &LOG_ITEM_DYNAMIC_DATA(GET_ARG_N(1, __VA_ARGS__))                        \
+			: NULL;                                                                    \
+                                                                                                   \
+	Z_LOG_MODULE_PARTITION(K_APP_BMEM)                                                         \
+	static const uint32_t __log_level __unused = _LOG_LEVEL_RESOLVE(__VA_ARGS__)
+
+/**
+ * @name Module registration
+ * @{
+ */
 
 /**
  * @brief Create module-specific state and register the module with Logger.
@@ -769,13 +843,14 @@ extern struct k_mem_partition k_log_partition;
  * @see LOG_MODULE_DECLARE
  */
 #define LOG_MODULE_REGISTER(...)                                                                   \
+	Z_LOG_MODULE_DECLARE_EXTERN(__VA_ARGS__);                                                  \
 	COND_CODE_1(							\
 		Z_DO_LOG_MODULE_REGISTER(__VA_ARGS__),			\
 		(_LOG_MODULE_DATA_CREATE(GET_ARG_N(1, __VA_ARGS__),	\
 				      _LOG_LEVEL_RESOLVE(__VA_ARGS__))),\
 		() \
 	)                                                                       \
-	LOG_MODULE_DECLARE(__VA_ARGS__)
+	Z_LOG_MODULE_DECLARE_LOCAL(__VA_ARGS__)
 
 /**
  * @brief Macro for declaring a log module (not registering it).
@@ -804,25 +879,8 @@ extern struct k_mem_partition k_log_partition;
  * @see LOG_MODULE_REGISTER
  */
 #define LOG_MODULE_DECLARE(...)                                                                    \
-	extern const struct log_source_const_data Z_LOG_ITEM_CONST_DATA(                           \
-		GET_ARG_N(1, __VA_ARGS__));                                                        \
-	extern struct log_source_dynamic_data LOG_ITEM_DYNAMIC_DATA(GET_ARG_N(1, __VA_ARGS__));    \
-                                                                                                   \
-	Z_LOG_MODULE_PARTITION(K_APP_DMEM)                                                         \
-	static const struct log_source_const_data *__log_current_const_data __unused =             \
-		Z_DO_LOG_MODULE_REGISTER(__VA_ARGS__)                                              \
-			? &Z_LOG_ITEM_CONST_DATA(GET_ARG_N(1, __VA_ARGS__))                        \
-			: NULL;                                                                    \
-                                                                                                   \
-	Z_LOG_MODULE_PARTITION(K_APP_DMEM)                                                         \
-	static struct log_source_dynamic_data *__log_current_dynamic_data __unused =               \
-		(Z_DO_LOG_MODULE_REGISTER(__VA_ARGS__) &&                                          \
-		 IS_ENABLED(CONFIG_LOG_RUNTIME_FILTERING))                                         \
-			? &LOG_ITEM_DYNAMIC_DATA(GET_ARG_N(1, __VA_ARGS__))                        \
-			: NULL;                                                                    \
-                                                                                                   \
-	Z_LOG_MODULE_PARTITION(K_APP_BMEM)                                                         \
-	static const uint32_t __log_level __unused = _LOG_LEVEL_RESOLVE(__VA_ARGS__)
+	Z_LOG_MODULE_DECLARE_EXTERN(__VA_ARGS__);                                                  \
+	Z_LOG_MODULE_DECLARE_LOCAL(__VA_ARGS__)
 
 /**
  * @brief Macro for setting log level in the file or function where instance
@@ -833,6 +891,8 @@ extern struct k_mem_partition k_log_partition;
  */
 #define LOG_LEVEL_SET(level)                                                                       \
 	static const uint32_t __log_level __unused = Z_LOG_RESOLVED_LEVEL(level, 0)
+
+/** @} */
 
 #ifdef CONFIG_LOG_CUSTOM_HEADER
 /* This include must always be at the end of log.h */

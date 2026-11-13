@@ -146,6 +146,8 @@
 &i2c2 {
 	pinctrl-0 = <&i2c2_scl_pb10 &i2c2_sda_pb11>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 10 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 11 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 	clock-frequency = <I2C_BITRATE_FAST>;
 };
@@ -182,12 +184,16 @@ zephyr_udc0: &usbotg_fs {
 	};
 };
 
+&adc123_common {
+	st,adc-prescaler = <2>;
+	st,adc-clock-source = "SYNC";
+	status = "okay";
+};
+
 &adc1 {
 	pinctrl-0 = <&adc1_in10_pc0 &adc1_in11_pc1
 		     &adc1_in12_pc2 &adc1_in13_pc3>;
 	pinctrl-names = "default";
-	st,adc-clock-source = "SYNC";
-	st,adc-prescaler = <2>;
 	status = "okay";
 };
 

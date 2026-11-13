@@ -11,6 +11,7 @@
 #include <soc.h>
 #include <stm32_bitops.h>
 #include <stm32_ll_bus.h>
+#include <stm32_ll_crs.h>
 #include <stm32_ll_pwr.h>
 #include <stm32_ll_rcc.h>
 #include <stm32_ll_utils.h>
@@ -34,6 +35,11 @@
 #define PLL3_ID		3
 
 #define PLL_FRACN_DIVISOR 8192
+
+#if IS_ENABLED(STM32_PLL_P_ENABLED)
+BUILD_ASSERT((STM32_PLL_P_DIVISOR % 2) == 0,
+	     "STM32H5 PLL1P divisor factor must be even");
+#endif /* STM32_PLL_P_ENABLED */
 
 static uint32_t get_bus_clock(uint32_t clock, uint32_t prescaler)
 {
@@ -147,16 +153,17 @@ int enabled_clock(uint32_t src_clk)
 	return -ENOTSUP;
 }
 
+static int stm32_clock_control_configure(const struct device *dev,
+					 clock_control_subsys_t sub_system, void *data);
+
 static int stm32_clock_control_on(const struct device *dev, clock_control_subsys_t sub_system)
 {
 	struct stm32_pclken *pclken = (struct stm32_pclken *)(sub_system);
 	volatile int temp;
 
-	ARG_UNUSED(dev);
-
 	if (!IN_RANGE(pclken->bus, STM32_PERIPH_BUS_MIN, STM32_PERIPH_BUS_MAX)) {
-		/* Attempt to toggle a wrong periph clock bit */
-		return -ENOTSUP;
+		/* Source selection entry: apply it instead of toggling a gate */
+		return stm32_clock_control_configure(dev, sub_system, NULL);
 	}
 
 	sys_set_bits(DT_REG_ADDR(DT_NODELABEL(rcc)) + pclken->bus,
@@ -517,6 +524,8 @@ static int set_up_plls(void)
 	}
 
 	LL_RCC_PLL1_Disable();
+	while (LL_RCC_PLL1_IsReady() != 0U) {
+	}
 
 	/* Configure PLL source : Can be HSE, HSI, MSIS */
 	if (IS_ENABLED(STM32_PLL_SRC_HSE)) {
@@ -801,6 +810,23 @@ static void set_up_fixed_clock_sources(void)
 		LL_RCC_HSI48_Enable();
 		while (LL_RCC_HSI48_IsReady() != 1) {
 		}
+
+		if (IS_ENABLED(STM32_HSI48_CRS_USB_SOF)) {
+			/*
+			 * Use SOF from full-speed USB as CRS synchronization source
+			 * as this is the most plausible usecase: XTAL-less USB.
+			 *
+			 * TODO: support arbitrary CRS sync source selection
+			 */
+			LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_CRS);
+#if defined(USB_DRD_FS)
+			LL_CRS_SetSyncSignalSource(LL_CRS_SYNC_SOURCE_USB);
+#elif defined(USB_OTG_FS)
+			LL_CRS_SetSyncSignalSource(LL_CRS_SYNC_SOURCE_OTG_FS);
+#endif
+			LL_CRS_EnableFreqErrorCounter();
+			LL_CRS_EnableAutoTrimming();
+		}
 	}
 
 }
@@ -875,6 +901,24 @@ int stm32_clock_control_init(const struct device *dev)
 		LL_RCC_SetTIMPrescaler(LL_RCC_TIM_PRESCALER_FOUR_TIMES);
 	} else {
 		LL_RCC_SetTIMPrescaler(LL_RCC_TIM_PRESCALER_TWICE);
+	}
+
+	/* Set programming delay for the read latency */
+	switch (LL_FLASH_GetLatency()) {
+	case LL_FLASH_LATENCY_0:
+	case LL_FLASH_LATENCY_1:
+		MODIFY_REG(FLASH->ACR, FLASH_ACR_WRHIGHFREQ, 0U);
+		break;
+
+	case LL_FLASH_LATENCY_2:
+	case LL_FLASH_LATENCY_3:
+		MODIFY_REG(FLASH->ACR, FLASH_ACR_WRHIGHFREQ, FLASH_ACR_WRHIGHFREQ_0);
+		break;
+
+	case LL_FLASH_LATENCY_4:
+	case LL_FLASH_LATENCY_5:
+		MODIFY_REG(FLASH->ACR, FLASH_ACR_WRHIGHFREQ, FLASH_ACR_WRHIGHFREQ_1);
+		break;
 	}
 
 	/* Update CMSIS variable */

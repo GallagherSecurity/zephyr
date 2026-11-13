@@ -43,6 +43,7 @@ this will place data and bss inside SRAM2.
 
 import argparse
 import glob
+import os
 import re
 import sys
 import warnings
@@ -55,6 +56,14 @@ from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import SymbolTableSection
 
 MemoryRegion = NewType('MemoryRegion', str)
+
+LLEXT_HEAP_SECTIONS = (
+    ".llext_heap",
+    ".llext_ext_heap",
+    ".llext_data_heap",
+    ".llext_instr_heap",
+    ".llext_metadata_heap",
+)
 
 
 class SectionKind(Enum):
@@ -86,7 +95,7 @@ class SectionKind(Enum):
             return cls.DATA
         elif ".bss." in name:
             return cls.BSS
-        elif ".noinit." in name:
+        elif ".noinit." in name or name in LLEXT_HEAP_SECTIONS:
             return cls.NOINIT
         elif ".literal." in name:
             return cls.LITERAL
@@ -178,7 +187,6 @@ SOURCE_CODE_INCLUDES = """
 /* Auto generated code. Do not modify.*/
 #include <zephyr/kernel.h>
 #include <zephyr/linker/linker-defs.h>
-#include <zephyr/kernel_structs.h>
 #include <kernel_internal.h>
 #include <zephyr/arch/common/init.h>
 """
@@ -191,7 +199,7 @@ extern char __{mem}_{kind}_reloc_size[];
 
 
 DATA_COPY_FUNCTION = """
-void data_copy_xip_relocation(void)
+FUNC_NO_STACK_PROTECTOR void data_copy_xip_relocation(void)
 {{
 {0}
 }}
@@ -286,9 +294,14 @@ def assign_to_correct_mem_region(
     """
     use_section_kinds, memory_region = section_kinds_from_memory_region(memory_region)
 
+    # Split |COPY/|NOKEEP flags before the numeric align suffix, else a region
+    # like "SRAM_4|COPY" makes int("4|COPY") throw.
+    memory_region, sep, flags = memory_region.partition('|')
+    flags = sep + flags
     memory_region, _, align_size = memory_region.partition('_')
     if align_size:
         mpu_align[memory_region] = int(align_size)
+    memory_region = memory_region + flags
 
     keep_sections = '|NOKEEP' not in memory_region
     memory_region = memory_region.replace('|NOKEEP', '')
@@ -519,8 +532,8 @@ def dump_header_file(header_file, code_generation):
     # bss/data/text regions
 
     code_string += code_generation["extern"]
-    code_string += DATA_COPY_FUNCTION.format(code_generation["copy_code"] or "return;")
-    code_string += BSS_ZEROING_FUNCTION.format(code_generation["zero_code"] or "return;")
+    code_string += DATA_COPY_FUNCTION.format(code_generation["copy_code"] or "\treturn;")
+    code_string += BSS_ZEROING_FUNCTION.format(code_generation["zero_code"] or "\treturn;")
 
     with open(header_file, "w") as header_file_desc:
         header_file_desc.write(SOURCE_CODE_INCLUDES)
@@ -571,6 +584,10 @@ def get_obj_filename(all_obj_files, filename):
         if obj_file.name == obj_filename and filename.split("/")[-2] in obj_file.parent.name:
             return str(obj_file)
 
+    for obj_file in all_obj_files:
+        if obj_file.name == obj_filename and obj_file.parent.name == 'app.dir':
+            return str(obj_file)
+
 
 # Extracts all possible components for the input string:
 # <mem_region>[\ :program_header]:<flag_1>[;<flag_2>...]:<file_1>[;<file_2>...][,filter]
@@ -600,7 +617,6 @@ def parse_input_string(line):
 # as a list of values.
 # Also, return another dict with program headers for memory regions
 def create_dict_wrt_mem():
-    # need to support wild card *
     rel_dict = dict()
     phdrs = dict()
 
@@ -619,17 +635,18 @@ def create_dict_wrt_mem():
             phdrs[mem_region] = f':{phdr}'
 
         file_name_list = []
-        # Use glob matching on each file in the list
-        for file_glob in file_list:
-            glob_results = glob.glob(file_glob)
-            if not glob_results:
-                warnings.warn("File: " + file_glob + " Not found", stacklevel=2)
-                continue
-            elif len(glob_results) > 1:
-                warnings.warn(
-                    "Regex in file lists is deprecated, please use file(GLOB) instead", stacklevel=2
+        for file_name in file_list:
+            if glob.escape(file_name) != file_name:
+                sys.exit(
+                    f"Error: '{file_name}' looks like a pattern. Patterns are no longer "
+                    "expanded by gen_relocate_app.py; expand them in CMake with "
+                    "file(GLOB ...) and pass the resulting file names to "
+                    "zephyr_code_relocate(FILES ...)."
                 )
-            file_name_list.extend(glob_results)
+            if not os.path.exists(file_name):
+                warnings.warn("File: " + file_name + " Not found", stacklevel=2)
+                continue
+            file_name_list.append(file_name)
         if len(file_name_list) == 0:
             continue
         if mem_region == '':

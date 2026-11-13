@@ -7,7 +7,7 @@
  *
  */
 
-#define DT_DRV_COMPAT andestech_qspi_nor_xip
+#define DT_DRV_COMPAT andestech_qspi_nor
 
 #include <andes_csr.h>
 #include <errno.h>
@@ -41,6 +41,8 @@ LOG_MODULE_REGISTER(flash_andes_xip, CONFIG_FLASH_LOG_LEVEL);
 #define MMISC_CTL_BRPE_EN BIT(3)
 
 #define MEMCTRL_CHG BIT(8)
+
+#define IFTIM_SCLK_DIV_MASK 0x000000ff
 
 struct atcspi200_regs {
 	/* 0x00 */
@@ -94,6 +96,8 @@ struct flash_andes_qspi_xip_config {
 	struct atcspi200_regs *regs;
 	uint32_t mapped_base;
 	uint32_t flash_size;
+	uint32_t f_clock;
+	uint32_t f_spi;
 	bool is_xip;
 #ifdef CONFIG_FLASH_PAGE_LAYOUT
 	struct flash_pages_layout layout;
@@ -467,12 +471,61 @@ static int flash_andes_qspi_xip_erase(const struct device *dev, off_t addr, size
 	return ret;
 }
 
+static __ramfunc void flash_andes_qspi_xip_set_iftim(const struct device *dev, uint32_t iftim)
+{
+	const struct flash_andes_qspi_xip_config *config = dev->config;
+	struct atcspi200_regs *regs = config->regs;
+
+	/* Exit memory-mapped mode. */
+	prepare_for_flashing(dev);
+
+	regs->IFTIM = iftim;
+	/* Make sure changes are applied before exiting the RAM function. */
+	while (regs->MEMCTRL & MEMCTRL_CHG) {
+	}
+
+	cleanup_after_flashing(dev, 0, 0);
+}
+
 static int flash_andes_qspi_xip_init(const struct device *dev)
 {
 	const struct flash_andes_qspi_xip_config *config = dev->config;
 
 	if (!config->is_xip) {
 		return -EINVAL;
+	}
+
+	if ((config->f_clock != 0) && (config->f_spi != 0)) {
+		uint32_t sclk_div;
+
+		/* Setting the divisor value to 0xff indicates the SCLK
+		 * frequency should be the same as the spi_clock frequency.
+		 */
+		if (config->f_clock == config->f_spi) {
+			sclk_div = 0xff;
+		} else {
+			sclk_div = (config->f_clock / (config->f_spi << 1)) - 1;
+		}
+
+		/* Make sure calculated SCLK_DIV is correct. */
+		if (sclk_div > 0xfe) {
+			LOG_WRN("Incorrect SCLK_DIV: 0x%x", sclk_div);
+		} else {
+			struct atcspi200_regs *regs = config->regs;
+			uint32_t iftim;
+			unsigned int key;
+
+			key = prepare_for_ramfunc();
+
+			iftim = regs->IFTIM;
+			iftim = (iftim & ~IFTIM_SCLK_DIV_MASK) | sclk_div;
+			/* The memory-mapped read accesses should not be on-going while programming
+			 * the IFTIM register.
+			 */
+			flash_andes_qspi_xip_set_iftim(dev, iftim);
+
+			cleanup_after_ramfunc(key);
+		}
 	}
 
 	return 0;
@@ -524,7 +577,7 @@ cleanup:
 }
 
 static __ramfunc int write_status_register(const struct device *dev, uint8_t sr, uint8_t mask,
-					   uint8_t op_read, uint8_t op_write)
+					   uint8_t op_read, uint8_t op_write, bool volatile_write)
 {
 	uint8_t sr_curr;
 	uint8_t sr_new;
@@ -540,7 +593,11 @@ static __ramfunc int write_status_register(const struct device *dev, uint8_t sr,
 	}
 	sr_new = (sr_curr & ~mask) | sr;
 	if (sr_new != sr_curr) {
-		ret = write_protection_set(dev, false);
+		if (volatile_write) {
+			ret = flash_andes_qspi_xip_cmd_write(dev, FLASH_ANDES_CMD_VOL_SR);
+		} else {
+			ret = write_protection_set(dev, false);
+		}
 		if (ret != 0) {
 			return ret;
 		}
@@ -568,19 +625,19 @@ static __ramfunc int flash_andes_qspi_xip_set_status(const struct device *dev,
 	prepare_for_flashing(dev);
 
 	ret = write_status_register(dev, op_out->regs[0], op_out->masks[0], SPI_NOR_CMD_RDSR,
-				    SPI_NOR_CMD_WRSR);
+				    SPI_NOR_CMD_WRSR, op_out->volatile_write);
 	if (ret) {
 		goto cleanup;
 	}
 
 	ret = write_status_register(dev, op_out->regs[1], op_out->masks[1], SPI_NOR_CMD_RDSR2,
-				    SPI_NOR_CMD_WRSR2);
+				    SPI_NOR_CMD_WRSR2, op_out->volatile_write);
 	if (ret) {
 		goto cleanup;
 	}
 
 	ret = write_status_register(dev, op_out->regs[2], op_out->masks[2], SPI_NOR_CMD_RDSR3,
-				    SPI_NOR_CMD_WRSR3);
+				    SPI_NOR_CMD_WRSR3, op_out->volatile_write);
 
 cleanup:
 	cleanup_after_flashing(dev, 0, 0);
@@ -759,6 +816,8 @@ static DEVICE_API(flash, flash_andes_qspi_xip_api) = {
 		.parameters = {.write_block_size = 1, .erase_value = 0xff},                        \
 		.is_xip = IS_XIP(DT_DRV_INST(n)),                                                  \
 		.flash_size = DT_INST_PROP(n, size),                                               \
+		.f_clock = DT_PROP_OR(DT_INST_BUS(n), clock_frequency, 0),                         \
+		.f_spi = DT_INST_PROP_OR(n, spi_frequency, 0),                                     \
 		LAYOUT_PAGES_PROP(n)};                                                             \
                                                                                                    \
 	static struct flash_andes_qspi_xip_data flash_andes_qspi_xip_data_##n;                     \

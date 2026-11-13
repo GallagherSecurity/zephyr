@@ -15,6 +15,14 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 
+		test_fake_leds: fake-leds {
+			compatible = "zephyr,fake-leds";
+
+			fake_led: fake-led {
+				label = "Fake LED";
+			};
+		};
+
 		test_dac: dac@dac0dac0 {
 			compatible = "vnd,dac";
 			reg = <0xdac0dac0 0x1000>;
@@ -196,9 +204,81 @@
 				};
 			};
 
-			pca9533@15 {
-				compatible = "nxp,pca9533";
+			pca9530@15 {
+				compatible = "nxp,pca9530";
 				reg = <0x15>;
+			};
+
+			pca9531@16 {
+				compatible = "nxp,pca9531";
+				reg = <0x16>;
+			};
+
+			pca9532@17 {
+				compatible = "nxp,pca9532";
+				reg = <0x17>;
+			};
+
+			pca9533@18 {
+				compatible = "nxp,pca9533";
+				reg = <0x18>;
+			};
+
+			lp5860@19 {
+				compatible = "ti,lp5860";
+				reg = <0x19>;
+			};
+
+			pmic@20 {
+				compatible = "nordic,npm10xx";
+				reg = <0x20>;
+
+				leds {
+					compatible = "nordic,npm10xx-led";
+
+					led0 {
+						index = <2>;
+					};
+
+					led1 {
+						index = <0>;
+						led-mode = "charge";
+					};
+				};
+			};
+
+			is31fl3193@18 {
+				compatible = "issi,is31fl3193";
+				reg = <0x18>;
+
+				led_rgb {
+					label = "led_rgb";
+					color-mapping = <0>, <1>, <2>;
+					current-limit = <10>;
+				};
+			};
+
+			aw9523b@19 {
+				status = "okay";
+				reg = <0x19>;
+				reset-gpios = <&test_gpio 0 0>;
+				compatible = "awinic,aw9523b";
+
+				leds {
+					compatible = "awinic,aw9523b-led";
+					current-microamp = <9250>;
+					status = "okay";
+
+					led0 {
+						port = <1>;
+						pin = <0>;
+					};
+
+					led1 {
+						port = <1>;
+						pin = <1>;
+					};
+				};
 			};
 		};
 
@@ -225,6 +305,18 @@
 		multi-led {
 			compatible = "leds-group-multicolor";
 			leds = <&test_pwm_led0>, <&test_pwm_led1>;
+		};
+
+		native_linux_leds {
+			compatible = "zephyr,native-linux-leds";
+
+			led_0 {
+				path = "dev::a";
+			};
+
+			led_1 {
+				path = "dev::b";
+			};
 		};
 	};
 };

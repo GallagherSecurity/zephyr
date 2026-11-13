@@ -1,11 +1,11 @@
 /*
- * Copyright 2024-2025 NXP
+ * Copyright 2024-2026 NXP
  * SPDX-License-Identifier: Apache-2.0
  */
 
 /dts-v1/;
 
-#include <nxp/mcx/nxp_mcxw72.dtsi>
+#include <nxp/mcx/mcxw/nxp_mcxw72.dtsi>
 #include "mcxw72_evk-pinctrl.dtsi"
 #include <zephyr/dt-bindings/gpio/arduino-header-r3.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
@@ -31,6 +31,7 @@
 		zephyr,uart-pipe = &lpuart0;
 		zephyr,canbus = &flexcan0;
 		zephyr,bt-c2h-uart = &lpuart0;
+		zephyr,crc = &crc;
 	};
 
 	user_led {
@@ -126,21 +127,18 @@
 
 &flash {
 	partitions {
-		compatible = "fixed-partitions";
+		ranges;
 		#address-cells = <1>;
 		#size-cells = <1>;
 
 		code_partition: partition@0 {
+			compatible = "zephyr,mapped-partition";
 			reg = <0x0 DT_SIZE_K(2024)>;
 		};
 
 		storage_partition: partition@1fa000 {
-			reg = <0x1fa000 DT_SIZE_K(16)>;
-		};
-
-		hw_params_partition: partition@1fe000 {
-			label = "hw-parameters";
-			reg = <0x1fe000 DT_SIZE_K(8)>;
+			compatible = "zephyr,mapped-partition";
+			reg = <0x1fa000 DT_SIZE_K(24)>;
 		};
 	};
 };
@@ -197,6 +195,9 @@
 	status = "okay";
 	pinctrl-0 = <&pinmux_lpi2c1>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 5 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 4 GPIO_ACTIVE_HIGH>;
+	recover-bus-on-init;
 
 	accelerometer: accelerometer@19 {
 		status = "okay";
@@ -206,5 +207,13 @@
 };
 
 &rtc {
+	status = "okay";
+};
+
+&crc {
+	status = "okay";
+};
+
+&sema42 {
 	status = "okay";
 };

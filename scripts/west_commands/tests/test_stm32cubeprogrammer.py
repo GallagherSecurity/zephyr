@@ -46,18 +46,31 @@ WINDOWS_CLI_PATH = (
 )
 """Windows CLI path."""
 
-MACOS_CLI_PATH = (
+MACOS_LEGACY_CLI_PATH = (
     Path("/Applications")
     / "STMicroelectronics"
     / "STM32Cube"
     / "STM32CubeProgrammer"
     / "STM32CubeProgrammer.app"
     / "Contents"
-    / "MacOs"
+    / "Resources"
     / "bin"
     / "STM32_Programmer_CLI"
 )
-"""macOS CLI path."""
+"""macOS CLI path on older STM32CubeProgrammer release."""
+
+MACOS_NEW_CLI_PATH = (
+    Path("/Applications")
+    / "STMicroelectronics"
+    / "STM32Cube"
+    / "STM32CubeProgrammer"
+    / "STM32CubeProgrammer.app"
+    / "Contents"
+    / "MacOS"
+    / "bin"
+    / "STM32_Programmer_CLI"
+)
+"""macOS CLI path on newer STM32CubeProgrammer release."""
 
 TEST_CASES = (
     {
@@ -73,6 +86,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": False,
+        "reset": False,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -84,7 +98,6 @@ TEST_CASES = (
                 "port=swd",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
             ],
         ],
     },
@@ -101,6 +114,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": False,
+        "reset": True,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -120,6 +134,35 @@ TEST_CASES = (
     {
         "port": "swd",
         "dev_id": None,
+        "frequency": None,
+        "reset_mode": None,
+        "download_address": None,
+        "start_address": None,
+        "conn_modifiers": None,
+        "start_modifiers": [],
+        "download_modifiers": [],
+        "cli": CLI_PATH,
+        "use_elf": False,
+        "erase": False,
+        "reset": True,
+        "extload": None,
+        "tool_opt": [],
+        "system": "",
+        "cli_path": str(CLI_PATH),
+        "calls": [
+            [
+                str(CLI_PATH),
+                "--connect",
+                "port=swd",
+                "--download",
+                RC_KERNEL_HEX,
+                "-rst",
+            ],
+        ],
+    },
+    {
+        "port": "swd",
+        "dev_id": None,
         "frequency": "4000",
         "reset_mode": None,
         "download_address": None,
@@ -130,6 +173,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": False,
+        "reset": False,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -141,7 +185,6 @@ TEST_CASES = (
                 "port=swd freq=4000",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
             ],
         ],
     },
@@ -158,6 +201,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": False,
+        "reset": False,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -169,7 +213,6 @@ TEST_CASES = (
                 "port=swd reset=HWrst",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
             ],
         ],
     },
@@ -186,6 +229,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": False,
+        "reset": False,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -197,7 +241,6 @@ TEST_CASES = (
                 "port=swd reset=SWrst",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
             ],
         ],
     },
@@ -214,6 +257,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": False,
+        "reset": False,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -225,7 +269,6 @@ TEST_CASES = (
                 "port=swd reset=Crst",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
             ],
         ],
     },
@@ -242,6 +285,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": False,
+        "reset": False,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -253,7 +297,6 @@ TEST_CASES = (
                 "port=swd br=115200 sn=TEST",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
             ],
         ],
     },
@@ -270,6 +313,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": True,
         "erase": False,
+        "reset": False,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -281,7 +325,6 @@ TEST_CASES = (
                 "port=swd",
                 "--download",
                 RC_KERNEL_ELF,
-                "--start",
             ],
         ],
     },
@@ -298,6 +341,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": True,
+        "reset": False,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -310,7 +354,6 @@ TEST_CASES = (
                 "port=swd",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
             ],
         ],
     },
@@ -327,6 +370,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": False,
+        "reset": False,
         "extload": None,
         "tool_opt": ["--skipErase"],
         "system": "",
@@ -339,7 +383,6 @@ TEST_CASES = (
                 "--skipErase",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
             ],
         ],
     },
@@ -356,6 +399,7 @@ TEST_CASES = (
         "cli": None,
         "use_elf": False,
         "erase": False,
+        "reset": True,
         "extload": None,
         "tool_opt": [],
         "system": "Linux",
@@ -367,7 +411,7 @@ TEST_CASES = (
                 "port=swd",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
+                "-rst",
             ],
         ],
     },
@@ -384,18 +428,20 @@ TEST_CASES = (
         "cli": None,
         "use_elf": False,
         "erase": False,
+        "reset": True,
         "extload": None,
         "tool_opt": [],
         "system": "Darwin",
-        "cli_path": str(MACOS_CLI_PATH),
+        "macos_new_exe": False,
+        "cli_path": str(MACOS_LEGACY_CLI_PATH),
         "calls": [
             [
-                str(MACOS_CLI_PATH),
+                str(MACOS_LEGACY_CLI_PATH),
                 "--connect",
                 "port=swd",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
+                "-rst",
             ],
         ],
     },
@@ -412,6 +458,37 @@ TEST_CASES = (
         "cli": None,
         "use_elf": False,
         "erase": False,
+        "reset": True,
+        "extload": None,
+        "tool_opt": [],
+        "system": "Darwin",
+        "macos_new_exe": True,
+        "cli_path": str(MACOS_NEW_CLI_PATH),
+        "calls": [
+            [
+                str(MACOS_NEW_CLI_PATH),
+                "--connect",
+                "port=swd",
+                "--download",
+                RC_KERNEL_HEX,
+                "-rst",
+            ],
+        ],
+    },
+    {
+        "port": "swd",
+        "dev_id": None,
+        "frequency": None,
+        "reset_mode": None,
+        "download_address": None,
+        "start_address": None,
+        "conn_modifiers": None,
+        "start_modifiers": [],
+        "download_modifiers": [],
+        "cli": None,
+        "use_elf": False,
+        "erase": False,
+        "reset": True,
         "extload": None,
         "tool_opt": [],
         "system": "Windows",
@@ -423,7 +500,7 @@ TEST_CASES = (
                 "port=swd",
                 "--download",
                 RC_KERNEL_HEX,
-                "--start",
+                "-rst",
             ],
         ],
     },
@@ -440,6 +517,7 @@ TEST_CASES = (
         "cli": CLI_PATH,
         "use_elf": False,
         "erase": False,
+        "reset": True,
         "extload": None,
         "tool_opt": [],
         "system": "",
@@ -471,7 +549,7 @@ def os_path_isfile_patch(filename):
 @pytest.mark.parametrize("tc", TEST_CASES)
 @patch("runners.stm32cubeprogrammer.platform.system")
 @patch("runners.stm32cubeprogrammer.Path.home", return_value=HOME_PATH)
-@patch("runners.stm32cubeprogrammer.Path.exists", return_value=True)
+@patch("runners.stm32cubeprogrammer.Path.exists")
 @patch.dict("runners.stm32cubeprogrammer.os.environ", ENVIRON)
 @patch("runners.core.ZephyrBinaryRunner.require")
 @patch("runners.stm32cubeprogrammer.STM32CubeProgrammerBinaryRunner.check_call")
@@ -485,6 +563,7 @@ def test_stm32cubeprogrammer_init(
     """
 
     system.return_value = tc["system"]
+    path_exists.return_value = tc.get("macos_new_exe", True)
 
     runner = STM32CubeProgrammerBinaryRunner(
         cfg=runner_config,
@@ -500,6 +579,7 @@ def test_stm32cubeprogrammer_init(
         cli=tc["cli"],
         use_elf=tc["use_elf"],
         erase=tc["erase"],
+        reset_system=tc["reset"],
         extload=tc["extload"],
         tool_opt=tc["tool_opt"],
     )
@@ -513,7 +593,7 @@ def test_stm32cubeprogrammer_init(
 @pytest.mark.parametrize("tc", TEST_CASES)
 @patch("runners.stm32cubeprogrammer.platform.system")
 @patch("runners.stm32cubeprogrammer.Path.home", return_value=HOME_PATH)
-@patch("runners.stm32cubeprogrammer.Path.exists", return_value=True)
+@patch("runners.stm32cubeprogrammer.Path.exists")
 @patch.dict("runners.stm32cubeprogrammer.os.environ", ENVIRON)
 @patch("runners.core.ZephyrBinaryRunner.require")
 @patch("runners.stm32cubeprogrammer.STM32CubeProgrammerBinaryRunner.check_call")
@@ -527,6 +607,7 @@ def test_stm32cubeprogrammer_create(
     """
 
     system.return_value = tc["system"]
+    path_exists.return_value = tc.get("macos_new_exe", True)
 
     args = ["--port", tc["port"]]
     if tc["dev_id"]:
@@ -547,6 +628,8 @@ def test_stm32cubeprogrammer_create(
         args.extend(["--use-elf"])
     if tc["erase"]:
         args.append("--erase")
+    if tc["reset"]:
+        args.append("--reset")
     if tc["extload"]:
         args.extend(["--extload", tc["extload"]])
     if tc["tool_opt"]:

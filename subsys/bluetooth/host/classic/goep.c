@@ -22,7 +22,7 @@
 #include <zephyr/bluetooth/classic/sdp.h>
 #include <zephyr/bluetooth/classic/goep.h>
 
-#include "host/conn_internal.h"
+#include <host/conn_internal.h>
 #include "l2cap_br_internal.h"
 #include "rfcomm_internal.h"
 #include "obex_internal.h"
@@ -36,20 +36,26 @@ LOG_MODULE_REGISTER(bt_goep);
 /* RFCOMM Server list */
 static sys_slist_t goep_rfcomm_server = SYS_SLIST_STATIC_INIT(&goep_rfcomm_server);
 
-static void goep_rfcomm_recv(struct bt_rfcomm_dlc *dlc, struct net_buf *buf)
+#define GOEP_GET_TRANSPORT_V1(_dlc) CONTAINER_OF((_dlc), struct bt_goep_transport_v1, dlc)
+
+static int goep_rfcomm_recv(struct bt_rfcomm_dlc *dlc, struct net_buf *buf)
 {
-	struct bt_goep *goep = CONTAINER_OF(dlc, struct bt_goep, _transport.dlc);
+	struct bt_goep_transport_v1 *goep_transport_v1 = GOEP_GET_TRANSPORT_V1(dlc);
+	struct bt_goep *goep = goep_transport_v1->goep;
 	int err;
 
 	err = bt_obex_recv(&goep->obex, buf);
-	if (err) {
+	if (err != 0) {
 		LOG_WRN("Fail to handle OBEX packet (err %d)", err);
 	}
+
+	return 0;
 }
 
 static void goep_rfcomm_connected(struct bt_rfcomm_dlc *dlc)
 {
-	struct bt_goep *goep = CONTAINER_OF(dlc, struct bt_goep, _transport.dlc);
+	struct bt_goep_transport_v1 *goep_transport_v1 = GOEP_GET_TRANSPORT_V1(dlc);
+	struct bt_goep *goep = goep_transport_v1->goep;
 	int err;
 
 	LOG_DBG("RFCOMM %p connected", dlc);
@@ -65,7 +71,7 @@ static void goep_rfcomm_connected(struct bt_rfcomm_dlc *dlc)
 	atomic_set(&goep->_state, BT_GOEP_TRANSPORT_CONNECTED);
 
 	err = bt_obex_transport_connected(&goep->obex);
-	if (err) {
+	if (err != 0) {
 		LOG_WRN("Notify OBEX (err %d). Disconnecting transport...", err);
 		bt_rfcomm_dlc_disconnect(dlc);
 		return;
@@ -78,7 +84,8 @@ static void goep_rfcomm_connected(struct bt_rfcomm_dlc *dlc)
 
 static void goep_rfcomm_disconnected(struct bt_rfcomm_dlc *dlc)
 {
-	struct bt_goep *goep = CONTAINER_OF(dlc, struct bt_goep, _transport.dlc);
+	struct bt_goep_transport_v1 *goep_transport_v1 = GOEP_GET_TRANSPORT_V1(dlc);
+	struct bt_goep *goep = goep_transport_v1->goep;
 	int err;
 
 	LOG_DBG("RFCOMM %p disconnected", dlc);
@@ -86,7 +93,7 @@ static void goep_rfcomm_disconnected(struct bt_rfcomm_dlc *dlc)
 	atomic_set(&goep->_state, BT_GOEP_TRANSPORT_DISCONNECTED);
 
 	err = bt_obex_transport_disconnected(&goep->obex);
-	if (err) {
+	if (err != 0) {
 		LOG_WRN("Notify OBEX (err %d).", err);
 	}
 
@@ -104,9 +111,10 @@ static struct bt_rfcomm_dlc_ops goep_rfcomm_ops = {
 static int goep_rfcomm_send(struct bt_obex *obex, struct net_buf *buf)
 {
 	struct bt_goep *goep = CONTAINER_OF(obex, struct bt_goep, obex);
+	struct bt_goep_transport_v1 *goep_transport_v1;
 	int err;
 
-	if (goep->_goep_v2) {
+	if (goep->v1 == NULL) {
 		LOG_WRN("Invalid transport");
 		return -EINVAL;
 	}
@@ -121,7 +129,9 @@ static int goep_rfcomm_send(struct bt_obex *obex, struct net_buf *buf)
 		return -EMSGSIZE;
 	}
 
-	err = bt_rfcomm_dlc_send(&goep->_transport.dlc, buf);
+	goep_transport_v1 = goep->v1;
+
+	err = bt_rfcomm_dlc_send(&goep_transport_v1->dlc, buf);
 	if (err < 0) {
 		return err;
 	}
@@ -133,7 +143,7 @@ static struct net_buf *goep_rfcomm_alloc_buf(struct bt_obex *obex, struct net_bu
 {
 	struct bt_goep *goep = CONTAINER_OF(obex, struct bt_goep, obex);
 
-	if (goep->_goep_v2) {
+	if (goep->v1 == NULL) {
 		LOG_WRN("Invalid transport");
 		return NULL;
 	}
@@ -144,13 +154,16 @@ static struct net_buf *goep_rfcomm_alloc_buf(struct bt_obex *obex, struct net_bu
 static int goep_rfcomm_disconnect(struct bt_obex *obex)
 {
 	struct bt_goep *goep = CONTAINER_OF(obex, struct bt_goep, obex);
+	struct bt_goep_transport_v1 *goep_transport_v1;
 
-	if (goep->_goep_v2) {
+	if (goep->v1 == NULL) {
 		LOG_WRN("Invalid transport");
 		return -EINVAL;
 	}
 
-	return bt_rfcomm_dlc_disconnect(&goep->_transport.dlc);
+	goep_transport_v1 = goep->v1;
+
+	return bt_rfcomm_dlc_disconnect(&goep_transport_v1->dlc);
 }
 
 static const struct bt_obex_transport_ops goep_rfcomm_transport_ops = {
@@ -159,52 +172,36 @@ static const struct bt_obex_transport_ops goep_rfcomm_transport_ops = {
 	.disconnect = goep_rfcomm_disconnect,
 };
 
-static int goep_rfcomm_init(struct bt_conn *conn, struct bt_goep *goep)
+static void goep_rfcomm_init(struct bt_conn *conn, struct bt_goep *goep)
 {
+	struct bt_goep_transport_v1 *goep_transport_v1 = goep->v1;
 	uint32_t mtu;
 	uint32_t hdr_size;
-	int err;
 
-	hdr_size = sizeof(struct bt_l2cap_hdr);
-	hdr_size += BT_RFCOMM_HDR_SIZE + BT_RFCOMM_FCS_SIZE;
+	hdr_size = BT_L2CAP_HDR_SIZE + BT_RFCOMM_OVERHEAD_SIZE;
 
 	mtu = CONFIG_BT_GOEP_RFCOMM_MTU - hdr_size;
-	/* Use default MTU if it is not given */
-	if (goep->obex.rx.mtu == 0) {
-		goep->obex.rx.mtu = mtu;
-	}
 
-	if (goep->obex.rx.mtu < GOEP_MIN_MTU) {
-		LOG_WRN("GOEP RFCOMM MTU less than minimum size (%d < %d)", goep->obex.rx.mtu,
-			GOEP_MIN_MTU);
-		goep->obex.rx.mtu = GOEP_MIN_MTU;
-	}
+	/* Set the default MTU to the largest value that the configuration can support */
+	goep->obex.rx.mtu = mtu;
 
-	if (goep->obex.rx.mtu > mtu) {
-		LOG_WRN("GOEP RFCOMM MTU exceeds maximum size (%d > %d)", goep->obex.rx.mtu, mtu);
-		goep->obex.rx.mtu = mtu;
-	}
+	__ASSERT(goep->obex.rx.mtu >= GOEP_MIN_MTU, "GOEP RFCOMM MTU less than minimum size "
+		 "(%d < %d)", goep->obex.rx.mtu, GOEP_MIN_MTU);
 
-	err = bt_obex_reg_transport(&goep->obex, &goep_rfcomm_transport_ops);
-	if (err != 0) {
-		LOG_ERR("Fail to reg transport ops");
-		return err;
-	}
+	bt_obex_reg_transport(&goep->obex, &goep_rfcomm_transport_ops);
 
-	goep->_goep_v2 = false;
 	goep->_acl = conn;
-	goep->_transport.dlc.mtu = goep->obex.rx.mtu;
-	goep->_transport.dlc.ops = &goep_rfcomm_ops;
-	goep->_transport.dlc.required_sec_level = BT_SECURITY_L2;
-
-	return 0;
+	goep_transport_v1->goep = goep;
+	goep_transport_v1->dlc.mtu = goep->obex.rx.mtu;
+	goep_transport_v1->dlc.ops = &goep_rfcomm_ops;
+	goep_transport_v1->dlc.required_sec_level = BT_SECURITY_L2;
 }
 
 static int goep_rfcomm_accept(struct bt_conn *conn, struct bt_rfcomm_server *server,
 			      struct bt_rfcomm_dlc **dlc)
 {
 	struct bt_goep_transport_rfcomm_server *rfcomm_server;
-	struct bt_goep *goep;
+	struct bt_goep *goep = NULL;
 	int err;
 
 	rfcomm_server = CONTAINER_OF(server, struct bt_goep_transport_rfcomm_server, rfcomm);
@@ -215,23 +212,17 @@ static int goep_rfcomm_accept(struct bt_conn *conn, struct bt_rfcomm_server *ser
 	}
 
 	err = rfcomm_server->accept(conn, rfcomm_server, &goep);
-	if (err) {
+	if (err != 0) {
 		LOG_DBG("Incoming connection rejected");
 		return err;
 	}
 
-	if (goep == NULL || goep->transport_ops == NULL) {
-		LOG_DBG("Invalid parameter");
-		return -EINVAL;
-	}
+	__ASSERT(goep != NULL && goep->v1 != NULL && goep->v2 == NULL &&
+		 goep->transport_ops != NULL, "Invalid parameter of GOEP RFCOMM transport");
 
-	err = goep_rfcomm_init(conn, goep);
-	if (err != 0) {
-		LOG_ERR("Fail to init goep");
-		return err;
-	}
+	goep_rfcomm_init(conn, goep);
 
-	*dlc = &goep->_transport.dlc;
+	*dlc = &goep->v1->dlc;
 
 	atomic_set(&goep->_state, BT_GOEP_TRANSPORT_CONNECTING);
 
@@ -242,7 +233,7 @@ int bt_goep_transport_rfcomm_server_register(struct bt_goep_transport_rfcomm_ser
 {
 	int err;
 
-	if (!server || !server->accept) {
+	if (server == NULL || server->accept == NULL) {
 		LOG_DBG("Invalid parameter");
 		return -EINVAL;
 	}
@@ -254,7 +245,7 @@ int bt_goep_transport_rfcomm_server_register(struct bt_goep_transport_rfcomm_ser
 
 	server->rfcomm.accept = goep_rfcomm_accept;
 	err = bt_rfcomm_server_register(&server->rfcomm);
-	if (err) {
+	if (err != 0) {
 		LOG_WRN("Fail to register RFCOMM Server %p", server);
 		return err;
 	}
@@ -269,18 +260,15 @@ int bt_goep_transport_rfcomm_connect(struct bt_conn *conn, struct bt_goep *goep,
 {
 	int err;
 
-	if (conn == NULL || goep == NULL || goep->transport_ops == NULL) {
+	if (conn == NULL || goep == NULL || goep->v1 == NULL || goep->v2 != NULL ||
+	    goep->transport_ops == NULL) {
 		LOG_DBG("Invalid parameter");
 		return -EINVAL;
 	}
 
-	err = goep_rfcomm_init(conn, goep);
-	if (err != 0) {
-		LOG_ERR("Fail to init goep");
-		return err;
-	}
+	goep_rfcomm_init(conn, goep);
 
-	err = bt_rfcomm_dlc_connect(conn, &goep->_transport.dlc, channel);
+	err = bt_rfcomm_dlc_connect(conn, &goep->v1->dlc, channel);
 	if (err != 0) {
 		LOG_ERR("Fail to create RFCOMM connection");
 		return err;
@@ -296,7 +284,7 @@ int bt_goep_transport_rfcomm_disconnect(struct bt_goep *goep)
 	int err;
 	uint32_t state;
 
-	if (!goep || goep->_goep_v2) {
+	if (goep == NULL || goep->v1 == NULL) {
 		LOG_DBG("Invalid parameter");
 		return -EINVAL;
 	}
@@ -307,8 +295,8 @@ int bt_goep_transport_rfcomm_disconnect(struct bt_goep *goep)
 		return -ENOTCONN;
 	}
 
-	err = bt_rfcomm_dlc_disconnect(&goep->_transport.dlc);
-	if (err) {
+	err = bt_rfcomm_dlc_disconnect(&goep->v1->dlc);
+	if (err != 0) {
 		LOG_WRN("Fail to disconnect RFCOMM DLC");
 		return err;
 	}
@@ -321,16 +309,19 @@ int bt_goep_transport_rfcomm_disconnect(struct bt_goep *goep)
 /* L2CAP Server list */
 static sys_slist_t goep_l2cap_server = SYS_SLIST_STATIC_INIT(&goep_l2cap_server);
 
+#define GOEP_GET_TRANSPORT_V2(_chan) CONTAINER_OF((_chan), struct bt_goep_transport_v2, chan.chan)
+
 NET_BUF_POOL_DEFINE(goep_rx_pool, BT_BUF_ACL_RX_COUNT, BT_BUF_ACL_SIZE(CONFIG_BT_BUF_ACL_RX_SIZE),
 		    CONFIG_BT_CONN_TX_USER_DATA_SIZE, NULL);
 
 static int goep_l2cap_recv(struct bt_l2cap_chan *chan, struct net_buf *buf)
 {
-	struct bt_goep *goep = CONTAINER_OF(chan, struct bt_goep, _transport.chan.chan);
+	struct bt_goep_transport_v2 *goep_transport_v2 = GOEP_GET_TRANSPORT_V2(chan);
+	struct bt_goep *goep = goep_transport_v2->goep;
 	int err;
 
 	err = bt_obex_recv(&goep->obex, buf);
-	if (err) {
+	if (err != 0) {
 		LOG_WRN("Fail to handle OBEX packet (err %d)", err);
 	}
 	return err;
@@ -338,26 +329,27 @@ static int goep_l2cap_recv(struct bt_l2cap_chan *chan, struct net_buf *buf)
 
 static void goep_l2cap_connected(struct bt_l2cap_chan *chan)
 {
-	struct bt_goep *goep = CONTAINER_OF(chan, struct bt_goep, _transport.chan.chan);
+	struct bt_goep_transport_v2 *goep_transport_v2 = GOEP_GET_TRANSPORT_V2(chan);
+	struct bt_goep *goep = goep_transport_v2->goep;
 	int err;
 
 	LOG_DBG("L2CAP channel %p connected", chan);
 
-	if ((goep->_transport.chan.tx.mtu < GOEP_MIN_MTU) ||
-	    (goep->_transport.chan.rx.mtu < GOEP_MIN_MTU)) {
-		LOG_WRN("Invalid MTU (local %d, peer %d", goep->_transport.chan.rx.mtu,
-			goep->_transport.chan.tx.mtu);
+	if ((goep_transport_v2->chan.tx.mtu < GOEP_MIN_MTU) ||
+	    (goep_transport_v2->chan.rx.mtu < GOEP_MIN_MTU)) {
+		LOG_WRN("Invalid MTU (local %d, peer %d)", goep_transport_v2->chan.rx.mtu,
+			goep_transport_v2->chan.tx.mtu);
 		bt_l2cap_chan_disconnect(chan);
 		return;
 	}
 
-	goep->obex.rx.mtu = goep->_transport.chan.rx.mtu;
-	goep->obex.tx.mtu = goep->_transport.chan.tx.mtu;
+	goep->obex.rx.mtu = goep_transport_v2->chan.rx.mtu;
+	goep->obex.tx.mtu = goep_transport_v2->chan.tx.mtu;
 
 	atomic_set(&goep->_state, BT_GOEP_TRANSPORT_CONNECTED);
 
 	err = bt_obex_transport_connected(&goep->obex);
-	if (err) {
+	if (err != 0) {
 		LOG_WRN("Notify OBEX (err %d). Disconnecting transport...", err);
 		bt_l2cap_chan_disconnect(chan);
 		return;
@@ -370,7 +362,8 @@ static void goep_l2cap_connected(struct bt_l2cap_chan *chan)
 
 static void goep_l2cap_disconnected(struct bt_l2cap_chan *chan)
 {
-	struct bt_goep *goep = CONTAINER_OF(chan, struct bt_goep, _transport.chan.chan);
+	struct bt_goep_transport_v2 *goep_transport_v2 = GOEP_GET_TRANSPORT_V2(chan);
+	struct bt_goep *goep = goep_transport_v2->goep;
 	int err;
 
 	LOG_DBG("L2CAP channel %p disconnected", chan);
@@ -378,7 +371,7 @@ static void goep_l2cap_disconnected(struct bt_l2cap_chan *chan)
 	atomic_set(&goep->_state, BT_GOEP_TRANSPORT_DISCONNECTED);
 
 	err = bt_obex_transport_disconnected(&goep->obex);
-	if (err) {
+	if (err != 0) {
 		LOG_WRN("Notify OBEX (err %d).", err);
 	}
 
@@ -391,7 +384,11 @@ static struct net_buf *l2cap_alloc_buf(struct bt_l2cap_chan *chan)
 {
 	struct net_buf *buf;
 
-	buf = net_buf_alloc(&goep_rx_pool, K_FOREVER);
+	/* Called from the Bluetooth RX workqueue, which is also the context that
+	 * releases these buffers once an SDU has been delivered, so waiting here
+	 * could never be satisfied.
+	 */
+	buf = net_buf_alloc(&goep_rx_pool, K_NO_WAIT);
 	if (buf == NULL) {
 		LOG_ERR("Failed to allocate buffer");
 	}
@@ -409,8 +406,9 @@ static const struct bt_l2cap_chan_ops goep_l2cap_ops = {
 static int goep_l2cap_send(struct bt_obex *obex, struct net_buf *buf)
 {
 	struct bt_goep *goep = CONTAINER_OF(obex, struct bt_goep, obex);
+	struct bt_goep_transport_v2 *goep_transport_v2;
 
-	if (!goep->_goep_v2) {
+	if (goep->v2 == NULL) {
 		LOG_WRN("Invalid transport");
 		return -EINVAL;
 	}
@@ -420,14 +418,16 @@ static int goep_l2cap_send(struct bt_obex *obex, struct net_buf *buf)
 		return -EMSGSIZE;
 	}
 
-	return bt_l2cap_chan_send(&goep->_transport.chan.chan, buf);
+	goep_transport_v2 = goep->v2;
+
+	return bt_l2cap_chan_send(&goep_transport_v2->chan.chan, buf);
 }
 
 static struct net_buf *goep_l2cap_alloc_buf(struct bt_obex *obex, struct net_buf_pool *pool)
 {
 	struct bt_goep *goep = CONTAINER_OF(obex, struct bt_goep, obex);
 
-	if (!goep->_goep_v2) {
+	if (goep->v2 == NULL) {
 		LOG_WRN("Invalid transport");
 		return NULL;
 	}
@@ -438,13 +438,16 @@ static struct net_buf *goep_l2cap_alloc_buf(struct bt_obex *obex, struct net_buf
 static int goep_l2cap_disconnect(struct bt_obex *obex)
 {
 	struct bt_goep *goep = CONTAINER_OF(obex, struct bt_goep, obex);
+	struct bt_goep_transport_v2 *goep_transport_v2;
 
-	if (!goep->_goep_v2) {
+	if (goep->v2 == NULL) {
 		LOG_WRN("Invalid transport");
 		return -EINVAL;
 	}
 
-	return bt_l2cap_chan_disconnect(&goep->_transport.chan.chan);
+	goep_transport_v2 = goep->v2;
+
+	return bt_l2cap_chan_disconnect(&goep_transport_v2->chan.chan);
 }
 
 static const struct bt_obex_transport_ops goep_l2cap_transport_ops = {
@@ -453,44 +456,31 @@ static const struct bt_obex_transport_ops goep_l2cap_transport_ops = {
 	.disconnect = goep_l2cap_disconnect,
 };
 
-static int goep_l2cap_init(struct bt_conn *conn, struct bt_goep *goep)
+static void goep_l2cap_init(struct bt_conn *conn, struct bt_goep *goep)
 {
+	struct bt_goep_transport_v2 *goep_transport_v2 = goep->v2;
 	uint32_t mtu;
 	uint32_t hdr_size;
-	int err;
 
 	hdr_size = sizeof(struct bt_l2cap_hdr);
 
 	mtu = CONFIG_BT_GOEP_L2CAP_MTU - hdr_size;
-	/* Use default MTU if it is not given */
-	if (goep->obex.rx.mtu == 0) {
-		goep->obex.rx.mtu = mtu;
-	}
 
-	if (goep->obex.rx.mtu < GOEP_MIN_MTU) {
-		LOG_WRN("GOEP L2CAP MTU less than minimum size (%d < %d)", goep->obex.rx.mtu,
-			GOEP_MIN_MTU);
-		goep->obex.rx.mtu = GOEP_MIN_MTU;
-	}
+	/* Set the default MTU to the largest value that the configuration can support */
+	goep->obex.rx.mtu = mtu;
 
-	if (goep->obex.rx.mtu > mtu) {
-		LOG_WRN("GOEP L2CAP MTU exceeds maximum size (%d > %d)", goep->obex.rx.mtu, mtu);
-		goep->obex.rx.mtu = mtu;
-	}
+	__ASSERT(goep->obex.rx.mtu >= GOEP_MIN_MTU, "GOEP L2CAP MTU less than minimum size "
+		 "(%d < %d)", goep->obex.rx.mtu, GOEP_MIN_MTU);
 
-	err = bt_obex_reg_transport(&goep->obex, &goep_l2cap_transport_ops);
-	if (err != 0) {
-		LOG_ERR("Fail to reg transport ops");
-		return err;
-	}
+	bt_obex_reg_transport(&goep->obex, &goep_l2cap_transport_ops);
 
-	goep->_goep_v2 = true;
 	goep->_acl = conn;
-	goep->_transport.chan.rx.mode = BT_L2CAP_BR_LINK_MODE_ERET;
-	goep->_transport.chan.rx.optional = false;
-	goep->_transport.chan.rx.max_transmit = 3;
-	goep->_transport.chan.rx.mtu = goep->obex.rx.mtu;
-	goep->_transport.chan.rx.extended_control = false;
+	goep_transport_v2->goep = goep;
+	goep_transport_v2->chan.rx.mode = BT_L2CAP_BR_LINK_MODE_ERET;
+	goep_transport_v2->chan.rx.optional = false;
+	goep_transport_v2->chan.rx.max_transmit = 3;
+	goep_transport_v2->chan.rx.mtu = goep->obex.rx.mtu;
+	goep_transport_v2->chan.rx.extended_control = false;
 	/*
 	 * There is an issue found that the FCS option is not correctly set when connecting to an
 	 * iphone when the profile is PBAP or MAP. The issue is that iphone expects the No FCS
@@ -498,18 +488,16 @@ static int goep_l2cap_init(struct bt_conn *conn, struct bt_goep *goep)
 	 * L2CAP_CONFIGURATION_REQ packet sent by the iphone.
 	 * Force 16 bits FCS option for enhance retransmission mode by default.
 	 */
-	goep->_transport.chan.rx.fcs = BT_L2CAP_BR_FCS_16BIT;
-	goep->_transport.chan.chan.ops = &goep_l2cap_ops;
-	goep->_transport.chan.required_sec_level = BT_SECURITY_L2;
-
-	return 0;
+	goep_transport_v2->chan.rx.fcs = BT_L2CAP_BR_FCS_16BIT;
+	goep_transport_v2->chan.chan.ops = &goep_l2cap_ops;
+	goep_transport_v2->chan.required_sec_level = BT_SECURITY_L2;
 }
 
 static int goep_l2cap_accept(struct bt_conn *conn, struct bt_l2cap_server *server,
 			     struct bt_l2cap_chan **chan)
 {
 	struct bt_goep_transport_l2cap_server *l2cap_server;
-	struct bt_goep *goep;
+	struct bt_goep *goep = NULL;
 	int err;
 
 	l2cap_server = CONTAINER_OF(server, struct bt_goep_transport_l2cap_server, l2cap);
@@ -520,23 +508,17 @@ static int goep_l2cap_accept(struct bt_conn *conn, struct bt_l2cap_server *serve
 	}
 
 	err = l2cap_server->accept(conn, l2cap_server, &goep);
-	if (err) {
+	if (err != 0) {
 		LOG_DBG("Incoming connection rejected");
 		return err;
 	}
 
-	if (goep == NULL || goep->transport_ops == NULL) {
-		LOG_DBG("Invalid parameter");
-		return -EINVAL;
-	}
+	__ASSERT(goep != NULL && goep->v2 != NULL && goep->v1 == NULL &&
+		 goep->transport_ops != NULL, "Invalid parameter of GOEP L2CAP transport");
 
-	err = goep_l2cap_init(conn, goep);
-	if (err != 0) {
-		LOG_ERR("Fail to init goep");
-		return err;
-	}
+	goep_l2cap_init(conn, goep);
 
-	*chan = &goep->_transport.chan.chan;
+	*chan = &goep->v2->chan.chan;
 	atomic_set(&goep->_state, BT_GOEP_TRANSPORT_CONNECTING);
 
 	return 0;
@@ -546,7 +528,7 @@ int bt_goep_transport_l2cap_server_register(struct bt_goep_transport_l2cap_serve
 {
 	int err;
 
-	if (!server || !server->accept) {
+	if (server == NULL || server->accept == NULL) {
 		LOG_DBG("Invalid parameter");
 		return -EINVAL;
 	}
@@ -558,7 +540,7 @@ int bt_goep_transport_l2cap_server_register(struct bt_goep_transport_l2cap_serve
 
 	server->l2cap.accept = goep_l2cap_accept;
 	err = bt_l2cap_br_server_register(&server->l2cap);
-	if (err) {
+	if (err != 0) {
 		LOG_WRN("Fail to register L2CAP Server %p", server);
 		return err;
 	}
@@ -574,7 +556,8 @@ int bt_goep_transport_l2cap_connect(struct bt_conn *conn, struct bt_goep *goep, 
 	int err;
 	uint32_t state;
 
-	if (conn == NULL || goep == NULL || goep->transport_ops == NULL) {
+	if (conn == NULL || goep == NULL || goep->v2 == NULL || goep->v1 != NULL ||
+	    goep->transport_ops == NULL) {
 		LOG_DBG("Invalid parameter");
 		return -EINVAL;
 	}
@@ -585,13 +568,9 @@ int bt_goep_transport_l2cap_connect(struct bt_conn *conn, struct bt_goep *goep, 
 		return -EBUSY;
 	}
 
-	err = goep_l2cap_init(conn, goep);
-	if (err != 0) {
-		LOG_ERR("Fail to init goep");
-		return err;
-	}
+	goep_l2cap_init(conn, goep);
 
-	err = bt_l2cap_chan_connect(conn, &goep->_transport.chan.chan, psm);
+	err = bt_l2cap_chan_connect(conn, &goep->v2->chan.chan, psm);
 	if (err != 0) {
 		LOG_ERR("Fail to create L2CAP connection");
 		return err;
@@ -607,7 +586,7 @@ int bt_goep_transport_l2cap_disconnect(struct bt_goep *goep)
 	int err;
 	uint32_t state;
 
-	if (!goep || !goep->_goep_v2) {
+	if (goep == NULL || goep->v2 == NULL) {
 		LOG_DBG("Invalid parameter");
 		return -EINVAL;
 	}
@@ -618,8 +597,8 @@ int bt_goep_transport_l2cap_disconnect(struct bt_goep *goep)
 		return -ENOTCONN;
 	}
 
-	err = bt_l2cap_chan_disconnect(&goep->_transport.chan.chan);
-	if (err) {
+	err = bt_l2cap_chan_disconnect(&goep->v2->chan.chan);
+	if (err != 0) {
 		LOG_WRN("Fail to disconnect L2CAP channel");
 		return err;
 	}
@@ -634,18 +613,19 @@ struct net_buf *bt_goep_create_pdu(struct bt_goep *goep, struct net_buf_pool *po
 	struct net_buf *buf;
 	size_t len;
 
-	if (!goep) {
+	if (goep == NULL || (goep->v1 == NULL && goep->v2 == NULL) ||
+	    (goep->v1 != NULL && goep->v2 != NULL)) {
 		LOG_WRN("Invalid parameter");
 		return NULL;
 	}
 
-	if (!goep->_goep_v2) {
+	if (goep->v1 != NULL) {
 		buf = bt_rfcomm_create_pdu(pool);
 	} else {
 		buf = bt_conn_create_pdu(pool, sizeof(struct bt_l2cap_hdr));
 	}
 
-	if (buf) {
+	if (buf != NULL) {
 		len = net_buf_headroom(buf);
 		net_buf_reserve(buf, len + BT_OBEX_SEND_BUF_RESERVE);
 	}

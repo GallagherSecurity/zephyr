@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef ZEPHYR_SUBSYS_CPU_FREQ_H_
-#define ZEPHYR_SUBSYS_CPU_FREQ_H_
+/**
+ * @file
+ * @ingroup subsys_cpu_freq
+ * @brief Main header file for CPU frequency scaling API.
+ */
+
+#ifndef ZEPHYR_INCLUDE_CPU_FREQ_CPU_FREQ_H_
+#define ZEPHYR_INCLUDE_CPU_FREQ_CPU_FREQ_H_
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,7 +24,7 @@ extern "C" {
  * @brief Dynamic CPU Frequency Scaling
  * @defgroup subsys_cpu_freq CPU Frequency (CPUFreq)
  * @since 4.3
- * @version 0.1.0
+ * @version 0.8.0
  * @ingroup os_services
  * @{
  */
@@ -50,4 +56,4 @@ int cpu_freq_pstate_set(const struct pstate *state);
 }
 #endif
 
-#endif /* ZEPHYR_SUBSYS_CPU_FREQ_H_ */
+#endif /* ZEPHYR_INCLUDE_CPU_FREQ_CPU_FREQ_H_ */

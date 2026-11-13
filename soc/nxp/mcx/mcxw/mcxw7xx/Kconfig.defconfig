@@ -4,6 +4,24 @@
 
 if SOC_SERIES_MCXW7XX
 
+config MCUX_LPTMR_TIMER
+	default y if PM
+
+# Enable Zephyr cache management for the MCM-controlled LPCAC code cache.
+# The LPCAC is enabled out of reset; this exposes the cache management API
+# (backed by cache_nxp_mcm_lpcac) so consumers such as the flash driver can
+# invalidate the code cache through the standard sys_cache_* interface.
+configdefault CACHE_MANAGEMENT
+	default y
+
+choice CACHE_TYPE
+	default EXTERNAL_CACHE
+endchoice
+
+# LPCAC uses a 256-byte per-line, write-through organization (RM LPCAC chapter).
+configdefault ICACHE_LINE_SIZE
+	default 256
+
 config NUM_IRQS
 	default 112 if SOC_MCXW70AC
 	default 77 if SOC_MCXW727C
@@ -24,6 +42,20 @@ config SYS_CLOCK_HW_CYCLES_PER_SEC
 
 config MCUX_FLASH_K4_API
 	default y
+
+if BT_MESH_BLOB_IO_FLASH
+
+# MCXW7x internal flash is ECC-protected with a 16-byte phrase (write block)
+# that may only be programmed once per erase. Cache each BLOB block and flush
+# it phrase-aligned once so a BLE Mesh DFU with an unaligned chunk size does
+# not re-program a phrase and corrupt its ECC syndrome.
+config BT_MESH_BLOB_IO_FLASH_BLOCK_CACHE
+	default y
+
+config BT_MESH_BLOB_IO_FLASH_WRITE_BLOCK_SIZE_MAX
+	default 16
+
+endif # BT_MESH_BLOB_IO_FLASH
 
 if BT
 
@@ -66,11 +98,14 @@ config HCI_NXP_RX_THREAD
 
 endif # BT
 
-if IEEE802154
+if IEEE802154 || NXP_IEEE802154_MAC
 
 # Include intercore messaging component
 config NXP_RF_IMU
 	default y
+
+config OPENTHREAD_SYS_INIT_PRIORITY
+	default 80 if OPENTHREAD_RADIO_VENDOR_IMPLEMENTATION && SOC_MCXW70AC
 
 endif # IEEE802154
 
@@ -82,3 +117,6 @@ config ROM_START_OFFSET
 endif # NXP_MCXW7XX_BOOT_HEADER
 
 endif
+
+config WUC
+	default y if "$(dt_nodelabel_enabled,wuu)"

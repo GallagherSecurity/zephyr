@@ -138,7 +138,6 @@ in your Zephyr application. For example:
 
 .. zephyr-app-commands::
    :zephyr-app: samples/drivers/can/counter
-   :tool: all
    :board: rpi_pico
    :shield: canpico
    :goals: build flash
@@ -147,7 +146,7 @@ in your Zephyr application. For example:
    https://canislabs.com/
 
 .. _CANPico CAN Bus Shield:
-   https://canislabs.com/canpico/
+   https://kentindell.github.io/canpico
 
 .. _MCP2517FD:
    https://www.microchip.com/en-us/product/MCP2518FD

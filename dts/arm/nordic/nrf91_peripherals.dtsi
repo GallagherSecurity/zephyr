@@ -7,6 +7,8 @@
 adc: adc@e000 {
 	compatible = "nordic,nrf-saadc";
 	reg = <0xe000 0x1000>;
+	#address-cells = <1>;
+	#size-cells = <0>;
 	interrupts = <14 NRF_DEFAULT_IRQ_PRIORITY>;
 	status = "disabled";
 	#io-channel-cells = <1>;
@@ -328,6 +330,16 @@ clock: clock@5000 {
 	reg = <0x5000 0x1000>;
 	interrupts = <5 NRF_DEFAULT_IRQ_PRIORITY>;
 	status = "okay";
+
+	hfclk: hfclk {
+		compatible = "nordic,nrf-clock-hfclk";
+		status = "okay";
+	};
+
+	lfclk: lfclk {
+		compatible = "nordic,nrf-clock-lfclk";
+		status = "okay";
+	};
 };
 
 power: power@5000 {

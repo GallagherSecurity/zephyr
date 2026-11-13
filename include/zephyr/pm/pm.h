@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * @file
+ * @brief Header file for the Power Management API.
+ * @ingroup subsys_pm
+ */
+
 #ifndef ZEPHYR_INCLUDE_PM_PM_H_
 #define ZEPHYR_INCLUDE_PM_PM_H_
 
@@ -31,6 +37,7 @@ extern "C" {
  * @brief System Power Management API
  * @defgroup subsys_pm_sys System
  * @since 1.2
+ * @version 1.0.0
  * @ingroup subsys_pm
  * @{
  */
@@ -55,6 +62,11 @@ extern "C" {
  */
 struct pm_notifier {
 	sys_snode_t _node;
+	/**
+	 * Callbacks to be invoked on power state entry and exit. Set either
+	 * the plain variants or the substate reporting ones, and select
+	 * between them with the report_substate field.
+	 */
 	union {
 		struct {
 			/**
@@ -81,7 +93,12 @@ struct pm_notifier {
 			void (*substate_exit)(enum pm_state state, uint8_t substate_id);
 		};
 	};
-	bool report_substate; /* 0 is for backwards compatibility that didn't report substates */
+	/**
+	 * True if the substate reporting callbacks are set. False, the default
+	 * for backwards compatibility, selects the callbacks that do not report
+	 * the substate id.
+	 */
+	bool report_substate;
 };
 
 #if defined(CONFIG_PM) || defined(__DOXYGEN__)
@@ -117,8 +134,7 @@ void pm_notifier_register(struct pm_notifier *notifier);
  *
  * @param notifier pm_notifier object to be unregistered.
  *
- * @return 0 if the notifier was successfully removed, a negative value
- * otherwise.
+ * @return 0 on success, negative errno value on failure.
  */
 int pm_notifier_unregister(struct pm_notifier *notifier);
 
@@ -129,7 +145,8 @@ int pm_notifier_unregister(struct pm_notifier *notifier);
  * SoC.
  *
  * @param cpu CPU index.
- * @return next pm_state_info that will be used
+ *
+ * @return Next pm_state_info that will be used.
  */
 const struct pm_state_info *pm_state_next_get(uint8_t cpu);
 
@@ -167,7 +184,19 @@ void pm_system_resume(void);
  * @brief Put processor into a power state.
  *
  * This function implements the SoC specific details necessary
- * to put the processor into available power states.
+ * to put the processor into available power states. Implementations that select
+ * CONFIG_PM_STATE_SET_IRQ_UNLOCKED may still follow the legacy behavior of
+ * unmasking interrupts from this hook. Other implementations must not unmask
+ * interrupts or otherwise dispatch pending wake-source ISRs from this hook.
+ * Architecture helpers may adjust interrupt state immediately around the
+ * low-power instruction, but the kernel idle path restores the original
+ * interrupt state after PM resume housekeeping is complete.
+ *
+ * @note When system PM keeps interrupts locked across resume, the locked-resume
+ *       ordering guarantee covers only interrupts that arch_irq_lock() can mask.
+ *       A zero-latency interrupt (IRQ_ZERO_LATENCY) is outside this ordering and
+ *       must be PM-wake-safe, or its interrupt source must be masked or disabled
+ *       while the system state does not allow the ISR to execute.
  *
  * @param state Power state.
  * @param substate_id Power substate id.
@@ -177,10 +206,31 @@ void pm_state_set(enum pm_state state, uint8_t substate_id);
 /**
  * @brief Do any SoC or architecture specific post ops after sleep state exits.
  *
- * This function is a place holder to do any operations that may
- * be needed to be done after sleep state exits. Currently it enables
- * interrupts after resuming from sleep state. In future, the enabling
- * of interrupts may be moved into the kernel.
+ * This function is a place holder to do any operations that may be needed after
+ * a sleep state exits. By default, it is called after system-managed devices
+ * have been resumed, before PM exit notifications and system clock idle-exit
+ * accounting, and while interrupts are still locked.
+ *
+ * With CONFIG_PM_EARLY_SYSTEM_TIMER_RESUME, this hook runs before system clock
+ * idle-exit accounting and system-managed device resume. Platforms enabling
+ * this experimental sequence must ensure this hook does not depend on devices
+ * having been resumed, for example when releasing I/O retention or isolation.
+ *
+ * Implementations that do not select CONFIG_PM_STATE_SET_IRQ_UNLOCKED must use
+ * this hook for hardware resume operations only. They must not unmask interrupts
+ * or otherwise dispatch pending wake-source ISRs from this hook; the kernel idle
+ * path restores the original interrupt state after PM resume housekeeping is
+ * complete.
+ *
+ * @note The system timer has not been restarted when this hook runs in either
+ *       sequence. If the low-power state stopped it, code that waits on that
+ *       timer, such as a timer-based k_busy_wait(), may never return.
+ *
+ * @note As with @ref pm_state_set, when system PM keeps interrupts locked
+ *       across resume, this ordering covers only interrupts that
+ *       arch_irq_lock() can mask. A zero-latency interrupt (IRQ_ZERO_LATENCY)
+ *       may run during the resume window before this hook completes and must be
+ *       PM-wake-safe (see @ref pm_state_set).
  *
  * @param state Power state.
  * @param substate_id Power substate id.
@@ -191,7 +241,7 @@ void pm_state_exit_post_ops(enum pm_state state, uint8_t substate_id);
  * @}
  */
 
-#else  /* CONFIG_PM */
+#else /* CONFIG_PM */
 
 static inline void pm_notifier_register(struct pm_notifier *notifier)
 {

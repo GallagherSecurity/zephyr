@@ -68,7 +68,7 @@ struct k_spinlock {
 
 #ifdef CONFIG_SPIN_VALIDATE
 	/* Stores the thread that holds the lock with the locking CPU
-	 * ID in the bottom two bits.
+	 * ID in the bottom bits (2 bits on 32-bit, 3 bits on 64-bit).
 	 */
 	uintptr_t thread_cpu;
 #ifdef CONFIG_SPIN_LOCK_TIME_LIMIT
@@ -104,7 +104,18 @@ struct k_spinlock {
 bool z_spin_lock_valid(struct k_spinlock *l);
 bool z_spin_unlock_valid(struct k_spinlock *l);
 void z_spin_lock_set_owner(struct k_spinlock *l);
+void z_spin_lock_transfer_owner(struct k_spinlock *l, struct k_thread *thread);
+void z_assert_can_swap(unsigned int key, struct k_spinlock *swap_lock);
+void z_spin_validate_reset(bool lock_held);
+extern const uint8_t z_spinlock_abort_sentinel;
+#ifdef CONFIG_TEST
+struct k_spinlock *z_spin_get_held_lock(void);
+#endif /* CONFIG_TEST */
+#if defined(CONFIG_64BIT)
+BUILD_ASSERT(CONFIG_MP_MAX_NUM_CPUS <= 8, "Too many CPUs for mask");
+#else
 BUILD_ASSERT(CONFIG_MP_MAX_NUM_CPUS <= 4, "Too many CPUs for mask");
+#endif
 
 # ifdef CONFIG_KERNEL_COHERENCE
 bool z_spin_lock_mem_coherent(struct k_spinlock *l);
@@ -174,6 +185,8 @@ static ALWAYS_INLINE void z_spinlock_validate_post(struct k_spinlock *l)
  * @warning
  * Holding a spinlock when a context switch occurs is illegal.
  *
+ * @isr_ok
+ *
  * @param l A pointer to the spinlock to lock
  * @return A key value that must be passed to k_spin_unlock() when the
  *         lock is released.
@@ -219,6 +232,8 @@ static ALWAYS_INLINE k_spinlock_key_t k_spin_lock(struct k_spinlock *l)
  *
  * This routine makes one attempt to lock @p l. If it is successful, then
  * it will store the key into @p k.
+ *
+ * @isr_ok
  *
  * @param[in] l A pointer to the spinlock to lock
  * @param[out] k A pointer to the spinlock key
@@ -294,6 +309,8 @@ busy:
  * k_spin_lock(), are illegal.  When CONFIG_SPIN_VALIDATE is set, some
  * of these errors can be detected by the framework.
  *
+ * @isr_ok
+ *
  * @param l A pointer to the spinlock to release
  * @param key The value returned from k_spin_lock() when this lock was
  *        acquired
@@ -336,7 +353,7 @@ static ALWAYS_INLINE void k_spin_unlock(struct k_spinlock *l,
  * @cond INTERNAL_HIDDEN
  */
 
-#if defined(CONFIG_SMP) && (defined(CONFIG_TEST) || defined(CONFIG_ASSERT))
+#if defined(CONFIG_TEST) || defined(CONFIG_ASSERT)
 /*
  * @brief Checks if spinlock is held by some CPU, including the local CPU.
  *		This should only be used in tests or assertions, not to make
@@ -347,6 +364,7 @@ static ALWAYS_INLINE void k_spin_unlock(struct k_spinlock *l,
  */
 static ALWAYS_INLINE bool z_spin_is_locked(struct k_spinlock *l)
 {
+#ifdef CONFIG_SMP
 #ifdef CONFIG_TICKET_SPINLOCKS
 	atomic_val_t ticket_val = atomic_get(&l->owner);
 
@@ -354,8 +372,13 @@ static ALWAYS_INLINE bool z_spin_is_locked(struct k_spinlock *l)
 #else
 	return l->locked;
 #endif /* CONFIG_TICKET_SPINLOCKS */
+#else
+	ARG_UNUSED(l);
+	/* In UP builds a spinlock reduces to an IRQ lock. */
+	return !arch_cpu_irqs_are_enabled();
+#endif /* CONFIG_SMP */
 }
-#endif /* defined(CONFIG_SMP) && (defined(CONFIG_TEST) || defined(CONFIG_ASSERT)) */
+#endif /* defined(CONFIG_TEST) || defined(CONFIG_ASSERT) */
 
 /* Internal function: releases the lock, but leaves local interrupts disabled */
 static ALWAYS_INLINE void k_spin_release(struct k_spinlock *l)

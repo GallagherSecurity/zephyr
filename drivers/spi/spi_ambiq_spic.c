@@ -10,7 +10,7 @@
 LOG_MODULE_REGISTER(spi_ambiq);
 
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/spi/rtio.h>
+#include "spi_rtio.h"
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
@@ -159,7 +159,7 @@ static int spi_config(const struct device *dev, const struct spi_config *config)
 		}
 	}
 
-	if (config->operation & SPI_OP_MODE_SLAVE) {
+	if (config->operation & SPI_OP_MODE_PERIPHERAL) {
 		LOG_ERR("Device mode not supported");
 		return -ENOTSUP;
 	}

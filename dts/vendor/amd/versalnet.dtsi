@@ -58,7 +58,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 57 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb330000 0x20>, <0xeb3f0400 0x1000>;
+			reg = <0xeb330000 0x10000>, <0xeb3f0400 0x200>;
 			reg-names = "ctrl", "msg";
 			xlnx,ipi-id = <2>;
 			#address-cells = <1>;
@@ -69,7 +69,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 58 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb340000 0x20>, <0xeb3f0600 0x1000>;
+			reg = <0xeb340000 0x10000>, <0xeb3f0600 0x200>;
 			reg-names = "ctrl", "msg";
 			xlnx,ipi-id = <3>;
 			#address-cells = <1>;
@@ -80,7 +80,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 59 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb350000 0x20>, <0xeb3f0800 0x1000>;
+			reg = <0xeb350000 0x10000>, <0xeb3f0800 0x200>;
 			reg-names = "ctrl", "msg";
 			xlnx,ipi-id = <4>;
 			#address-cells = <1>;
@@ -91,7 +91,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb360000 0x20>, <0xeb3f0a00 0x1000>;
+			reg = <0xeb360000 0x10000>, <0xeb3f0a00 0x200>;
 			reg-names = "ctrl", "msg";
 			xlnx,ipi-id = <5>;
 			#address-cells = <1>;
@@ -102,7 +102,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 61 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb370000 0x20>, <0xeb3f0c00 0x1000>;
+			reg = <0xeb370000 0x10000>, <0xeb3f0c00 0x200>;
 			reg-names = "ctrl", "msg";
 			xlnx,ipi-id = <6>;
 			#address-cells = <1>;
@@ -113,7 +113,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 62 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb380000 0x20>, <0xeb3f0e00 0x1000>;
+			reg = <0xeb380000 0x10000>, <0xeb3f0e00 0x200>;
 			reg-names = "ctrl", "msg";
 			xlnx,ipi-id = <7>;
 			#address-cells = <1>;
@@ -124,7 +124,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 63 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb3a0000 0x20>;
+			reg = <0xeb3a0000 0x1000>;
 			reg-names = "ctrl";
 			xlnx,ipi-id = <9>;
 			#address-cells = <1>;
@@ -135,7 +135,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 64 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb3b0000 0x20>;
+			reg = <0xeb3b0000 0x1000>;
 			reg-names = "ctrl";
 			xlnx,ipi-id = <10>;
 			#address-cells = <1>;
@@ -146,7 +146,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 65 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb3b1000 0x20>;
+			reg = <0xeb3b1000 0x1000>;
 			reg-names = "ctrl";
 			xlnx,ipi-id = <11>;
 			#address-cells = <1>;
@@ -157,7 +157,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 66 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb3b2000 0x20>;
+			reg = <0xeb3b2000 0x1000>;
 			reg-names = "ctrl";
 			xlnx,ipi-id = <12>;
 			#address-cells = <1>;
@@ -168,7 +168,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 67 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb3b3000 0x20>;
+			reg = <0xeb3b3000 0x1000>;
 			reg-names = "ctrl";
 			xlnx,ipi-id = <13>;
 			#address-cells = <1>;
@@ -179,7 +179,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb3b4000 0x20>;
+			reg = <0xeb3b4000 0x1000>;
 			reg-names = "ctrl";
 			xlnx,ipi-id = <14>;
 			#address-cells = <1>;
@@ -190,7 +190,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 69 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb3b5000 0x20>;
+			reg = <0xeb3b5000 0x1000>;
 			reg-names = "ctrl";
 			xlnx,ipi-id = <15>;
 			#address-cells = <1>;
@@ -201,7 +201,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 61 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb310000 0x20>, <0xeb3f0000 0x1000>;
+			reg = <0xeb310000 0x10000>, <0xeb3f0000 0x200>;
 			reg-names = "ctrl", "msg";
 			xlnx,ipi-id = <0>;
 			#address-cells = <1>;
@@ -212,7 +212,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 59 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb320000 0x20>, <0xeb3f0200 0x1000>;
+			reg = <0xeb320000 0x10000>, <0xeb3f0200 0x200>;
 			reg-names = "ctrl", "msg";
 			xlnx,ipi-id = <1>;
 			#address-cells = <1>;
@@ -223,7 +223,7 @@
 			compatible = "xlnx,mbox-versal-ipi-mailbox";
 			status = "disabled";
 			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
-			reg = <0xeb390000 0x20>;
+			reg = <0xeb390000 0x1000>;
 			reg-names = "ctrl";
 			xlnx,ipi-id = <8>;
 			#address-cells = <1>;
@@ -253,6 +253,118 @@
 			clock-frequency = <120000000>;
 			#address-cells = <1>;
 			#size-cells = <0>;
+		};
+
+		adma0: dma-controller@ebd00000 {
+			compatible = "xlnx,zynqmp-dma-1.0";
+			status = "disabled";
+			reg = <0xebd00000 0x1000>;
+			#dma-cells = <1>;
+			interrupts = <GIC_SPI 72 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			clock-names = "clk_main", "clk_apb";
+		};
+
+		adma1: dma-controller@ebd10000 {
+			compatible = "xlnx,zynqmp-dma-1.0";
+			status = "disabled";
+			reg = <0xebd10000 0x1000>;
+			#dma-cells = <1>;
+			interrupts = <GIC_SPI 73 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			clock-names = "clk_main", "clk_apb";
+		};
+
+		adma2: dma-controller@ebd20000 {
+			compatible = "xlnx,zynqmp-dma-1.0";
+			status = "disabled";
+			reg = <0xebd20000 0x1000>;
+			#dma-cells = <1>;
+			interrupts = <GIC_SPI 74 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			clock-names = "clk_main", "clk_apb";
+		};
+
+		adma3: dma-controller@ebd30000 {
+			compatible = "xlnx,zynqmp-dma-1.0";
+			status = "disabled";
+			reg = <0xebd30000 0x1000>;
+			#dma-cells = <1>;
+			interrupts = <GIC_SPI 75 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			clock-names = "clk_main", "clk_apb";
+		};
+
+		adma4: dma-controller@ebd40000 {
+			compatible = "xlnx,zynqmp-dma-1.0";
+			status = "disabled";
+			reg = <0xebd40000 0x1000>;
+			#dma-cells = <1>;
+			interrupts = <GIC_SPI 76 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			clock-names = "clk_main", "clk_apb";
+		};
+
+		adma5: dma-controller@ebd50000 {
+			compatible = "xlnx,zynqmp-dma-1.0";
+			status = "disabled";
+			reg = <0xebd50000 0x1000>;
+			#dma-cells = <1>;
+			interrupts = <GIC_SPI 77 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			clock-names = "clk_main", "clk_apb";
+		};
+
+		adma6: dma-controller@ebd60000 {
+			compatible = "xlnx,zynqmp-dma-1.0";
+			status = "disabled";
+			reg = <0xebd60000 0x1000>;
+			#dma-cells = <1>;
+			interrupts = <GIC_SPI 78 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			clock-names = "clk_main", "clk_apb";
+		};
+
+		adma7: dma-controller@ebd70000 {
+			compatible = "xlnx,zynqmp-dma-1.0";
+			status = "disabled";
+			reg = <0xebd70000 0x1000>;
+			#dma-cells = <1>;
+			interrupts = <GIC_SPI 79 IRQ_TYPE_LEVEL
+				      IRQ_DEFAULT_PRIORITY>;
+			clock-names = "clk_main", "clk_apb";
+		};
+
+		ttc0: timer@f1dc0000 {
+			compatible = "xlnx,ttc";
+			reg = <0xf1dc0000 0x1000>;
+			timer-width = <32>;
+			clock-frequency = <149998505>;
+			status = "disabled";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			ttc0_timer0: counter@0 {
+				compatible = "xlnx,ttc-counter";
+				reg = <0>;
+				interrupts = <GIC_SPI 43 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
+				status = "disabled";
+			};
+
+			ttc0_timer1: counter@1 {
+				compatible = "xlnx,ttc-counter";
+				reg = <1>;
+				interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
+				status = "disabled";
+			};
+
+			ttc0_timer2: counter@2 {
+				compatible = "xlnx,ttc-counter";
+				reg = <2>;
+				interrupts = <GIC_SPI 45 IRQ_TYPE_LEVEL IRQ_DEFAULT_PRIORITY>;
+				status = "disabled";
+			};
 		};
 	};
 };

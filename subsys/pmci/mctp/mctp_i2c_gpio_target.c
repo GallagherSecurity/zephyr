@@ -5,7 +5,7 @@
  *
  */
 
-#include "zephyr/pmci/mctp/mctp_i2c_gpio_common.h"
+#include <zephyr/pmci/mctp/mctp_i2c_gpio_common.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/uart.h>
@@ -44,19 +44,31 @@ int mctp_i2c_gpio_target_write_received(struct i2c_target_config *config, uint8_
 		break;
 	case MCTP_I2C_GPIO_RX_MSG_LEN_ADDR:
 		b->rxtx = true;
-		b->rx_pkt = mctp_pktbuf_alloc(&b->binding, (size_t)val);
+		b->rx_exp_len = val;
 		/* Reset state machine to wait for next register */
 		b->reg_addr = MCTP_I2C_GPIO_INVALID_ADDR;
 		break;
 	case MCTP_I2C_GPIO_RX_MSG_ADDR:
-		b->rxtx = true;
-		b->rx_pkt->data[b->rx_idx] = val;
-		b->rx_idx += 1;
+		if (b->rx_pkt == NULL) {
+			b->rx_pkt = mctp_pktbuf_alloc(&b->binding, (size_t)b->rx_exp_len);
+			if (b->rx_pkt == NULL) {
+				LOG_ERR("Failed to allocate packet buffer");
+				ret = -ENOMEM;
+				break;
+			}
+		}
 
 		/* buffer full */
 		if (b->rx_idx >= b->rx_pkt->size) {
 			ret = -ENOMEM;
+			LOG_ERR("Received byte %d when packet buffer is full", val);
+			break;
 		}
+
+		b->rxtx = true;
+		b->rx_pkt->data[b->rx_idx] = val;
+		b->rx_idx += 1;
+
 		break;
 	default:
 		LOG_ERR("Write when reg_addr is %d", b->reg_addr);
@@ -86,6 +98,11 @@ int mctp_i2c_gpio_target_read_requested(struct i2c_target_config *config, uint8_
 		*val = pkt_len;
 		break;
 	case MCTP_I2C_GPIO_TX_MSG_ADDR:
+		if (b->tx_pkt == NULL || b->tx_pkt->start >= b->tx_pkt->end) {
+			LOG_WRN("No packet to send");
+			ret = -EIO;
+			break;
+		}
 		b->rxtx = true;
 		*val = b->tx_pkt->data[b->tx_pkt->start];
 		b->tx_idx = b->tx_pkt->start;
@@ -103,17 +120,21 @@ int mctp_i2c_gpio_target_read_processed(struct i2c_target_config *config, uint8_
 	struct mctp_binding_i2c_gpio_target *b =
 		CONTAINER_OF(config, struct mctp_binding_i2c_gpio_target, i2c_target_cfg);
 
-	b->tx_idx += 1;
-
 	if (b->reg_addr != MCTP_I2C_GPIO_TX_MSG_ADDR) {
 		goto out;
 	}
 
-	if (b->tx_idx > b->tx_pkt->end) {
+	if (b->tx_pkt == NULL)  {
+		LOG_WRN("No packet to process");
+		return -EIO;
+	}
+
+	if (b->tx_idx + 1 >= b->tx_pkt->end) {
 		LOG_WRN("rrp past end reg %d", b->reg_addr);
 		return -EIO;
 	}
 
+	b->tx_idx += 1;
 	*val = b->tx_pkt->data[b->tx_idx];
 
 out:
@@ -142,7 +163,9 @@ int mctp_i2c_gpio_target_stop(struct i2c_target_config *config)
 			LOG_DBG("stop rx msg, give pkt");
 			/* Give message to mctp to process */
 			mctp_bus_rx(&b->binding, b->rx_pkt);
+			mctp_pktbuf_free(b->rx_pkt);
 			b->rx_pkt = NULL;
+			b->rx_exp_len = 0;
 			break;
 		case MCTP_I2C_GPIO_RX_MSG_LEN_ADDR:
 		case MCTP_I2C_GPIO_TX_MSG_LEN_ADDR:
@@ -152,6 +175,10 @@ int mctp_i2c_gpio_target_stop(struct i2c_target_config *config)
 			break;
 		}
 	}
+
+	/* After stop, a new register must be selected */
+	b->reg_addr = MCTP_I2C_GPIO_INVALID_ADDR;
+	b->rxtx = false;
 
 	return 0;
 }

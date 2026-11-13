@@ -20,7 +20,7 @@
 #include <soc.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/timer/system_timer.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/irq.h>
 #include <zephyr/spinlock.h>
 #include <zephyr/logging/log.h>
@@ -109,7 +109,7 @@ static void burtc_isr(const void *arg)
 	sys_clock_announce(unannounced);
 }
 
-void sys_clock_set_timeout(int32_t ticks, bool idle)
+void sys_clock_set_timeout(uint32_t ticks, bool idle)
 {
 	ARG_UNUSED(idle);
 
@@ -123,8 +123,7 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 	 * 0 - announce upcoming tick itself
 	 * 1 - skip upcoming one, but announce the one after it, etc.
 	 */
-	ticks = (ticks == K_TICKS_FOREVER) ? g_max_timeout_ticks : ticks;
-	ticks = CLAMP(ticks - 1, 0, g_max_timeout_ticks);
+	ticks = CLAMP(ticks, 1, g_max_timeout_ticks) - 1;
 
 	k_spinlock_key_t key = k_spin_lock(&g_lock);
 
@@ -213,7 +212,7 @@ static int burtc_init(void)
 	/* Enable compare match interrupt */
 	BURTC_IntClear(BURTC_IF_COMP);
 	BURTC_IntEnable(BURTC_IF_COMP);
-	NVIC_ClearPendingIRQ(TIMER_IRQ);
+	k_irq_clear_pending(TIMER_IRQ);
 	IRQ_CONNECT(TIMER_IRQ, DT_INST_IRQ(0, priority), burtc_isr, 0, 0);
 	irq_enable(TIMER_IRQ);
 

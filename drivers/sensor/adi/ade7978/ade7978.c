@@ -167,7 +167,7 @@ static int ade7978_init(const struct device *dev)
 	int ret;
 
 	if (!spi_is_ready_dt(&cfg->spi)) {
-		LOG_ERR("SPI bus not ready!");
+		LOG_ERR_DEVICE_NOT_READY(cfg->spi.bus);
 		return -ENODEV;
 	}
 
@@ -257,7 +257,7 @@ static DEVICE_API(sensor, ade7978_api) = {
 	static struct ade7978_data ade7978_data_##inst;                                            \
                                                                                                    \
 	static const struct ade7978_config ade7978_config_##inst = {                               \
-		.spi = SPI_DT_SPEC_INST_GET(inst, SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB |          \
+		.spi = SPI_DT_SPEC_INST_GET(inst, SPI_OP_MODE_CONTROLLER | SPI_TRANSFER_MSB |      \
 							  SPI_WORD_SET(8))};                       \
                                                                                                    \
 	SENSOR_DEVICE_DT_INST_DEFINE(inst, ade7978_init, NULL, &ade7978_data_##inst,               \

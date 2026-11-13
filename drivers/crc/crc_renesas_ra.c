@@ -57,13 +57,14 @@ static int crc_set_config(const struct device *dev, struct crc_ctx *ctx)
 
 	switch (ctx->type) {
 	case CRC8: {
-		if ((ctx->polynomial != CRC8_POLY) && (ctx->polynomial != CRC8_REFLECT_POLY)) {
+		if (ctx->polynomial != CRC8_POLY) {
 			return -EINVAL;
 		}
 
 		data->crc_config.polynomial = CRC_POLYNOMIAL_CRC_8;
 		break;
 	}
+	case CRC16_ANSI:
 	case CRC16: {
 		if (ctx->polynomial != CRC16_POLY) {
 			return -EINVAL;
@@ -72,6 +73,10 @@ static int crc_set_config(const struct device *dev, struct crc_ctx *ctx)
 		data->crc_config.polynomial = CRC_POLYNOMIAL_CRC_16;
 		break;
 	}
+	/*
+	 * CRC16_ITU_T and CRC16_CCITT use the same poly
+	 */
+	case CRC16_ITU_T:
 	case CRC16_CCITT: {
 		if (ctx->polynomial != CRC16_CCITT_POLY) {
 			return -EINVAL;

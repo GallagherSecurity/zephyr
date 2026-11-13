@@ -56,8 +56,8 @@ MODEM_CHAT_MATCHES_DEFINE(
 	MODEM_CHAT_MATCH("ERROR", "", at_shell_print_match),
 );
 
-static void at_shell_script_callback(struct modem_chat *chat,
-				     enum modem_chat_script_result result,
+static void at_shell_script_callback(struct modem_chat *chat, enum modem_chat_script_result result,
+				     const struct modem_chat_script_completion_info *info,
 				     void *user_data)
 {
 	modem_at_user_pipe_release();
@@ -117,7 +117,6 @@ static int at_shell_init(void)
 {
 	at_shell_init_chat();
 	at_shell_init_script_chat();
-	modem_at_user_pipe_init(&at_shell_chat);
 	return 0;
 }
 
@@ -131,7 +130,7 @@ static int at_shell_cmd_handler(const struct shell *sh, size_t argc, char **argv
 		return -EINVAL;
 	}
 
-	ret = modem_at_user_pipe_claim();
+	ret = modem_at_user_pipe_claim(&at_shell_chat, K_NO_WAIT);
 	if (ret < 0) {
 		switch (ret) {
 		case -EPERM:

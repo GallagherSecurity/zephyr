@@ -114,7 +114,7 @@ int adxl345_reg_write_mask(const struct device *dev,
 	}
 
 	tmp &= ~mask;
-	tmp |= data;
+	tmp |= (data & mask);
 
 	return adxl345_reg_write_byte(dev, reg_addr, tmp);
 }
@@ -370,6 +370,9 @@ int adxl345_read_sample(const struct device *dev,
 
 	sample->selected_range = data->selected_range;
 	sample->is_full_res = data->is_full_res;
+#ifdef CONFIG_ADXL345_STREAM
+	sample->is_fifo = 0;
+#endif /* CONFIG_ADXL345_STREAM */
 
 	return 0;
 }
@@ -468,7 +471,7 @@ static int adxl345_init(const struct device *dev)
 	uint8_t dev_id, full_res;
 
 	if (!adxl345_bus_is_ready(dev)) {
-		LOG_ERR("bus not ready");
+		LOG_ERR_DEVICE_NOT_READY(dev);
 		return -ENODEV;
 	}
 
@@ -526,6 +529,8 @@ static int adxl345_init(const struct device *dev)
 	if (rc) {
 		return rc;
 	}
+
+	data->odr = cfg->odr;
 #endif
 
 	rc = adxl345_reg_read_byte(dev, ADXL345_DATA_FORMAT_REG, &full_res);
@@ -652,12 +657,6 @@ static int adxl345_pm_action(const struct device *dev,
 		     DT_INST_NODE_HAS_PROP(inst, fifo_watermark),				   \
 		     "Streaming requires fifo-watermark property. Please set it in the"		   \
 		     "device-tree node properties");						   \
-	BUILD_ASSERT(COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, fifo_watermark),			   \
-				 ((DT_INST_PROP(inst, fifo_watermark) > 0) &&			   \
-				  (DT_INST_PROP(inst, fifo_watermark) < 32)),			   \
-				 (true)),							   \
-		     "fifo-watermark must be between 1 and 32. Please set it in "		   \
-		     "the device-tree node properties");					   \
 												   \
 	IF_ENABLED(CONFIG_ADXL345_STREAM, (ADXL345_RTIO_DEFINE(inst)));				   \
 	static struct adxl345_dev_data adxl345_data_##inst = {					   \

@@ -5,7 +5,7 @@
 #
 
 identifier: frdm_imxrt1186/mimxrt1186/cm33
-name: FRDM-iMXRT1186 CM33
+name: NXP FRDM-iMXRT1186 (CM33)
 type: mcu
 arch: arm
 toolchain:
@@ -15,13 +15,21 @@ toolchain:
 ram: 8192
 flash: 16384
 supported:
+  - ptp_clock
   - spi
   - adc
+  - dma
   - flash
   - gpio
   - can
+  - counter
   - uart
+  - hwinfo
   - mbox
   - netif:eth
   - i2c
+  - i3c
+  - dac
+  - watchdog
+  - pwm
 vendor: nxp

@@ -263,13 +263,13 @@ static int aw88298_get_i2sctrl_cfg(const struct audio_codec_cfg *cfg, uint16_t *
 		return -ENOTSUP;
 	}
 
-	if ((options & I2S_OPT_BIT_CLK_SLAVE) == 0U) {
-		LOG_INF("AW88298 requires external LRCLK/BCLK (slave mode)");
+	if ((options & I2S_OPT_BIT_CLK_TARGET) == 0U) {
+		LOG_INF("AW88298 requires external LRCLK/BCLK (clock target mode)");
 		return -ENOTSUP;
 	}
 
-	if (!!((options & I2S_OPT_BIT_CLK_SLAVE)) != !!((options & I2S_OPT_FRAME_CLK_SLAVE))) {
-		LOG_INF("Inconsistent clock master/slave options 0x%x", options);
+	if (!!((options & I2S_OPT_BIT_CLK_TARGET)) != !!((options & I2S_OPT_FRAME_CLK_TARGET))) {
+		LOG_INF("Inconsistent clock controller/target options 0x%x", options);
 		return -ENOTSUP;
 	}
 
@@ -426,7 +426,7 @@ static int aw88298_apply_properties(const struct device *dev)
 	return 0;
 }
 
-static const struct audio_codec_api aw88298_api = {
+static DEVICE_API(audio_codec, aw88298_api) = {
 	.configure = aw88298_configure,
 	.start_output = aw88298_start_output,
 	.stop_output = aw88298_stop_output,

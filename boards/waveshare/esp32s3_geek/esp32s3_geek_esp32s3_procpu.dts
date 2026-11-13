@@ -5,10 +5,11 @@
  */
 
 /dts-v1/;
-#include <espressif/esp32s3/esp32s3_r2.dtsi>
+#include <espressif/esp32s3/esp32s3.dtsi>
 #include <espressif/partitions_0x0_amp_16M.dtsi>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include "esp32s3_geek-pinctrl.dtsi"
+#include <zephyr/dt-bindings/display/panel.h>
 
 / {
 	model = "ESP32-S3-GEEK PROCPU";
@@ -64,7 +65,7 @@
 			vdvs = <0x20>;
 			mdac = <0x70>;
 			lcm = <0x2c>;
-			colmod = <0x05>;
+			pixel-format = <PANEL_PIXEL_FORMAT_RGB_565>;
 			gamma = <0x01>;
 			porch-param = [0c 0c 00 33 33];
 			cmd2en-param = [5a 69 02 01];
@@ -79,6 +80,11 @@
 
 &flash0 {
 	reg = <0x0 DT_SIZE_M(16)>;
+	ranges = <0x0 0x0 DT_SIZE_M(16)>;
+};
+
+&psram0 {
+	size = <DT_SIZE_M(2)>;
 };
 
 &gpio0 {

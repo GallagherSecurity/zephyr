@@ -6,10 +6,11 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/portability/cmsis_types.h>
+#include <zephyr/sys/check.h>
 #include <string.h>
 
-K_MEM_SLAB_DEFINE(cmsis_rtos_event_cb_slab, sizeof(struct cmsis_rtos_event_cb),
-		  CONFIG_CMSIS_V2_EVT_FLAGS_MAX_COUNT, 4);
+K_MEM_SLAB_DEFINE_TYPE(cmsis_rtos_event_cb_slab, struct cmsis_rtos_event_cb,
+		       CONFIG_CMSIS_V2_EVT_FLAGS_MAX_COUNT);
 
 static const osEventFlagsAttr_t init_event_flags_attrs = {
 	.name = "ZephyrEvent",
@@ -36,7 +37,9 @@ osEventFlagsId_t osEventFlagsNew(const osEventFlagsAttr_t *attr)
 	}
 
 	if (attr->cb_mem != NULL) {
-		__ASSERT(attr->cb_size == sizeof(struct cmsis_rtos_event_cb), "Invalid cb_size\n");
+		CHECKIF(attr->cb_size < sizeof(struct cmsis_rtos_event_cb)) {
+			return NULL;
+		}
 		events = (struct cmsis_rtos_event_cb *)attr->cb_mem;
 	} else if (k_mem_slab_alloc(&cmsis_rtos_event_cb_slab, (void **)&events, K_MSEC(100)) !=
 		   0) {
@@ -95,7 +98,7 @@ uint32_t osEventFlagsWait(osEventFlagsId_t ef_id, uint32_t flags, uint32_t optio
 {
 	struct cmsis_rtos_event_cb *events = (struct cmsis_rtos_event_cb *)ef_id;
 	uint32_t sub_opt = options & (osFlagsWaitAll | osFlagsNoClear);
-	uint32_t rv;
+	uint32_t rv = 0;
 	k_timeout_t event_timeout;
 
 	/*

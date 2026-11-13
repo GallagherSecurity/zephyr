@@ -10,7 +10,7 @@
 #include <errno.h>
 #include <zephyr/kernel.h>
 #include <zephyr/toolchain.h>
-#include <zephyr/arch/common/ffs.h>
+#include <zephyr/arch/cpu.h>
 #include <zephyr/sys/util.h>
 #include <soc.h>
 #include <stm32_bitops.h>
@@ -67,52 +67,16 @@ LOG_MODULE_REGISTER(flash_stm32_ospi, CONFIG_FLASH_LOG_LEVEL);
 #define STM32_OSPI_SUBSECTOR_4K_ERASE_MAX_TIME  400U
 #define STM32_OSPI_WRITE_REG_MAX_TIME           40U
 
+/*
+ * Flash active hold timeout. Required when using the Octal SPI interface in
+ * pin multiplexing mode on STM32U5xx devices.
+ */
+#define STM32_OCTOSPIM_TIMEOUT 0x34
+
 /* used as default value for DTS writeoc */
 #define SPI_NOR_WRITEOC_NONE 0xFF
 
 #if STM32_OSPI_USE_DMA
-#if CONFIG_DMA_STM32U5
-static const uint32_t table_src_size[] = {
-	LL_DMA_SRC_DATAWIDTH_BYTE,
-	LL_DMA_SRC_DATAWIDTH_HALFWORD,
-	LL_DMA_SRC_DATAWIDTH_WORD,
-};
-
-static const uint32_t table_dest_size[] = {
-	LL_DMA_DEST_DATAWIDTH_BYTE,
-	LL_DMA_DEST_DATAWIDTH_HALFWORD,
-	LL_DMA_DEST_DATAWIDTH_WORD,
-};
-
-/* Lookup table to set dma priority from the DTS */
-static const uint32_t table_priority[] = {
-	LL_DMA_LOW_PRIORITY_LOW_WEIGHT,
-	LL_DMA_LOW_PRIORITY_MID_WEIGHT,
-	LL_DMA_LOW_PRIORITY_HIGH_WEIGHT,
-	LL_DMA_HIGH_PRIORITY,
-};
-#else
-static const uint32_t table_m_size[] = {
-	LL_DMA_MDATAALIGN_BYTE,
-	LL_DMA_MDATAALIGN_HALFWORD,
-	LL_DMA_MDATAALIGN_WORD,
-};
-
-static const uint32_t table_p_size[] = {
-	LL_DMA_PDATAALIGN_BYTE,
-	LL_DMA_PDATAALIGN_HALFWORD,
-	LL_DMA_PDATAALIGN_WORD,
-};
-
-/* Lookup table to set dma priority from the DTS */
-static const uint32_t table_priority[] = {
-	DMA_PRIORITY_LOW,
-	DMA_PRIORITY_MEDIUM,
-	DMA_PRIORITY_HIGH,
-	DMA_PRIORITY_VERY_HIGH,
-};
-#endif /* CONFIG_DMA_STM32U5 */
-
 struct stream {
 	DMA_TypeDef *reg;
 	const struct device *dev;
@@ -991,7 +955,7 @@ static int stm32_ospi_mem_reset(const struct device *dev)
 	return 0;
 }
 
-#ifdef CONFIG_STM32_MEMMAP
+#ifdef CONFIG_FLASH_STM32_NOR_MEMMAP
 /* Function to configure the octoflash in MemoryMapped mode */
 static int stm32_ospi_set_memorymap(const struct device *dev)
 {
@@ -1112,7 +1076,12 @@ static int stm32_ospi_set_memorymap(const struct device *dev)
 	}
 
 	/* Enable the memory-mapping */
+#if defined(CONFIG_SOC_SERIES_STM32U5X) && defined(OCTOSPIM)
+	s_MemMappedCfg.TimeOutActivation = HAL_OSPI_TIMEOUT_COUNTER_ENABLE;
+	s_MemMappedCfg.TimeOutPeriod = STM32_OCTOSPIM_TIMEOUT;
+#else
 	s_MemMappedCfg.TimeOutActivation = HAL_OSPI_TIMEOUT_COUNTER_DISABLE;
+#endif /* CONFIG_SOC_SERIES_STM32U5X && OCTOSPIM*/
 
 	ret = HAL_OSPI_MemoryMapped(&dev_data->hospi, &s_MemMappedCfg);
 	if (ret != HAL_OK) {
@@ -1146,7 +1115,7 @@ static int stm32_ospi_abort(const struct device *dev)
 
 	return 0;
 }
-#endif /* CONFIG_STM32_MEMMAP */
+#endif /* CONFIG_FLASH_STM32_NOR_MEMMAP */
 
 /*
  * Function to erase the flash : chip or sector with possible OSPI/SPI and STR/DTR
@@ -1185,7 +1154,7 @@ static int flash_stm32_ospi_erase(const struct device *dev, off_t addr,
 
 	ospi_lock_thread(dev);
 
-#ifdef CONFIG_STM32_MEMMAP
+#ifdef CONFIG_FLASH_STM32_NOR_MEMMAP
 	if (stm32_ospi_is_memorymap(dev)) {
 		/* Abort ongoing transfer to force CS high/BUSY deasserted */
 		ret = stm32_ospi_abort(dev);
@@ -1195,7 +1164,7 @@ static int flash_stm32_ospi_erase(const struct device *dev, off_t addr,
 		}
 	}
 	/* Continue with Indirect Mode */
-#endif /* CONFIG_STM32_MEMMAP */
+#endif /* CONFIG_FLASH_STM32_NOR_MEMMAP */
 
 	OSPI_RegularCmdTypeDef cmd_erase = {
 		.OperationType = HAL_OSPI_OPTYPE_COMMON_CFG,
@@ -1347,7 +1316,7 @@ static int flash_stm32_ospi_read(const struct device *dev, off_t addr,
 		return 0;
 	}
 
-#ifdef CONFIG_STM32_MEMMAP
+#ifdef CONFIG_FLASH_STM32_NOR_MEMMAP
 	/* If not MemMapped then configure it */
 	if (!stm32_ospi_is_memorymap(dev)) {
 		if (stm32_ospi_set_memorymap(dev) != 0) {
@@ -1361,7 +1330,7 @@ static int flash_stm32_ospi_read(const struct device *dev, off_t addr,
 		size);
 	memcpy(data, (uint8_t *)STM32_OSPI_BASE_ADDRESS + addr, size);
 
-#else /* CONFIG_STM32_MEMMAP */
+#else /* CONFIG_FLASH_STM32_NOR_MEMMAP */
 	const struct flash_stm32_ospi_config *dev_cfg = dev->config;
 	struct flash_stm32_ospi_data *dev_data = dev->data;
 
@@ -1431,7 +1400,7 @@ static int flash_stm32_ospi_read(const struct device *dev, off_t addr,
 
 	ospi_unlock_thread(dev);
 
-#endif /* CONFIG_STM32_MEMMAP */
+#endif /* CONFIG_FLASH_STM32_NOR_MEMMAP */
 	return ret;
 }
 
@@ -1460,7 +1429,7 @@ static int flash_stm32_ospi_write(const struct device *dev, off_t addr,
 
 	ospi_lock_thread(dev);
 
-#ifdef CONFIG_STM32_MEMMAP
+#ifdef CONFIG_FLASH_STM32_NOR_MEMMAP
 	if (stm32_ospi_is_memorymap(dev)) {
 		/* Abort ongoing transfer to force CS high/BUSY deasserted */
 		ret = stm32_ospi_abort(dev);
@@ -1470,7 +1439,7 @@ static int flash_stm32_ospi_write(const struct device *dev, off_t addr,
 		}
 	}
 	/* Continue with Indirect Mode */
-#endif /* CONFIG_STM32_MEMMAP */
+#endif /* CONFIG_FLASH_STM32_NOR_MEMMAP */
 	/* page program for STR or DTR mode */
 	OSPI_RegularCmdTypeDef cmd_pp = ospi_prepare_cmd(dev_cfg->data_mode, dev_cfg->data_rate);
 
@@ -1698,6 +1667,15 @@ void HAL_OSPI_StatusMatchCallback(OSPI_HandleTypeDef *hospi)
  */
 void HAL_OSPI_TimeOutCallback(OSPI_HandleTypeDef *hospi)
 {
+#ifdef CONFIG_FLASH_STM32_NOR_MEMMAP
+	/*
+	 * When TO occurs, it only comes from MemoryMapped mode read operation
+	 * if the TimeOutActivation was enabled.
+	 * Then no sync semaphore was set when reading with memcpy().
+	 * If TimeOutActivation is not enabled, then no TO callback happens.
+	 * No need to k_sem_give(&dev_data->sync); nothing to do.
+	 */
+#else /* CONFIG_FLASH_STM32_NOR_MEMMAP*/
 	struct flash_stm32_ospi_data *dev_data =
 		CONTAINER_OF(hospi, struct flash_stm32_ospi_data, hospi);
 
@@ -1706,6 +1684,7 @@ void HAL_OSPI_TimeOutCallback(OSPI_HandleTypeDef *hospi)
 	dev_data->cmd_status = -EIO;
 
 	k_sem_give(&dev_data->sync);
+#endif /* CONFIG_FLASH_STM32_NOR_MEMMAP */
 }
 
 #if defined(CONFIG_FLASH_PAGE_LAYOUT)
@@ -2196,7 +2175,7 @@ static int flash_stm32_ospi_init(const struct device *dev)
 	uint32_t prescaler = STM32_OSPI_CLOCK_PRESCALER_MIN;
 	int ret;
 
-#ifdef CONFIG_STM32_MEMMAP
+#ifdef CONFIG_FLASH_STM32_NOR_MEMMAP
 	/* If MemoryMapped then configure skip init */
 	if (stm32_ospi_is_memorymap(dev)) {
 		LOG_DBG("NOR init'd in MemMapped mode");
@@ -2204,7 +2183,7 @@ static int flash_stm32_ospi_init(const struct device *dev)
 		dev_data->hospi.State = HAL_OSPI_STATE_BUSY_MEM_MAPPED;
 		return 0;
 	}
-#endif /* CONFIG_STM32_MEMMAP */
+#endif /* CONFIG_FLASH_STM32_NOR_MEMMAP */
 
 	/* The SPI/DTR is not a valid config of data_mode/data_rate according to the DTS */
 	if ((dev_cfg->data_mode != OSPI_OPI_MODE)
@@ -2240,49 +2219,29 @@ static int flash_stm32_ospi_init(const struct device *dev)
 
 	/* Proceed to the minimum Zephyr DMA driver init */
 	dma_cfg->user_data = &hdma;
+	dma_cfg->channel_direction = PERIPHERAL_TO_MEMORY;
 	/* HACK: This field is used to inform driver that it is overridden */
 	dma_cfg->linked_channel = STM32_DMA_HAL_OVERRIDE;
+	dma_cfg->source_burst_length = 4;
+	dma_cfg->dest_burst_length = 4;
 	ret = dma_config(dev_data->dma.dev, dev_data->dma.channel, dma_cfg);
 	if (ret != 0) {
 		LOG_ERR("Failed to configure DMA channel %d", dev_data->dma.channel);
 		return ret;
 	}
 
-	/* Proceed to the HAL DMA driver init */
-	if (dma_cfg->source_data_size != dma_cfg->dest_data_size) {
-		LOG_ERR("Source and destination data sizes not aligned");
-		return -EINVAL;
+	ret = dma_stm32_zcfg_to_halcfg(dev_data->dma.dev, dma_cfg, &hdma.Init,
+				       DMA_ADDR_ADJ_NO_CHANGE, DMA_ADDR_ADJ_INCREMENT);
+	if (ret < 0) {
+		return ret;
 	}
 
-	int index = find_lsb_set(dma_cfg->source_data_size) - 1;
-
 #if CONFIG_DMA_STM32U5
-	/* Fill the structure for dma init */
-	hdma.Init.BlkHWRequest = DMA_BREQ_SINGLE_BURST;
-	hdma.Init.SrcInc = DMA_SINC_FIXED;
 	hdma.Init.DestInc = DMA_DINC_INCREMENTED;
-	hdma.Init.SrcDataWidth = table_src_size[index];
-	hdma.Init.DestDataWidth = table_dest_size[index];
-	hdma.Init.SrcBurstLength = 4;
-	hdma.Init.DestBurstLength = 4;
 	hdma.Init.TransferAllocatedPort = DMA_SRC_ALLOCATED_PORT0 | DMA_DEST_ALLOCATED_PORT1;
-	hdma.Init.TransferEventMode = DMA_TCEM_BLOCK_TRANSFER;
-#else
-	hdma.Init.PeriphDataAlignment = table_p_size[index];
-	hdma.Init.MemDataAlignment = table_m_size[index];
-	hdma.Init.PeriphInc = DMA_PINC_DISABLE;
-	hdma.Init.MemInc = DMA_MINC_ENABLE;
 #endif /* CONFIG_DMA_STM32U5 */
-	hdma.Init.Mode = DMA_NORMAL;
-	hdma.Init.Priority = table_priority[dma_cfg->channel_priority];
-	hdma.Init.Direction = DMA_PERIPH_TO_MEMORY;
+
 	hdma.Instance = STM32_DMA_GET_INSTANCE(dev_data->dma.reg, dev_data->dma.channel);
-#ifdef CONFIG_DMA_STM32_V1
-	/* TODO: Not tested in this configuration */
-	hdma.Init.Channel = dma_cfg->dma_slot;
-#else
-	hdma.Init.Request = dma_cfg->dma_slot;
-#endif /* CONFIG_DMA_STM32_V1 */
 
 	/* Initialize DMA HAL */
 	__HAL_LINKDMA(&dev_data->hospi, hdma, hdma);
@@ -2569,7 +2528,7 @@ static int flash_stm32_ospi_init(const struct device *dev)
 		LOG_DBG("Write Un-protected");
 	}
 
-#ifdef CONFIG_STM32_MEMMAP
+#ifdef CONFIG_FLASH_STM32_NOR_MEMMAP
 	/* Now configure the octo Flash in MemoryMapped (access by address) */
 	ret = stm32_ospi_set_memorymap(dev);
 	if (ret != 0) {
@@ -2580,10 +2539,8 @@ static int flash_stm32_ospi_init(const struct device *dev)
 		(long)(STM32_OSPI_BASE_ADDRESS),
 		dev_cfg->flash_size);
 #else
-	LOG_DBG("NOR octo-flash at 0x%lx (0x%x bytes)",
-		(long)(STM32_OSPI_BASE_ADDRESS),
-		dev_cfg->flash_size);
-#endif /* CONFIG_STM32_MEMMAP */
+	LOG_DBG("Serial flash is in direct mode, not memory-mapped mode");
+#endif /* CONFIG_FLASH_STM32_NOR_MEMMAP */
 
 	return 0;
 }
@@ -2635,12 +2592,12 @@ static void flash_stm32_ospi_irq_config_func(const struct device *dev);
 PINCTRL_DT_DEFINE(STM32_OSPI_NODE);
 
 static const struct flash_stm32_ospi_config flash_stm32_ospi_cfg = {
-	.pclken = STM32_CLOCK_INFO_BY_NAME(STM32_OSPI_NODE, ospix),
+	.pclken = STM32_DT_CLOCK_INFO_BY_NAME(STM32_OSPI_NODE, ospix),
 #if DT_CLOCKS_HAS_NAME(STM32_OSPI_NODE, ospi_ker)
-	.pclken_ker = STM32_CLOCK_INFO_BY_NAME(STM32_OSPI_NODE, ospi_ker),
+	.pclken_ker = STM32_DT_CLOCK_INFO_BY_NAME(STM32_OSPI_NODE, ospi_ker),
 #endif
 #if DT_CLOCKS_HAS_NAME(STM32_OSPI_NODE, ospi_mgr)
-	.pclken_mgr = STM32_CLOCK_INFO_BY_NAME(STM32_OSPI_NODE, ospi_mgr),
+	.pclken_mgr = STM32_DT_CLOCK_INFO_BY_NAME(STM32_OSPI_NODE, ospi_mgr),
 #endif
 	.irq_config = flash_stm32_ospi_irq_config_func,
 	.flash_size = DT_INST_PROP(0, size) / 8, /* In Bytes */

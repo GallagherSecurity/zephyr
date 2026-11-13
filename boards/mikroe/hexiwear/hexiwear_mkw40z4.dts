@@ -6,7 +6,7 @@
 
 /dts-v1/;
 
-#include <nxp/kinetis/nxp_kw40z.dtsi>
+#include <nxp/kinetis/kwx/nxp_kw40z.dtsi>
 #include "hexiwear_mkw40z4-pinctrl.dtsi"
 
 / {
@@ -17,6 +17,10 @@
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 	};
+};
+
+&{/cpus} {
+	timebase-frequency = <DT_FREQ_M(40)>;
 };
 
 &sim {

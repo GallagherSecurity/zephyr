@@ -23,10 +23,8 @@ LOG_MODULE_REGISTER(mock_serial, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define DT_DRV_COMPAT vnd_serial
 struct serial_vnd_data {
-#ifdef CONFIG_RING_BUFFER
 	struct ring_buf *written;
 	struct ring_buf *read_queue;
-#endif
 	serial_vnd_write_cb_t callback;
 	void *callback_data;
 #ifdef CONFIG_UART_INTERRUPT_DRIVEN
@@ -163,11 +161,6 @@ static void irq_callback_set(const struct device *dev, uart_irq_callback_user_da
 	LOG_DBG("callback set");
 }
 
-static int irq_update(const struct device *dev)
-{
-	return 1;
-}
-
 static int fifo_fill(const struct device *dev, const uint8_t *tx_data, int size)
 {
 	struct serial_vnd_data *data = dev->data;
@@ -191,7 +184,6 @@ static int fifo_read(const struct device *dev, uint8_t *rx_data, const int size)
 
 static int serial_vnd_poll_in(const struct device *dev, unsigned char *c)
 {
-#ifdef CONFIG_RING_BUFFER
 	struct serial_vnd_data *data = dev->data;
 	uint32_t bytes_read;
 
@@ -203,21 +195,18 @@ static int serial_vnd_poll_in(const struct device *dev, unsigned char *c)
 		return 0;
 	}
 	return -1;
-#else
-	return -ENOTSUP;
-#endif
 }
 
 static void serial_vnd_poll_out(const struct device *dev, unsigned char c)
 {
 	struct serial_vnd_data *data = dev->data;
 
-#ifdef CONFIG_RING_BUFFER
+
 	if (data == NULL || data->written == NULL) {
 		return;
 	}
 	ring_buf_put(data->written, &c, 1);
-#endif
+
 	if (data->callback) {
 		data->callback(dev, data->callback_data);
 	}
@@ -227,7 +216,6 @@ static void serial_vnd_poll_out(const struct device *dev, unsigned char c)
 static void async_rx_run(const struct device *dev);
 #endif
 
-#ifdef CONFIG_RING_BUFFER
 int serial_vnd_queue_in_data(const struct device *dev, const unsigned char *c, uint32_t size)
 {
 	struct serial_vnd_data *data = dev->data;
@@ -283,7 +271,6 @@ uint32_t serial_vnd_peek_out_data(const struct device *dev, unsigned char *out_d
 	}
 	return ring_buf_peek(data->written, out_data, size);
 }
-#endif
 
 void serial_vnd_set_callback(const struct device *dev, serial_vnd_write_cb_t callback,
 			     void *user_data)
@@ -424,7 +411,7 @@ static int serial_vnd_rx_enable(const struct device *dev, uint8_t *read_buf, siz
 		return -EINVAL;
 	}
 
-	__ASSERT(timeout == SYS_FOREVER_MS, "Async timeout not implemented.");
+	__ASSERT(timeout == SYS_FOREVER_US, "Async timeout not implemented.");
 
 	data->read_buf = read_buf;
 	data->read_size = read_size;
@@ -446,7 +433,6 @@ static DEVICE_API(uart, serial_vnd_api) = {
 #endif /* CONFIG_UART_USE_RUNTIME_CONFIGURE */
 #ifdef CONFIG_UART_INTERRUPT_DRIVEN
 	.irq_callback_set = irq_callback_set,
-	.irq_update = irq_update,
 	.irq_rx_enable = irq_rx_enable,
 	.irq_rx_disable = irq_rx_disable,
 	.irq_rx_ready = irq_rx_ready,

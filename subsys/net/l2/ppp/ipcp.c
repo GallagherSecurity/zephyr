@@ -34,7 +34,13 @@ static enum net_verdict ipcp_handle(struct ppp_context *ctx,
 static int ipcp_add_address(struct ppp_context *ctx, struct net_pkt *pkt,
 			    struct net_in_addr *addr)
 {
-	net_pkt_write_u8(pkt, 1 + 1 + sizeof(addr->s_addr));
+	int ret;
+
+	ret = net_pkt_write_u8(pkt, 1 + 1 + sizeof(addr->s_addr));
+	if (ret < 0) {
+		return ret;
+	}
+
 	return net_pkt_write(pkt, &addr->s_addr, sizeof(addr->s_addr));
 }
 
@@ -433,6 +439,8 @@ static void ipcp_up(struct ppp_fsm *fsm)
 {
 	struct ppp_context *ctx = CONTAINER_OF(fsm, struct ppp_context,
 					       ipcp.fsm);
+	/* Point-to-point link: the address has no subnet and no broadcast address */
+	const struct net_in_addr netmask = { { { 255, 255, 255, 255 } } };
 	struct net_if_addr *addr;
 	char dst[NET_INET_ADDRSTRLEN];
 	char *addr_str;
@@ -451,6 +459,12 @@ static void ipcp_up(struct ppp_fsm *fsm)
 	if (addr == NULL) {
 		NET_ERR("Could not set IP address %s", addr_str);
 		return;
+	}
+
+	if (!net_if_ipv4_set_netmask_by_addr(ctx->iface,
+					     &ctx->ipcp.my_options.address,
+					     &netmask)) {
+		NET_WARN("Could not set netmask for %s", addr_str);
 	}
 
 	NET_DBG("PPP up with address %s", addr_str);

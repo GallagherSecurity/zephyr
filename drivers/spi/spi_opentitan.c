@@ -11,7 +11,7 @@ LOG_MODULE_REGISTER(spi_opentitan);
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/spi.h>
-#include <zephyr/drivers/spi/rtio.h>
+#include "spi_rtio.h"
 #include <soc.h>
 #include <stdbool.h>
 
@@ -83,7 +83,7 @@ static int spi_config(const struct device *dev, uint32_t frequency,
 		return -ENOTSUP;
 	}
 
-	if (SPI_OP_MODE_GET(operation) != SPI_OP_MODE_MASTER) {
+	if (SPI_OP_MODE_GET(operation) != SPI_OP_MODE_CONTROLLER) {
 		return -ENOTSUP;
 	}
 

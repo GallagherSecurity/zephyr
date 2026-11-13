@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <zephyr/irq.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/usb/usb_dc.h>
 #include <zephyr/init.h>
@@ -505,7 +506,7 @@ static void start_tx_packet(struct smartbond_ep_state *ep_state)
 
 	if (ep_state->ep_addr != EP0_IN &&
 	    remaining > DMA_MIN_TRANSFER_SIZE &&
-	    (uint32_t)(ep_state->buffer) >= CONFIG_SRAM_BASE_ADDRESS &&
+	    (uint32_t)(ep_state->buffer) >= DT_CHOSEN_SRAM_ADDR &&
 	    try_allocate_dma(ep_state, USB_EP_DIR_IN)) {
 		/*
 		 * Whole packet will be put in FIFO by DMA.
@@ -1152,7 +1153,7 @@ static int usb_init(void)
 
 	IRQ_CONNECT(VBUS_IRQ, VBUS_IRQ_PRI, usb_dc_smartbond_vbus_isr, 0, 0);
 	CRG_TOP->VBUS_IRQ_CLEAR_REG = 1;
-	NVIC_ClearPendingIRQ(VBUS_IRQ);
+	k_irq_clear_pending(VBUS_IRQ);
 	/* Both connect and disconnect needs to be handled */
 	CRG_TOP->VBUS_IRQ_MASK_REG = CRG_TOP_VBUS_IRQ_MASK_REG_VBUS_IRQ_EN_FALL_Msk |
 				     CRG_TOP_VBUS_IRQ_MASK_REG_VBUS_IRQ_EN_RISE_Msk;

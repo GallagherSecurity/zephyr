@@ -8,7 +8,7 @@
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/drivers/stepper/stepper.h>
 
 #include <gpio_stepper_common.h>
@@ -154,7 +154,7 @@ static int h_bridge_stepper_ctrl_move_by(const struct device *dev, int32_t micro
 		}
 	}
 
-	return 0;
+	return ret;
 }
 
 static int h_bridge_stepper_ctrl_set_microstep_interval(const struct device *dev,
@@ -204,7 +204,7 @@ static int h_bridge_stepper_ctrl_run(const struct device *dev,
 		}
 	}
 
-	return 0;
+	return ret;
 }
 
 static int h_bridge_stepper_ctrl_stop(const struct device *dev)
@@ -229,7 +229,7 @@ static int h_bridge_stepper_init(const struct device *dev)
 	LOG_DBG("Initializing %s h_bridge_stepper with %d pin", dev->name, NUM_CONTROL_PINS);
 	for (uint8_t n_pin = 0; n_pin < NUM_CONTROL_PINS; n_pin++) {
 		if (!gpio_is_ready_dt(&config->control_pins[n_pin])) {
-			LOG_ERR("Control pin %d is not ready", n_pin);
+			LOG_ERR_DEVICE_NOT_READY(config->control_pins[n_pin].port);
 			return -ENODEV;
 		}
 		err = gpio_pin_configure_dt(&config->control_pins[n_pin], GPIO_OUTPUT_INACTIVE);

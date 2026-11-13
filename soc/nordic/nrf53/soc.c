@@ -334,7 +334,7 @@ void z_arm_on_enter_cpu_idle_prepare(void)
 
 #if defined(CONFIG_SOC_NRF53_ANOMALY_160_WORKAROUND) || \
 	(defined(CONFIG_SOC_NRF53_RTC_PRETICK) && defined(CONFIG_SOC_NRF5340_CPUNET))
-bool z_arm_on_enter_cpu_idle(void)
+bool z_nrf53_on_enter_cpu_idle(void)
 {
 	bool ok_to_sleep = true;
 
@@ -384,6 +384,18 @@ bool z_arm_on_enter_cpu_idle(void)
 #endif /* CONFIG_SOC_NRF53_ANOMALY_160_WORKAROUND ||
 	* (CONFIG_SOC_NRF53_RTC_PRETICK && CONFIG_SOC_NRF5340_CPUNET)
 	*/
+
+#if defined(CONFIG_ARM_ON_ENTER_CPU_IDLE_HOOK) && !defined(CONFIG_NRF_CUSTOM_ON_ENTER_CPU_IDLE_HOOK)
+bool z_arm_on_enter_cpu_idle(void)
+{
+#if defined(CONFIG_SOC_NRF53_ANOMALY_160_WORKAROUND) || \
+	(defined(CONFIG_SOC_NRF53_RTC_PRETICK) && defined(CONFIG_SOC_NRF5340_CPUNET))
+	return z_nrf53_on_enter_cpu_idle();
+#endif /* CONFIG_SOC_NRF53_ANOMALY_160_WORKAROUND ||
+	* (CONFIG_SOC_NRF53_RTC_PRETICK && CONFIG_SOC_NRF5340_CPUNET)
+	*/
+}
+#endif
 
 #if CONFIG_SOC_NRF53_RTC_PRETICK
 #ifdef CONFIG_SOC_NRF5340_CPUAPP
@@ -543,30 +555,32 @@ void soc_early_init_hook(void)
 #endif
 #endif /* CONFIG_SOC_NRF5340_CPUAPP */
 
-#if defined(CONFIG_SOC_DCDC_NRF53X_APP) || \
-	(DT_PROP(DT_NODELABEL(vregmain), regulator_initial_mode) == NRF5X_REG_MODE_DCDC)
+#if (DT_PROP(DT_NODELABEL(vregmain), regulator_initial_mode) == NRF5X_REG_MODE_DCDC)
 	nrf_regulators_vreg_enable_set(NRF_REGULATORS, NRF_REGULATORS_VREG_MAIN, true);
+#elif (DT_PROP(DT_NODELABEL(vregmain), regulator_initial_mode) == NRF5X_REG_MODE_LDO)
+	if (NRF_ERRATA_DYNAMIC_CHECK(53, 166)) {
+		*((volatile uint32_t *)0x50300C00) = 0x00009375ul;
+		*((volatile uint32_t *)0x503000E4) = 0x0ul;
+		*((volatile uint32_t *)0x50300C00) = 0x00009375ul;
+	}
 #endif
-#if defined(CONFIG_SOC_DCDC_NRF53X_NET) || \
-	(DT_PROP(DT_NODELABEL(vregradio), regulator_initial_mode) == NRF5X_REG_MODE_DCDC)
+#if (DT_PROP(DT_NODELABEL(vregradio), regulator_initial_mode) == NRF5X_REG_MODE_DCDC)
 	nrf_regulators_vreg_enable_set(NRF_REGULATORS, NRF_REGULATORS_VREG_RADIO, true);
 #endif
-#if defined(CONFIG_SOC_DCDC_NRF53X_HV) || DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(vregh))
+#if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(vregh))
 	nrf_regulators_vreg_enable_set(NRF_REGULATORS, NRF_REGULATORS_VREG_HIGH, true);
 #endif
 
+	__maybe_unused int err;
 #if defined(CONFIG_SOC_NRF53_CPUNET_MGMT)
-	int err = nrf53_cpunet_mgmt_init();
+	err = nrf53_cpunet_mgmt_init();
 
 	__ASSERT_NO_MSG(err == 0);
 	(void)err;
 #endif
-}
 
-void soc_late_init_hook(void)
-{
 #ifdef CONFIG_SOC_NRF53_RTC_PRETICK
-	int err = rtc_pretick_init();
+	err = rtc_pretick_init();
 
 	__ASSERT_NO_MSG(err == 0);
 	(void)err;

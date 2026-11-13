@@ -106,7 +106,7 @@ static int counter_bee_timer_set_top_value(const struct device *dev,
 	}
 
 	if (top_cfg->flags & COUNTER_TOP_CFG_DONT_RESET) {
-		LOG_ERR("Unsupport setting top value without resetting counter");
+		LOG_ERR("Unsupported setting top value without resetting counter");
 		return -ENOTSUP;
 	}
 
@@ -157,7 +157,7 @@ static int counter_bee_timer_set_alarm(const struct device *dev, uint8_t chan,
 	}
 
 	if (alarm_cfg->flags & COUNTER_ALARM_CFG_ABSOLUTE) {
-		LOG_ERR("Unsupport absolute alarm");
+		LOG_ERR("Unsupported absolute alarm");
 		return -ENOTSUP;
 	}
 
@@ -346,7 +346,7 @@ static DEVICE_API(counter, counter_bee_timer_driver_api) = {
 	TIMER_IRQ_HANDLER(index);                                                                  \
 	static uint32_t get_irq_pending_##index(void)                                              \
 	{                                                                                          \
-		return NVIC_GetPendingIRQ(DT_IRQN(PARENT_NODE(index)));                            \
+		return k_irq_is_pending(DT_IRQN(PARENT_NODE(index)));                            \
 	}
 
 #if defined(CONFIG_SOC_SERIES_RTL87X2G)

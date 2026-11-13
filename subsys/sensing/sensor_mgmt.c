@@ -100,7 +100,7 @@ static int set_arbitrate_interval(struct sensing_sensor *sensor, uint32_t interv
 
 	if (sensor->interval) {
 		if (config->is_streaming) {
-			rtio_sqe_cancel(sensor->stream_sqe);
+			rtio_sqe_cancel(&sensing_rtio_ctx, sensor->stream_sqe);
 		} else {
 			k_timer_stop(&sensor->timer);
 		}
@@ -357,7 +357,7 @@ int open_sensor(struct sensing_sensor *sensor, struct sensing_connection **conn)
 	}
 
 	/* create connection from sensor to application(client = NULL) */
-	tmp_conn = k_malloc(sizeof(*tmp_conn));
+	tmp_conn = k_calloc(1, sizeof(*tmp_conn));
 	if (!tmp_conn) {
 		return -ENOMEM;
 	}

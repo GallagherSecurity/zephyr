@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2025 Embeint Inc
+ * Copyright (c) 2026 Jakub Rzeszutko <jakub.rzeszutko@verkada.com>
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -8,6 +9,7 @@
 #include <zephyr/logging/log.h>
 
 #include "lbm_common.h"
+#include "lbm_gfsk.h"
 
 /* LoRa interrupts from the RAL library */
 #define RAL_IRQ_LORA                                                                               \
@@ -32,7 +34,7 @@ LOG_MODULE_REGISTER(lbm_driver, CONFIG_LORA_LOG_LEVEL);
  * @retval true if modem was acquired
  * @retval false otherwise
  */
-static inline bool modem_acquire(const struct device *dev)
+bool lbm_modem_acquire(const struct device *dev)
 {
 	struct lbm_lora_data_common *data = dev->data;
 
@@ -50,7 +52,7 @@ static inline bool modem_acquire(const struct device *dev)
  * @retval true if modem was released by this function
  * @retval false otherwise
  */
-static bool modem_release(const struct device *dev)
+bool lbm_modem_release(const struct device *dev)
 {
 	const struct lbm_lora_config_common *config = dev->config;
 	struct lbm_lora_data_common *data = dev->data;
@@ -59,6 +61,12 @@ static bool modem_release(const struct device *dev)
 	if (!atomic_cas(&data->modem_state, STATE_BUSY, STATE_CLEANUP)) {
 		return false;
 	}
+
+	/* Disable DIO1 interrupt immediately so no new work items are scheduled
+	 * while the chip is transitioning to sleep. Any work item already queued
+	 * will find MODE_SLEEP and return early without touching the hardware.
+	 */
+	lbm_optional_dio1_irq_configure_dt(&config->dio1, GPIO_INT_DISABLE);
 
 	/* Configure modem for sleep */
 	lbm_driver_antenna_configure(dev, MODE_SLEEP);
@@ -73,7 +81,7 @@ static bool modem_release(const struct device *dev)
 	return true;
 }
 
-int lbm_lora_config(const struct device *dev, struct lora_modem_config *lora_config)
+int lbm_lora_config(const struct device *dev, const struct lora_modem_config *lora_config)
 {
 	const struct lbm_lora_config_common *config = dev->config;
 	struct lbm_lora_data_common *data = dev->data;
@@ -93,8 +101,7 @@ int lbm_lora_config(const struct device *dev, struct lora_modem_config *lora_con
 		},
 		.rf_freq_in_hz = lora_config->frequency,
 		.output_pwr_in_dbm = lora_config->tx_power,
-		.sync_word = lora_config->public_network ? LBM_LORA_SYNC_WORD_PUBLIC
-							 : LBM_LORA_SYNC_WORD_PRIVATE,
+		.sync_word = 0,
 	};
 	ral_status_t status;
 	int ret;
@@ -109,8 +116,15 @@ int lbm_lora_config(const struct device *dev, struct lora_modem_config *lora_con
 	}
 
 	/* Ensure available, decremented after configuration */
-	if (!modem_acquire(dev)) {
+	if (!lbm_modem_acquire(dev)) {
 		return -EBUSY;
+	}
+
+	if (lora_config->sync_word) {
+		params.sync_word = lora_config->sync_word;
+	} else {
+		params.sync_word = lora_config->public_network ? LBM_LORA_SYNC_WORD_PUBLIC
+							       : LBM_LORA_SYNC_WORD_PRIVATE;
 	}
 
 	switch (lora_config->bandwidth) {
@@ -171,8 +185,17 @@ int lbm_lora_config(const struct device *dev, struct lora_modem_config *lora_con
 	status = ralf_setup_lora(&config->ralf, &params);
 	ret = status == RAL_STATUS_OK ? 0 : -EIO;
 
+	/* Only claim the radio is set up once it has taken the settings, so a
+	 * rejected configuration leaves the previous one in force rather than
+	 * a modem the radio was never put into.
+	 */
+	if (ret == 0) {
+		data->gfsk = false;
+		data->configured = true;
+	}
+
 release:
-	modem_release(dev);
+	lbm_modem_release(dev);
 	return ret;
 }
 
@@ -181,9 +204,20 @@ uint32_t lbm_lora_airtime(const struct device *dev, uint32_t data_len)
 	const struct lbm_lora_config_common *config = dev->config;
 	struct lbm_lora_data_common *data = dev->data;
 
-	/* Updating the internal variable is fine since it is only used by ral_set_lora_pkt_params
-	 * in lbm_lora_send_async, and the value is set there immediately before use.
+	/* Updating the internal variable is fine since it is only used by the
+	 * matching ral_set_*_pkt_params in lbm_lora_send_async, and the value
+	 * is set there immediately before use.
 	 */
+	if (IS_ENABLED(CONFIG_LORA_GFSK) && data->gfsk) {
+		/* A fixed-length frame keeps the length it was configured with */
+		if (data->gfsk_pkt_params.header_type != RAL_GFSK_PKT_FIX_LEN) {
+			data->gfsk_pkt_params.pld_len_in_bytes = data_len;
+		}
+
+		return ral_get_gfsk_time_on_air_in_ms(&config->ralf.ral, &data->gfsk_pkt_params,
+						      &data->gfsk_mod_params);
+	}
+
 	data->pkt_params.pld_len_in_bytes = data_len;
 
 	return ral_get_lora_time_on_air_in_ms(&config->ralf.ral, &data->pkt_params,
@@ -199,7 +233,7 @@ int lbm_lora_send_async(const struct device *dev, uint8_t *msg, uint32_t msg_len
 	int ret = 0;
 
 	/* Ensure available, freed by TX done callback */
-	if (!modem_acquire(dev)) {
+	if (!lbm_modem_acquire(dev)) {
 		return -EBUSY;
 	}
 
@@ -208,7 +242,17 @@ int lbm_lora_send_async(const struct device *dev, uint8_t *msg, uint32_t msg_len
 	data->modem_mode = MODE_TX;
 
 	/* Validate that we have a TX configuration */
-	if (data->mod_params.sf == 0) {
+	if (!data->configured) {
+		ret = -EINVAL;
+		goto release;
+	}
+
+	/* The radio clocks out the configured length, so a shorter payload
+	 * would put whatever the buffer still held on air.
+	 */
+	if (IS_ENABLED(CONFIG_LORA_GFSK) && data->gfsk &&
+	    data->gfsk_pkt_params.header_type == RAL_GFSK_PKT_FIX_LEN &&
+	    msg_len != data->gfsk_pkt_params.pld_len_in_bytes) {
 		ret = -EINVAL;
 		goto release;
 	}
@@ -221,8 +265,15 @@ int lbm_lora_send_async(const struct device *dev, uint8_t *msg, uint32_t msg_len
 	 * generic way to update the variable. Why this isn't just done in ral_set_pkt_payload
 	 * is anyones guess.
 	 */
-	data->pkt_params.pld_len_in_bytes = msg_len;
-	status = ral_set_lora_pkt_params(&config->ralf.ral, &data->pkt_params);
+	if (IS_ENABLED(CONFIG_LORA_GFSK) && data->gfsk) {
+		if (data->gfsk_pkt_params.header_type != RAL_GFSK_PKT_FIX_LEN) {
+			data->gfsk_pkt_params.pld_len_in_bytes = msg_len;
+		}
+		status = ral_set_gfsk_pkt_params(&config->ralf.ral, &data->gfsk_pkt_params);
+	} else {
+		data->pkt_params.pld_len_in_bytes = msg_len;
+		status = ral_set_lora_pkt_params(&config->ralf.ral, &data->pkt_params);
+	}
 	if (status != RAL_STATUS_OK) {
 		ret = -EINVAL;
 		goto release;
@@ -235,6 +286,12 @@ int lbm_lora_send_async(const struct device *dev, uint8_t *msg, uint32_t msg_len
 		goto release;
 	}
 
+	/* Clear any stale IRQ flags and re-arm DIO1 before starting TX so that
+	 * the TX-done interrupt is delivered.
+	 */
+	(void)ral_clear_irq_status(&config->ralf.ral, RAL_IRQ_ALL);
+	lbm_optional_dio1_irq_configure_dt(&config->dio1, GPIO_INT_EDGE_TO_ACTIVE);
+
 	/* Start the transmission */
 	status = ral_set_tx(&config->ralf.ral);
 	if (status != RAL_STATUS_OK) {
@@ -244,7 +301,7 @@ int lbm_lora_send_async(const struct device *dev, uint8_t *msg, uint32_t msg_len
 	return 0;
 
 release:
-	modem_release(dev);
+	lbm_modem_release(dev);
 	return ret;
 }
 
@@ -275,7 +332,7 @@ int lbm_lora_send(const struct device *dev, uint8_t *msg, uint32_t msg_len)
 	 */
 	ret = k_poll(&evt, 1, K_MSEC(10 + (2 * air_time)));
 	if (ret < 0) {
-		if (modem_release(dev)) {
+		if (lbm_modem_release(dev)) {
 			LOG_ERR("Packet transmission failed!");
 		} else {
 			/* TX done interrupt is currently running */
@@ -297,7 +354,7 @@ int lbm_lora_recv(const struct device *dev, uint8_t *msg, uint8_t msg_len, k_tim
 	int ret;
 
 	/* Ensure available, decremented by op_done_work_handler or on timeout */
-	if (!modem_acquire(dev)) {
+	if (!lbm_modem_acquire(dev)) {
 		return -EBUSY;
 	}
 
@@ -309,6 +366,12 @@ int lbm_lora_recv(const struct device *dev, uint8_t *msg, uint8_t msg_len, k_tim
 	/* Configure modem for RX */
 	lbm_driver_antenna_configure(dev, MODE_RX);
 	data->modem_mode = MODE_RX;
+
+	/* Clear any stale IRQ flags from the previous operation, then re-arm
+	 * DIO1 so the RX-done interrupt is delivered.
+	 */
+	(void)ral_clear_irq_status(&config->ralf.ral, RAL_IRQ_ALL);
+	lbm_optional_dio1_irq_configure_dt(&config->dio1, GPIO_INT_EDGE_TO_ACTIVE);
 
 	/* Start the reception in continuous mode.
 	 * Receive timeouts are handled by the k_poll timeout.
@@ -325,7 +388,7 @@ int lbm_lora_recv(const struct device *dev, uint8_t *msg, uint8_t msg_len, k_tim
 	/* Wait for the packet to be received */
 	ret = k_poll(&evt, 1, timeout);
 	if (ret < 0) {
-		if (modem_release(dev)) {
+		if (lbm_modem_release(dev)) {
 			LOG_INF("Receive timeout");
 			return -EAGAIN;
 		}
@@ -350,7 +413,7 @@ int lbm_lora_recv(const struct device *dev, uint8_t *msg, uint8_t msg_len, k_tim
 	ret = data->rx_state.sync.msg_len;
 
 release:
-	modem_release(dev);
+	lbm_modem_release(dev);
 	return ret;
 }
 
@@ -362,7 +425,7 @@ int lbm_lora_recv_async(const struct device *dev, lora_recv_cb cb, void *user_da
 
 	/* Cancel ongoing reception */
 	if (cb == NULL) {
-		if (!modem_release(dev)) {
+		if (!lbm_modem_release(dev)) {
 			/* Not receiving or already being stopped */
 			return -EINVAL;
 		}
@@ -370,7 +433,7 @@ int lbm_lora_recv_async(const struct device *dev, lora_recv_cb cb, void *user_da
 	}
 
 	/* Ensure available */
-	if (!modem_acquire(dev)) {
+	if (!lbm_modem_acquire(dev)) {
 		return -EBUSY;
 	}
 
@@ -382,10 +445,16 @@ int lbm_lora_recv_async(const struct device *dev, lora_recv_cb cb, void *user_da
 	data->rx_state.async.rx_cb = cb;
 	data->rx_state.async.user_data = user_data;
 
+	/* Clear any stale IRQ flags from the previous operation, then re-arm
+	 * DIO1 so packet-received interrupts are delivered.
+	 */
+	(void)ral_clear_irq_status(&config->ralf.ral, RAL_IRQ_ALL);
+	lbm_optional_dio1_irq_configure_dt(&config->dio1, GPIO_INT_EDGE_TO_ACTIVE);
+
 	/* Start the reception in continuous mode */
 	status = ral_set_rx(&config->ralf.ral, RAL_RX_TIMEOUT_CONTINUOUS_MODE);
 	if (status != RAL_STATUS_OK) {
-		modem_release(dev);
+		lbm_modem_release(dev);
 		return -EIO;
 	}
 	return 0;
@@ -400,7 +469,7 @@ int lbm_lora_test_cw(const struct device *dev, uint32_t frequency, int8_t tx_pow
 	int ret = 0;
 
 	/* Ensure available, freed by op_done_work */
-	if (!modem_acquire(dev)) {
+	if (!lbm_modem_acquire(dev)) {
 		return -EBUSY;
 	}
 
@@ -408,8 +477,8 @@ int lbm_lora_test_cw(const struct device *dev, uint32_t frequency, int8_t tx_pow
 	lbm_driver_antenna_configure(dev, MODE_CW);
 	data->modem_mode = MODE_CW;
 
-	/* Invalidate stored config */
-	data->mod_params.sf = 0;
+	/* The radio no longer matches either stored parameter set. */
+	data->configured = false;
 
 	/* Configure continuous wave */
 	status = ral_set_pkt_type(&config->ralf.ral, RAL_PKT_TYPE_LORA);
@@ -436,7 +505,7 @@ int lbm_lora_test_cw(const struct device *dev, uint32_t frequency, int8_t tx_pow
 	k_work_reschedule(&data->op_done_work, K_MSEC(duration));
 	return 0;
 release:
-	modem_release(dev);
+	lbm_modem_release(dev);
 	return ret;
 }
 
@@ -457,6 +526,23 @@ static int op_done_sync_rx(const struct device *dev)
 	} else {
 		LOG_ERR("Failed to retrieve packet payload");
 		ret = -EIO;
+	}
+
+	if (IS_ENABLED(CONFIG_LORA_GFSK) && data->gfsk) {
+		ral_gfsk_rx_pkt_status_t gfsk_status;
+
+		status = ral_get_gfsk_rx_pkt_status(&config->ralf.ral, &gfsk_status);
+		if (status == RAL_STATUS_OK) {
+			data->rx_state.sync.rssi_dbm = gfsk_status.rssi_avg_in_dbm;
+			/* GFSK measures no signal-to-noise ratio */
+			data->rx_state.sync.snr_db = 0;
+		} else {
+			LOG_WRN("Failed to query packet signal stats");
+			data->rx_state.sync.rssi_dbm = INT16_MIN;
+			data->rx_state.sync.snr_db = INT8_MIN;
+		}
+
+		return ret;
 	}
 
 	status = ral_get_lora_rx_pkt_status(&config->ralf.ral, &pkt_status);
@@ -491,6 +577,22 @@ static void op_done_async_rx(const struct device *dev)
 	LOG_HEXDUMP_DBG(rx_buffer, size, "RX");
 
 	/* Retrieve packet parameters */
+	if (IS_ENABLED(CONFIG_LORA_GFSK) && data->gfsk) {
+		ral_gfsk_rx_pkt_status_t gfsk_status = {0};
+
+		status = ral_get_gfsk_rx_pkt_status(&config->ralf.ral, &gfsk_status);
+		if (status != RAL_STATUS_OK) {
+			LOG_WRN("Failed to query packet signal stats");
+			/* Zero would read as the strongest signal there is */
+			gfsk_status.rssi_avg_in_dbm = INT16_MIN;
+		}
+
+		/* GFSK measures no signal-to-noise ratio */
+		data->rx_state.async.rx_cb(dev, rx_buffer, size, gfsk_status.rssi_avg_in_dbm, 0,
+					   data->rx_state.async.user_data);
+		return;
+	}
+
 	status = ral_get_lora_rx_pkt_status(&config->ralf.ral, &pkt_status);
 	if (status != RAL_STATUS_OK) {
 		LOG_WRN("Failed to query packet signal stats");
@@ -523,7 +625,10 @@ static void op_done_work_handler(struct k_work *work)
 
 	switch (data->modem_mode) {
 	case MODE_SLEEP:
-		LOG_WRN("Unexpected modem mode (%d)", data->modem_mode);
+		/* DIO1 was disabled by modem_release() before the chip went to
+		 * sleep. This work item was already queued when DIO1 fired. The
+		 * modem is now idle, just return without touching the hardware.
+		 */
 		return;
 	case MODE_TX:
 	case MODE_CW:
@@ -554,6 +659,15 @@ static void op_done_work_handler(struct k_work *work)
 		break;
 	}
 
+	/* The async RX callback above may have stopped reception by calling
+	 * lora_recv_async(dev, NULL, NULL). In that case modem_release() has
+	 * already disabled DIO1 and put the chip to sleep, so accessing the
+	 * hardware here would needlessly wake it again. Nothing left to do.
+	 */
+	if (data->modem_mode == MODE_SLEEP) {
+		return;
+	}
+
 	/* Get and reset the current IRQ state */
 	(void)ral_get_irq_status(&config->ralf.ral, &irq_state);
 	(void)ral_clear_irq_status(&config->ralf.ral, RAL_IRQ_ALL);
@@ -568,7 +682,7 @@ static void op_done_work_handler(struct k_work *work)
 	/* Modem should return to idle */
 	if (release) {
 		/* Return to sleep mode */
-		modem_release(dev);
+		lbm_modem_release(dev);
 	}
 
 	/* Notify user that operation has completed */
@@ -610,12 +724,27 @@ int lbm_lora_common_init(const struct device *dev)
 	return 0;
 }
 
+int lbm_lora_rssi(const struct device *dev, int16_t *rssi)
+{
+	const struct lbm_lora_config_common *config = dev->config;
+
+	if (ral_get_rssi_inst(&config->ralf.ral, rssi) != RAL_STATUS_OK) {
+		return -EIO;
+	}
+
+	return 0;
+}
+
 DEVICE_API(lora, lbm_lora_api) = {
 	.config = lbm_lora_config,
+#ifdef CONFIG_LORA_GFSK
+	.config_gfsk = lbm_lora_config_gfsk,
+#endif
 	.airtime = lbm_lora_airtime,
 	.send = lbm_lora_send,
 	.send_async = lbm_lora_send_async,
 	.recv = lbm_lora_recv,
 	.recv_async = lbm_lora_recv_async,
 	.test_cw = lbm_lora_test_cw,
+	.rssi = lbm_lora_rssi,
 };

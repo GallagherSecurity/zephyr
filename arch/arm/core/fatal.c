@@ -29,25 +29,36 @@ static void esf_dump(const struct arch_esf *esf)
 		esf->basic.a4, esf->basic.ip, esf->basic.lr);
 	EXCEPTION_DUMP(" xpsr:  0x%08x", esf->basic.xpsr);
 #if defined(CONFIG_FPU) && defined(CONFIG_FPU_SHARING)
-	for (int i = 0; i < ARRAY_SIZE(esf->fpu.s); i += 4) {
-		EXCEPTION_DUMP("s[%2d]:  0x%08x  s[%2d]:  0x%08x"
-			"  s[%2d]:  0x%08x  s[%2d]:  0x%08x",
-			i, (uint32_t)esf->fpu.s[i],
-			i + 1, (uint32_t)esf->fpu.s[i + 1],
-			i + 2, (uint32_t)esf->fpu.s[i + 2],
-			i + 3, (uint32_t)esf->fpu.s[i + 3]);
-	}
-#ifdef CONFIG_VFP_FEATURE_REGS_S64_D32
-	for (int i = 0; i < ARRAY_SIZE(esf->fpu.d); i += 4) {
-		EXCEPTION_DUMP("d[%2d]:  0x%16llx  d[%2d]:  0x%16llx"
-			"  d[%2d]:  0x%16llx  d[%2d]:  0x%16llx",
-			i, (uint64_t)esf->fpu.d[i],
-			i + 1, (uint64_t)esf->fpu.d[i + 1],
-			i + 2, (uint64_t)esf->fpu.d[i + 2],
-			i + 3, (uint64_t)esf->fpu.d[i + 3]);
-	}
+	bool extended_frame;
+#if defined(CONFIG_EXTRA_EXCEPTION_INFO) && defined(EXC_RETURN_STACK_FRAME_TYPE_Msk)
+	extended_frame = ((esf->extra_info.exc_return & EXC_RETURN_STACK_FRAME_TYPE_Msk) ==
+			  EXC_RETURN_STACK_FRAME_TYPE_EXTENDED);
+#else
+	/* assume true when we don't have exc_return info */
+	extended_frame = true;
+	EXCEPTION_DUMP("No EXC_RETURN available; assuming extended FP stack frame");
 #endif
-	EXCEPTION_DUMP("fpscr:  0x%08x", esf->fpu.fpscr);
+	if (extended_frame) {
+		for (int i = 0; i < ARRAY_SIZE(esf->fpu.s); i += 4) {
+			EXCEPTION_DUMP("s[%2d]:  0x%08x  s[%2d]:  0x%08x"
+				       "  s[%2d]:  0x%08x  s[%2d]:  0x%08x",
+				       i, (uint32_t)esf->fpu.s[i],
+				       i + 1, (uint32_t)esf->fpu.s[i + 1],
+				       i + 2, (uint32_t)esf->fpu.s[i + 2],
+				       i + 3, (uint32_t)esf->fpu.s[i + 3]);
+		}
+#ifdef CONFIG_VFP_FEATURE_REGS_S64_D32
+		for (int i = 0; i < ARRAY_SIZE(esf->fpu.d); i += 4) {
+			EXCEPTION_DUMP("d[%2d]:  0x%16llx  d[%2d]:  0x%16llx"
+				       "  d[%2d]:  0x%16llx  d[%2d]:  0x%16llx",
+				       i, (uint64_t)esf->fpu.d[i],
+				       i + 1, (uint64_t)esf->fpu.d[i + 1],
+				       i + 2, (uint64_t)esf->fpu.d[i + 2],
+				       i + 3, (uint64_t)esf->fpu.d[i + 3]);
+		}
+#endif
+		EXCEPTION_DUMP("fpscr:  0x%08x", esf->fpu.fpscr);
+	}
 #endif
 #if defined(CONFIG_EXTRA_EXCEPTION_INFO)
 	const struct _callee_saved *callee = esf->extra_info.callee;
@@ -63,6 +74,18 @@ static void esf_dump(const struct arch_esf *esf)
 
 	EXCEPTION_DUMP("EXC_RETURN: 0x%0x", esf->extra_info.exc_return);
 
+#if defined(CONFIG_ARMV7_M_ARMV8_M_MAINLINE)
+#if defined(CONFIG_ARM_SECURE_FIRMWARE)
+	EXCEPTION_DUMP("Non-Secure: %s", esf->extra_info.non_secure ? "true" : "false");
+	EXCEPTION_DUMP("%s: 0x%08x", "SFSR", esf->extra_info.sfsr);
+	EXCEPTION_DUMP("%s: 0x%08x", "SFAR", esf->extra_info.sfar);
+#endif /* CONFIG_ARM_SECURE_FIRMWARE*/
+	EXCEPTION_DUMP("%s: 0x%08x", "CFSR", esf->extra_info.cfsr);
+	EXCEPTION_DUMP("%s: 0x%08x", "HFSR", esf->extra_info.hfsr);
+	EXCEPTION_DUMP("%s: 0x%08x", "DFSR", esf->extra_info.dfsr);
+	EXCEPTION_DUMP("%s: 0x%08x", "MMFAR", esf->extra_info.mmfar);
+	EXCEPTION_DUMP("%s: 0x%08x", "BFAR", esf->extra_info.bfar);
+#endif /* CONFIG_ARMV7_M_ARMV8_M_MAINLINE */
 #endif /* CONFIG_EXTRA_EXCEPTION_INFO */
 	EXCEPTION_DUMP("Faulting instruction address (r15/pc): 0x%08x",
 		esf->basic.pc);

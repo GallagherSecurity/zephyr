@@ -18,5 +18,7 @@ supported:
   - pwm
   - rtc
   - sdhc
+  - spi
   - uart
+  - usbd
 vendor: microchip

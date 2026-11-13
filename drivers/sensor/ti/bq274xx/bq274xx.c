@@ -721,13 +721,13 @@ static int bq274xx_gauge_init(const struct device *dev)
 	int ret = 0;
 
 	if (!device_is_ready(config->i2c.bus)) {
-		LOG_ERR("I2C bus device not ready");
+		LOG_ERR_DEVICE_NOT_READY(config->i2c.bus);
 		return -ENODEV;
 	}
 
 #if defined(CONFIG_BQ274XX_PM) || defined(CONFIG_BQ274XX_TRIGGER)
 	if (!gpio_is_ready_dt(&config->int_gpios)) {
-		LOG_ERR("GPIO device pointer is not ready to be used");
+		LOG_ERR_DEVICE_NOT_READY(config->int_gpios.port);
 		return -ENODEV;
 	}
 #endif
@@ -788,7 +788,11 @@ static int bq274xx_enter_shutdown_mode(const struct device *dev)
 static int bq274xx_exit_shutdown_mode(const struct device *dev)
 {
 	const struct bq274xx_config *const config = dev->config;
+	struct bq274xx_data *data = dev->data;
 	int ret;
+
+	/* Leaving shutdown mode triggers a POR, the gauge configuration is lost */
+	data->configured = false;
 
 	ret = gpio_pin_configure_dt(&config->int_gpios, GPIO_OUTPUT | GPIO_OPEN_DRAIN);
 	if (ret < 0) {
@@ -829,11 +833,15 @@ static int bq274xx_pm_action(const struct device *dev,
 	int ret;
 
 	switch (action) {
-	case PM_DEVICE_ACTION_TURN_OFF:
+	case PM_DEVICE_ACTION_SUSPEND:
 		ret = bq274xx_enter_shutdown_mode(dev);
 		break;
 	case PM_DEVICE_ACTION_RESUME:
 		ret = bq274xx_exit_shutdown_mode(dev);
+		break;
+	case PM_DEVICE_ACTION_TURN_ON:
+	case PM_DEVICE_ACTION_TURN_OFF:
+		ret = 0;
 		break;
 	default:
 		ret = -ENOTSUP;

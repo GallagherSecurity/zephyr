@@ -6,12 +6,11 @@
 # pylint: disable=unexpected-keyword-arg
 from __future__ import annotations
 
+import argparse
 import logging
 import os
 import platform
 import re
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from multiprocessing import Lock, Value
 from pathlib import Path
@@ -20,8 +19,7 @@ import scl
 import yaml
 from natsort import natsorted
 from twisterlib import ZEPHYR_BASE
-from twisterlib.error import NoDeviceAvailableException, TwisterException
-from twisterlib.hardwaredata import CompoundHardwareData, HardwareData
+from twisterlib.hardwaredata import HardwareData
 
 try:
     # Use the C LibYAML parser if available, rather than the Python parser.
@@ -111,6 +109,7 @@ class HardwareMap:
         'NXP',
         'NXP Semiconductors',
         'Microchip Technology Inc.',
+        'Microchip Technology Incorporated',
         'FTDI',
         'Digilent',
         'Microsoft',
@@ -135,12 +134,20 @@ class HardwareMap:
         'dediprog': [
             'TTL232R-3V3',
             'MCP2200 USB Serial Port Emulator'
+        ],
+        'mplab_ipe': [
+            'MPLAB* PKoB 4',
+            'MPLAB* PICKit 5',
+            'MPLAB* PICKit Basic',
+            'MPLAB* SNAP ICD',
+            'MPLAB* ICD 5',
+            'MPLAB* ICE',
         ]
     }
 
-    def __init__(self, env=None):
+    def __init__(self, options: argparse.Namespace):
         self.duts: list[DUT] = []
-        self.options = env.options
+        self.options = options
 
     def discover(self):
 
@@ -260,12 +267,15 @@ class HardwareMap:
             else:
                 raise ValueError(f"Invalid platform value: {platform}")
             id = dut.get('id')
+            probe_id = dut.get('probe_id')
             runner = dut.get('runner')
+            base_params = dut.get('base_params')
             runner_params = dut.get('runner_params')
             serial = dut.get('serial')
             serial_baud = dut.get('serial_baud', None) or dut.get('baud', None)
             product = dut.get('product')
             fixtures = dut.get('fixtures', [])
+            run_with_fixture_only = dut.get('run_with_fixture_only', False)
             connected = dut.get('connected') and ((serial or serial_pty) is not None)
             west_flash_cmd = dut.get('west_flash_cmd', "")
             if not connected:
@@ -274,8 +284,10 @@ class HardwareMap:
                 new_dut = DUT(platform=plat,
                               product=product,
                               runner=runner,
+                              base_params=base_params,
                               runner_params=runner_params,
                               id=id,
+                              probe_id=probe_id,
                               serial_pty=serial_pty,
                               serial=serial,
                               serial_baud=serial_baud,
@@ -287,6 +299,7 @@ class HardwareMap:
                               script_param=script_param,
                               flash_timeout=flash_timeout,
                               flash_with_test=flash_with_test,
+                              run_with_fixture_only=run_with_fixture_only,
                               west_flash_cmd=west_flash_cmd)
                 new_dut.fixtures = fixtures
                 new_dut.counter = 0
@@ -342,6 +355,9 @@ class HardwareMap:
 
                 if d.product is None:
                     d.product = 'unknown'
+
+                if 'MPLAB' in d.product:
+                    d.product = 'MPLAB-TOOL'
 
                 s_dev = DUT(platform="unknown",
                                         id=d.serial_number,
@@ -473,77 +489,3 @@ class HardwareMap:
                 table.append([platform, p.id, p.serial])
 
         print(tabulate(table, headers=header, tablefmt="github"))
-
-    @staticmethod
-    @contextmanager
-    def acquire_dut_locks(duts: list[DUT]) -> Iterator[None]:
-        try:
-            for d in duts:
-                d.lock.acquire()
-            yield
-        finally:
-            for d in duts:
-                d.lock.release()
-
-    def reserve_dut(self, device: str, fixture: str | None) -> DUT:
-        """Reserve a DUT matching the specified device and fixture."""
-        duts_found: list[DUT] = []
-
-        for d in self.duts:
-            if fixture and fixture not in (f.split(sep=':')[0] for f in d.fixtures):
-                continue
-            if d.platform != device or (d.serial is None and d.serial_pty is None):
-                continue
-            duts_found.append(d)
-
-        if not duts_found:
-            raise TwisterException(f"No device to serve as {device} platform.")
-
-        # Select an available DUT with less failures
-        for d in sorted(duts_found, key=lambda _dut: _dut.failures):
-            # get all DUTs with the same id
-            duts_shared_hw = [_d for _d in self.duts if _d.id == d.id]
-            with self.acquire_dut_locks(duts_shared_hw):
-                avail = False
-                if d.available:
-                    for _d in duts_shared_hw:
-                        _d.available = 0
-                    d.counter_increment()
-                    avail = True
-                    logger.debug(f"Retain DUT:{d.platform}, Id:{d.id}, "
-                                 f"counter:{d.counter}, failures:{d.failures}")
-            if avail:
-                return d
-
-        raise NoDeviceAvailableException(f"No free {device} devices available")
-
-    def release_dut(self, dut: DUT) -> None:
-        """Release a previously reserved DUT, making it available for future reservations."""
-        logger.debug(f"Release DUT:{dut.platform}, Id:{dut.id}, "
-                     f"counter:{dut.counter}, failures:{dut.failures}")
-        # get all DUTs with the same id
-        duts_shared_hw = [_d for _d in self.duts if _d.id == dut.id]
-        with self.acquire_dut_locks(duts_shared_hw):
-            for _d in duts_shared_hw:
-                _d.available = 1
-
-    def _get_other_duts_with_same_id(self, hardware: DUT) -> list[DUT]:
-        """Get all DUTs that share the same hardware ID as the provided DUT,
-        excluding the provided DUT itself."""
-        duts: list[DUT] = []
-        # get all DUTs with the same id
-        duts_shared_hw = [_d for _d in self.duts if _d.id == hardware.id]
-        serials = {hardware.serial}
-        for d in duts_shared_hw:
-            if d.serial and d.serial not in serials:
-                duts.append(d)
-                serials.add(d.serial)
-        return duts
-
-    def create_compound_hardware_data(self, hardware: DUT) -> CompoundHardwareData:
-        """Create a CompoundHardwareData object for the provided DUT,
-        including any auxiliary connections that share the same hardware ID."""
-        compound_hardware = CompoundHardwareData.from_dict(hardware.to_dict())
-        for dut in self._get_other_duts_with_same_id(hardware):
-            compound_hardware.entries.append(HardwareData(**dut.to_dict()))
-        return compound_hardware

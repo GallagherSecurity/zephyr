@@ -81,20 +81,16 @@ int icm42x70_trigger_set(const struct device *dev, const struct sensor_trigger *
 		return -EINVAL;
 	}
 
+	if (trig->type != SENSOR_TRIG_DATA_READY &&
+	    !(IS_ENABLED(CONFIG_TDK_APEX) && trig->type == SENSOR_TRIG_MOTION)) {
+		return -ENOTSUP;
+	}
+
 	icm42x70_lock(dev);
 	gpio_pin_interrupt_configure_dt(&cfg->gpio_int, GPIO_INT_DISABLE);
 
-	if (trig->type == SENSOR_TRIG_DATA_READY) {
-		data->data_ready_handler = handler;
-		data->data_ready_trigger = trig;
-#ifdef CONFIG_TDK_APEX
-	} else if (trig->type == SENSOR_TRIG_MOTION) {
-		data->data_ready_handler = handler;
-		data->data_ready_trigger = trig;
-#endif
-	} else {
-		return -ENOTSUP;
-	}
+	data->data_ready_handler = handler;
+	data->data_ready_trigger = trig;
 
 	icm42x70_unlock(dev);
 	gpio_pin_interrupt_configure_dt(&cfg->gpio_int, GPIO_INT_EDGE_TO_ACTIVE);
@@ -114,7 +110,7 @@ int icm42x70_trigger_init(const struct device *dev)
 	}
 
 	if (!gpio_is_ready_dt(&cfg->gpio_int)) {
-		LOG_ERR("gpio_int gpio not ready");
+		LOG_ERR_DEVICE_NOT_READY(cfg->gpio_int.port);
 		return -ENODEV;
 	}
 

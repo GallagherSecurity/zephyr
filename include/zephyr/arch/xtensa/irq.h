@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef ZEPHYR_INCLUDE_ARCH_XTENSA_XTENSA_IRQ_H_
-#define ZEPHYR_INCLUDE_ARCH_XTENSA_XTENSA_IRQ_H_
+#ifndef ZEPHYR_INCLUDE_ARCH_XTENSA_IRQ_H_
+#define ZEPHYR_INCLUDE_ARCH_XTENSA_IRQ_H_
 
 #include <stdint.h>
 
@@ -12,6 +12,10 @@
 #include <xtensa/config/core-isa.h>
 
 #define CONFIG_GEN_IRQ_START_VECTOR 0
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /**
  * @cond INTERNAL_HIDDEN
@@ -172,12 +176,6 @@ int z_soc_irq_is_enabled(unsigned int irq);
 
 #define arch_irq_is_enabled(irq)	z_soc_irq_is_enabled(irq)
 
-#ifdef CONFIG_DYNAMIC_INTERRUPTS
-extern int z_soc_irq_connect_dynamic(unsigned int irq, unsigned int priority,
-				     void (*routine)(const void *parameter),
-				     const void *parameter, uint32_t flags);
-#endif
-
 #else
 
 #define CONFIG_NUM_IRQS XCHAL_NUM_INTERRUPTS
@@ -194,7 +192,7 @@ extern int z_soc_irq_connect_dynamic(unsigned int irq, unsigned int priority,
  *
  * @param irq Interrupt to be enabled.
  */
-static ALWAYS_INLINE void xtensa_irq_enable(uint32_t irq)
+static ALWAYS_INLINE void xtensa_irq_enable(unsigned int irq)
 {
 #if XCHAL_NUM_INTERRUPTS > 32
 	switch (irq >> 5) {
@@ -227,7 +225,7 @@ static ALWAYS_INLINE void xtensa_irq_enable(uint32_t irq)
  *
  * @param irq Interrupt to be disabled.
  */
-static ALWAYS_INLINE void xtensa_irq_disable(uint32_t irq)
+static ALWAYS_INLINE void xtensa_irq_disable(unsigned int irq)
 {
 #if XCHAL_NUM_INTERRUPTS > 32
 	switch (irq >> 5) {
@@ -278,6 +276,20 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
 	return (key & 0xf) == 0; /* INTLEVEL field */
 }
 
+/** Implementation of @ref arch_cpu_irqs_are_enabled. */
+static ALWAYS_INLINE bool arch_cpu_irqs_are_enabled(void)
+{
+	unsigned int ps;
+
+	/*
+	 * Force an 'rsync' before reading PS. This ensures that we get the
+	 * current value of PS and not a stale value.
+	 */
+
+	__asm__ volatile("rsync; rsr.ps %0" : "=r" (ps));
+	return (ps & 0xf) == 0; /* INTLEVEL field */
+}
+
 /**
  * @brief Query if an interrupt is enabled on Xtensa core.
  *
@@ -287,6 +299,10 @@ static ALWAYS_INLINE bool arch_irq_unlocked(unsigned int key)
  */
 int xtensa_irq_is_enabled(unsigned int irq);
 
+#ifdef __cplusplus
+}
+#endif
+
 #include <zephyr/irq.h>
 
-#endif /* ZEPHYR_INCLUDE_ARCH_XTENSA_XTENSA_IRQ_H_ */
+#endif /* ZEPHYR_INCLUDE_ARCH_XTENSA_IRQ_H_ */

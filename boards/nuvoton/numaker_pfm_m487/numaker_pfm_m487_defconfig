@@ -2,7 +2,6 @@
 
 # Enable MPU
 CONFIG_ARM_MPU=y
-CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC=192000000
 
 # Enable GPIO driver
 CONFIG_GPIO=y
@@ -13,3 +12,10 @@ CONFIG_SERIAL=y
 # Console
 CONFIG_CONSOLE=y
 CONFIG_UART_CONSOLE=y
+
+# Enable system clock controller driver
+CONFIG_CLOCK_CONTROL=y
+CONFIG_CLOCK_CONTROL_NUMICRO_M4_SCC=y
+
+# Enable hex output for openocd
+CONFIG_BUILD_OUTPUT_HEX=y

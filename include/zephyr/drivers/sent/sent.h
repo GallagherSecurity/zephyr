@@ -55,6 +55,7 @@ struct sent_frame {
 	/** Type of SENT frame */
 	enum sent_frame_type type;
 
+	/** Frame payload. The valid member depends on @ref type. */
 	union {
 		/**
 		 * @brief Serial message
@@ -94,7 +95,10 @@ struct sent_frame {
 typedef void (*sent_rx_frame_callback_t)(const struct device *dev, uint8_t channel,
 					 uint32_t num_frame, void *user_data);
 
-/** @cond INTERNAL_HIDDEN */
+/**
+ * @def_driverbackendgroup{SENT,sent_interface}
+ * @{
+ */
 
 /**
  * @brief Callback API upon starting receive frame
@@ -139,13 +143,21 @@ struct sent_rx_callback_configs {
 typedef int (*sent_register_callback_t)(const struct device *dev, uint8_t channel,
 					struct sent_rx_callback_configs callback_configs);
 
+/**
+ * @driver_ops{SENT}
+ */
 __subsystem struct sent_driver_api {
+	/** @driver_ops_optional @copybrief sent_start_listening */
 	sent_start_listening_t start_listening;
+	/** @driver_ops_optional @copybrief sent_stop_listening */
 	sent_stop_listening_t stop_listening;
+	/** @driver_ops_optional @copybrief sent_register_callback */
 	sent_register_callback_t register_callback;
 };
 
-/** @endcond */
+/**
+ * @}
+ */
 
 /**
  * @brief Enable a specific channel to start receiving from the bus
@@ -161,7 +173,7 @@ __syscall int sent_start_listening(const struct device *dev, uint8_t channel);
 
 static inline int z_impl_sent_start_listening(const struct device *dev, uint8_t channel)
 {
-	const struct sent_driver_api *api = (const struct sent_driver_api *)dev->api;
+	const struct sent_driver_api *api = DEVICE_API_GET(sent, dev);
 
 	if (api->start_listening) {
 		return api->start_listening(dev, channel);
@@ -184,7 +196,7 @@ __syscall int sent_stop_listening(const struct device *dev, uint8_t channel);
 
 static inline int z_impl_sent_stop_listening(const struct device *dev, uint8_t channel)
 {
-	const struct sent_driver_api *api = (const struct sent_driver_api *)dev->api;
+	const struct sent_driver_api *api = DEVICE_API_GET(sent, dev);
 
 	if (api->stop_listening) {
 		return api->stop_listening(dev, channel);
@@ -208,7 +220,7 @@ __syscall int sent_register_callback(const struct device *dev, uint8_t channel,
 static inline int z_impl_sent_register_callback(const struct device *dev, uint8_t channel,
 						struct sent_rx_callback_configs callback_configs)
 {
-	const struct sent_driver_api *api = (const struct sent_driver_api *)dev->api;
+	const struct sent_driver_api *api = DEVICE_API_GET(sent, dev);
 
 	if (api->register_callback) {
 		return api->register_callback(dev, channel, callback_configs);

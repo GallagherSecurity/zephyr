@@ -18,7 +18,7 @@
 #include <zephyr/pm/pm.h>
 #include <zephyr/pm/policy.h>
 #include <zephyr/pm/device.h>
-#include "zephyr/drivers/gpio/gpio_rts5912.h"
+#include <zephyr/drivers/gpio/gpio_rts5912.h>
 
 LOG_MODULE_REGISTER(uart_rts5912, CONFIG_UART_LOG_LEVEL);
 
@@ -230,7 +230,7 @@ static int rts5912_uart_init(const struct device *dev)
 	static struct uart_rts5912_dev_data uart_rts5912_dev_data_##n = {                          \
 		UART_REALTEK_RTS5912_PM_HANDLES_BIND(n)};                                          \
                                                                                                    \
-	DEVICE_DT_INST_DEFINE(n, &rts5912_uart_init, NULL, &uart_rts5912_dev_data_##n,             \
+	DEVICE_DT_INST_DEFINE(n, rts5912_uart_init, NULL, &uart_rts5912_dev_data_##n,              \
 			      &uart_rts5912_dev_cfg_##n, PRE_KERNEL_1,                             \
 			      CONFIG_UART_RTS5912_INIT_PRIORITY, NULL);
 

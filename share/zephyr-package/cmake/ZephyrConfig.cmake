@@ -29,17 +29,8 @@ macro(include_boilerplate location)
   set(Zephyr_DIR ${ZEPHYR_BASE}/share/zephyr-package/cmake CACHE PATH
       "The directory containing a CMake configuration file for Zephyr." FORCE
   )
-  list(PREPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/cmake/modules)
-  if(ZEPHYR_UNITTEST)
-    zephyr_package_message(DEPRECATION "The ZephyrUnittest CMake package has been deprecated.\n"
-                           "ZephyrUnittest has been replaced with Zephyr CMake module 'unittest' \n"
-                           "and can be loaded as: 'find_package(Zephyr COMPONENTS unittest)'"
-    )
-    set(ZephyrUnittest_FOUND True)
-    set(Zephyr_FIND_COMPONENTS unittest)
-  else()
-    set(Zephyr_FOUND True)
-  endif()
+  list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/cmake/modules)
+  set(Zephyr_FOUND True)
 
   if(NOT DEFINED APPLICATION_SOURCE_DIR)
     set(APPLICATION_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR} CACHE PATH

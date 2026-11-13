@@ -230,6 +230,14 @@ void handle_radio_event(const struct device *dev, enum ieee802154_event evt,
 				rx_result = OT_ERROR_DESTINATION_ADDRESS_FILTERED;
 				break;
 
+			case IEEE802154_RX_FAIL_NO_BUFS:
+				rx_result = OT_ERROR_NO_BUFS;
+				break;
+
+			case IEEE802154_RX_FAIL_ABORT:
+				rx_result = OT_ERROR_ABORT;
+				break;
+
 			case IEEE802154_RX_FAIL_OTHER:
 			default:
 				rx_result = OT_ERROR_FAILED;
@@ -363,7 +371,7 @@ void platformRadioInit(void)
 	k_work_queue_start(&ot_work_q, ot_task_stack,
 			   K_KERNEL_STACK_SIZEOF(ot_task_stack),
 			   OT_WORKER_PRIORITY, NULL);
-	k_thread_name_set(&ot_work_q.thread, "ot_radio_workq");
+	k_thread_name_set(ot_work_q.thread_id, "ot_radio_workq");
 
 	if ((radio_api->get_capabilities(radio_dev) &
 	     IEEE802154_HW_TX_RX_ACK) != IEEE802154_HW_TX_RX_ACK) {
@@ -438,6 +446,11 @@ void transmit_message(struct k_work *tx_job_item)
 	} else if (sTransmitFrame.mInfo.mTxInfo.mCsmaCaEnabled) {
 		radio_set_channel(sTransmitFrame.mChannel);
 		if (radio_caps & IEEE802154_HW_CSMA) {
+			struct ieee802154_config config = {
+				.csma_ca_backoffs = sTransmitFrame.mInfo.mTxInfo.mMaxCsmaBackoffs};
+
+			(void)radio_api->configure(radio_dev, IEEE802154_CONFIG_CSMA_CA_BACKOFFS,
+						   &config);
 			tx_err = radio_api->tx(radio_dev, IEEE802154_TX_MODE_CSMA_CA, tx_pkt,
 					       tx_payload);
 		} else {
@@ -678,12 +691,8 @@ void platformRadioProcess(otInstance *aInstance)
 
 	if (is_pending_event_set(PENDING_EVENT_TX_DONE)) {
 		reset_pending_event(PENDING_EVENT_TX_DONE);
-
-		if (sState == OT_RADIO_STATE_TRANSMIT ||
-		    radio_api->get_capabilities(radio_dev) & IEEE802154_HW_SLEEP_TO_TX) {
-			sState = OT_RADIO_STATE_RECEIVE;
-			handle_tx_done(aInstance);
-		}
+		sState = OT_RADIO_STATE_RECEIVE;
+		handle_tx_done(aInstance);
 	}
 
 	if (is_pending_event_set(PENDING_EVENT_SLEEP)) {
@@ -914,13 +923,7 @@ otError otPlatRadioTransmit(otInstance *aInstance, otRadioFrame *aPacket)
 
 	__ASSERT_NO_MSG(aPacket == &sTransmitFrame);
 
-	enum ieee802154_hw_caps radio_caps;
-
-	radio_caps = radio_api->get_capabilities(radio_dev);
-
-	if (sState == OT_RADIO_STATE_RECEIVE ||
-	    (sState == OT_RADIO_STATE_SLEEP &&
-	     radio_caps & IEEE802154_HW_SLEEP_TO_TX)) {
+	if (sState == OT_RADIO_STATE_RECEIVE || sState == OT_RADIO_STATE_SLEEP) {
 		if (run_tx_task(aInstance) == 0) {
 			error = OT_ERROR_NONE;
 		}
@@ -1000,9 +1003,8 @@ otRadioCaps otPlatRadioGetCaps(otInstance *aInstance)
 		caps |= OT_RADIO_CAPS_ACK_TIMEOUT;
 	}
 
-	if (radio_caps & IEEE802154_HW_SLEEP_TO_TX) {
-		caps |= OT_RADIO_CAPS_SLEEP_TO_TX;
-	}
+	/* All Zephyr 802.15.4 drivers support transmitting from a low-power state. */
+	caps |= OT_RADIO_CAPS_SLEEP_TO_TX;
 
 #if !defined(CONFIG_OPENTHREAD_THREAD_VERSION_1_1)
 	if (radio_caps & IEEE802154_HW_TX_SEC) {
@@ -1290,30 +1292,53 @@ void otPlatRadioSetMacKey(otInstance *aInstance, uint8_t aKeyIdMode, uint8_t aKe
 			  const otMacKeyMaterial *aNextKey, otRadioKeyType aKeyType)
 {
 	ARG_UNUSED(aInstance);
+	ARG_UNUSED(aKeyIdMode);
 	__ASSERT_NO_MSG(aPrevKey != NULL && aCurrKey != NULL && aNextKey != NULL);
 
 #if defined(CONFIG_OPENTHREAD_PLATFORM_KEYS_EXPORTABLE_ENABLE)
+	/* Export PSA key references into local buffers. Do NOT write into the
+	 * aPrevKey/aCurrKey/aNextKey const pointers: mKey and mKeyRef share a
+	 * union, so writing the exported bytes there would corrupt the PSA
+	 * handle and break subsequent SW RX decryption by the OT stack.
+	 */
 	__ASSERT_NO_MSG(aKeyType == OT_KEY_TYPE_KEY_REF);
+	uint8_t prev_key_bytes[OT_MAC_KEY_SIZE];
+	uint8_t curr_key_bytes[OT_MAC_KEY_SIZE];
+	uint8_t next_key_bytes[OT_MAC_KEY_SIZE];
 	size_t keyLen;
 	otError error;
 
 	error = otPlatCryptoExportKey(aPrevKey->mKeyMaterial.mKeyRef,
-				      (uint8_t *)aPrevKey->mKeyMaterial.mKey.m8, OT_MAC_KEY_SIZE,
-				      &keyLen);
+				      prev_key_bytes, OT_MAC_KEY_SIZE, &keyLen);
 	__ASSERT_NO_MSG(error == OT_ERROR_NONE);
+
 	error = otPlatCryptoExportKey(aCurrKey->mKeyMaterial.mKeyRef,
-				      (uint8_t *)aCurrKey->mKeyMaterial.mKey.m8, OT_MAC_KEY_SIZE,
-				      &keyLen);
+				      curr_key_bytes, OT_MAC_KEY_SIZE, &keyLen);
 	__ASSERT_NO_MSG(error == OT_ERROR_NONE);
+
 	error = otPlatCryptoExportKey(aNextKey->mKeyMaterial.mKeyRef,
-				      (uint8_t *)aNextKey->mKeyMaterial.mKey.m8, OT_MAC_KEY_SIZE,
-				      &keyLen);
+				      next_key_bytes, OT_MAC_KEY_SIZE, &keyLen);
 	__ASSERT_NO_MSG(error == OT_ERROR_NONE);
+
+	/* Use local pointers so the key_value assignments below are uniform */
+	const uint8_t *prev_key_data = prev_key_bytes;
+	const uint8_t *curr_key_data = curr_key_bytes;
+	const uint8_t *next_key_data = next_key_bytes;
 #else
 	__ASSERT_NO_MSG(aKeyType == OT_KEY_TYPE_LITERAL_KEY);
+	const uint8_t *prev_key_data = aPrevKey->mKeyMaterial.mKey.m8;
+	const uint8_t *curr_key_data = aCurrKey->mKeyMaterial.mKey.m8;
+	const uint8_t *next_key_data = aNextKey->mKeyMaterial.mKey.m8;
 #endif
 
-	uint8_t key_id_mode = aKeyIdMode >> 3;
+	/* The OpenThread platform API requires aKeyIdMode to be ignored: keys set
+	 * through otPlatRadioSetMacKey() are always Key ID Mode 1 (see the
+	 * function documentation in openthread/platform/radio.h). The driver is
+	 * given the IEEE 802.15.4 mode number. aKeyId == 0 clears the keys.
+	 */
+	const uint8_t key_id_mode = 1;
+	uint8_t prev_key_id = 0;
+	uint8_t next_key_id = 0;
 
 	struct ieee802154_key keys[] = {
 		{
@@ -1339,22 +1364,19 @@ void otPlatRadioSetMacKey(otInstance *aInstance, uint8_t aKeyIdMode, uint8_t aKe
 		},
 	};
 
-	if (key_id_mode == 1) {
+	if (aKeyId != 0) {
 		/* aKeyId in range: (1, 0x80) means valid keys */
-		uint8_t prev_key_id = aKeyId == 1 ? 0x80 : aKeyId - 1;
-		uint8_t next_key_id = aKeyId == 0x80 ? 1 : aKeyId + 1;
+		prev_key_id = aKeyId == 1 ? 0x80 : aKeyId - 1;
+		next_key_id = aKeyId == 0x80 ? 1 : aKeyId + 1;
 
 		keys[0].key_id = &prev_key_id;
-		keys[0].key_value = (uint8_t *)aPrevKey->mKeyMaterial.mKey.m8;
+		keys[0].key_value = (uint8_t *)prev_key_data;
 
 		keys[1].key_id = &aKeyId;
-		keys[1].key_value = (uint8_t *)aCurrKey->mKeyMaterial.mKey.m8;
+		keys[1].key_value = (uint8_t *)curr_key_data;
 
 		keys[2].key_id = &next_key_id;
-		keys[2].key_value = (uint8_t *)aNextKey->mKeyMaterial.mKey.m8;
-	} else {
-		/* aKeyId == 0 is used only to clear keys for stack reset in RCP */
-		__ASSERT_NO_MSG((key_id_mode == 0) && (aKeyId == 0));
+		keys[2].key_value = (uint8_t *)next_key_data;
 	}
 
 	struct ieee802154_config config = {

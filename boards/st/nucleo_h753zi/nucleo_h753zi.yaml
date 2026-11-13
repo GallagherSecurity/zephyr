@@ -13,10 +13,12 @@ supported:
   - arduino_i2c
   - can
   - counter
+  - crc
   - dma
   - gpio
   - i2c
   - netif:eth
+  - ptp_clock
   - pwm
   - rtc
   - spi

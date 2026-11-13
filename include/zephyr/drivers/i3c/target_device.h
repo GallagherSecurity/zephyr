@@ -95,22 +95,10 @@ struct i3c_config_target {
  * i3c_target_unregister() functions to indicate addition and removal
  * of a target device, respective.
  *
- * Fields other than @c node must be initialized by the module that
- * implements the device behavior prior to passing the object
- * reference to i3c_target_register().
+ * Fields must be initialized by the module that implements the device
+ * behavior prior to passing the object reference to i3c_target_register().
  */
 struct i3c_target_config {
-	sys_snode_t node;
-
-	/**
-	 * Flags for the target device defined by I3C_TARGET_FLAGS_*
-	 * constants.
-	 */
-	uint8_t flags;
-
-	/** Address for this target device */
-	uint8_t address;
-
 	/** Callback functions */
 	const struct i3c_target_callbacks *callbacks;
 };
@@ -202,12 +190,14 @@ struct i3c_target_callbacks {
 	int (*read_processed_cb)(struct i3c_target_config *config,
 				 uint8_t *val);
 
-#ifdef CONFIG_I3C_TARGET_BUFFER_MODE
+#if defined(CONFIG_I3C_TARGET_BUFFER_MODE) || defined(__DOXYGEN__)
 	/** @brief Function called when a write to the device is completed.
 	 *
 	 * This function is invoked by the controller when it completes
 	 * reception of data from the source buffer to the destination
 	 * buffer in an ongoing write operation to the device.
+	 *
+	 * @kconfig_dep{CONFIG_I3C_TARGET_BUFFER_MODE}
 	 *
 	 * @param config Configuration structure associated with the
 	 *               device to which the operation is addressed.
@@ -229,6 +219,8 @@ struct i3c_target_callbacks {
 	 * An error return shall cause the controller to ignore bus operations until
 	 * a new start condition is received.
 	 *
+	 * @kconfig_dep{CONFIG_I3C_TARGET_BUFFER_MODE}
+	 *
 	 * @param config the configuration structure associated with the
 	 * device to which the operation is addressed.
 	 *
@@ -244,7 +236,8 @@ struct i3c_target_callbacks {
 	 */
 	int (*buf_read_requested_cb)(struct i3c_target_config *config, uint8_t **ptr, uint32_t *len,
 				     uint8_t *hdr_mode);
-#endif
+#endif /* CONFIG_I3C_TARGET_BUFFER_MODE */
+
 	/**
 	 * @brief Function called when a stop condition is observed after a
 	 * start condition addressed to a particular device.
@@ -267,7 +260,7 @@ struct i3c_target_callbacks {
 	 * to this target.
 	 *
 	 * This function is invoked by the active controller when it handoffs
-	 * controllership to this target. This can happen wither the target has
+	 * controllership to this target. This can happen whether the target has
 	 * requested it or if the active controller chooses to handoff to the
 	 * controller capable target.
 	 *
@@ -279,10 +272,38 @@ struct i3c_target_callbacks {
 	int (*controller_handoff_cb)(struct i3c_target_config *config);
 };
 
+/**
+ * @def_driverbackendgroup{I3C Target Device,i3c_target_device}
+ * @{
+ */
+
+/**
+ * @brief Instruct the I3C target device driver to register itself with its bus controller.
+ */
+typedef int (*i3c_target_api_driver_register_t)(const struct device *dev);
+
+/**
+ * @brief Instruct the I3C target device driver to unregister itself from its bus controller.
+ */
+typedef int (*i3c_target_api_driver_unregister_t)(const struct device *dev);
+
+/**
+ * @driver_ops{I3C Target Device}
+ */
 __subsystem struct i3c_target_driver_api {
-	int (*driver_register)(const struct device *dev);
-	int (*driver_unregister)(const struct device *dev);
+	/**
+	 * @driver_ops_mandatory Instruct the I3C target device driver to register itself with
+	 * its bus controller.
+	 */
+	i3c_target_api_driver_register_t driver_register;
+	/**
+	 * @driver_ops_mandatory Instruct the I3C target device driver to unregister itself from
+	 * its bus controller.
+	 */
+	i3c_target_api_driver_unregister_t driver_unregister;
 };
+
+/** @} */
 
 /**
  * @brief Accept or Decline Controller Handoffs
@@ -299,8 +320,7 @@ __subsystem struct i3c_target_driver_api {
 static inline int i3c_target_controller_handoff(const struct device *dev,
 				      bool accept)
 {
-	const struct i3c_driver_api *api =
-		(const struct i3c_driver_api *)dev->api;
+	const struct i3c_driver_api *api = DEVICE_API_GET(i3c, dev);
 
 	if (api->target_controller_handoff == NULL) {
 		return -ENOSYS;
@@ -336,8 +356,7 @@ static inline int i3c_target_controller_handoff(const struct device *dev,
 static inline int i3c_target_tx_write(const struct device *dev,
 				      uint8_t *buf, uint16_t len, uint8_t hdr_mode)
 {
-	const struct i3c_driver_api *api =
-		(const struct i3c_driver_api *)dev->api;
+	const struct i3c_driver_api *api = DEVICE_API_GET(i3c, dev);
 
 	if (api->target_tx_write == NULL) {
 		return -ENOSYS;
@@ -351,10 +370,9 @@ static inline int i3c_target_tx_write(const struct device *dev,
  *
  * Enable I3C target mode for the @p dev I3C bus driver using the provided
  * config struct (@p cfg) containing the functions and parameters to send bus
- * events. The I3C target will be registered at the address provided as
- * @ref i3c_target_config.address struct member. Any I3C bus events related
- * to the target mode will be passed onto I3C target device driver via a set of
- * callback functions provided in the 'callbacks' struct member.
+ * events. Any I3C bus events related to the target mode will be passed onto
+ * I3C target device driver via a set of callback functions provided in the
+ * 'callbacks' struct member.
  *
  * Most of the existing hardware allows simultaneous support for master
  * and target mode. This is however not guaranteed.
@@ -372,8 +390,7 @@ static inline int i3c_target_tx_write(const struct device *dev,
 static inline int i3c_target_register(const struct device *dev,
 				      struct i3c_target_config *cfg)
 {
-	const struct i3c_driver_api *api =
-		(const struct i3c_driver_api *)dev->api;
+	const struct i3c_driver_api *api = DEVICE_API_GET(i3c, dev);
 
 	if (api->target_register == NULL) {
 		return -ENOSYS;
@@ -401,8 +418,7 @@ static inline int i3c_target_register(const struct device *dev,
 static inline int i3c_target_unregister(const struct device *dev,
 					struct i3c_target_config *cfg)
 {
-	const struct i3c_driver_api *api =
-		(const struct i3c_driver_api *)dev->api;
+	const struct i3c_driver_api *api = DEVICE_API_GET(i3c, dev);
 
 	if (api->target_unregister == NULL) {
 		return -ENOSYS;

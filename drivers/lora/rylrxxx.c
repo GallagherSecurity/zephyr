@@ -183,6 +183,7 @@ static void on_rx(struct modem_chat *chat, char **argv, uint16_t argc, void *use
 }
 
 static void on_script_finished(struct modem_chat *chat, enum modem_chat_script_result result,
+			       const struct modem_chat_script_completion_info *info,
 			       void *user_data)
 {
 	struct rylr_data *driver_data = user_data;
@@ -323,7 +324,7 @@ static int rylr_set_power(const struct device *dev, uint32_t power)
 	return rylr_send_cmd_buffer(dev);
 }
 
-static int rylr_config(const struct device *dev, struct lora_modem_config *config)
+static int rylr_config(const struct device *dev, const struct lora_modem_config *config)
 {
 	int err = 0;
 	struct rylr_data *data = dev->data;

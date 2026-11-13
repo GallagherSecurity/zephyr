@@ -74,9 +74,12 @@ LOG_MODULE_REGISTER(ft6146, CONFIG_INPUT_LOG_LEVEL);
 
 struct ft6146_data {
 	const struct device *dev;
-	struct gpio_callback int_cb;
 	struct k_work work;
+#ifdef CONFIG_INPUT_FT6146_INTERRUPT
+	struct gpio_callback int_cb;
+#else
 	struct k_timer poll_timer;
+#endif
 };
 
 struct ft6146_config {
@@ -211,23 +214,23 @@ static int ft6146_init(const struct device *dev)
 		return ret;
 	}
 
-	ret = gpio_pin_interrupt_configure_dt(&config->int_gpio, GPIO_INT_EDGE_TO_ACTIVE);
-	if (ret < 0) {
-		LOG_ERR("Failed to configure interrupt: %d", ret);
-		return ret;
-	}
-
 	gpio_init_callback(&data->int_cb, ft6146_isr_handler, BIT(config->int_gpio.pin));
 	ret = gpio_add_callback(config->int_gpio.port, &data->int_cb);
 	if (ret < 0) {
 		LOG_ERR("Failed to add callback: %d", ret);
 		return ret;
 	}
+
+	ret = gpio_pin_interrupt_configure_dt(&config->int_gpio, GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret < 0) {
+		LOG_ERR("Failed to configure interrupt: %d", ret);
+		return ret;
+	}
 #else
 	/* Initialize polling timer */
 	k_timer_init(&data->poll_timer, ft6146_poll_timer_handler, NULL);
-	k_timer_start(&data->poll_timer, K_MSEC(CONFIG_INPUT_FT6146_PERIOD),
-		      K_MSEC(CONFIG_INPUT_FT6146_PERIOD));
+	k_timer_start(&data->poll_timer, K_MSEC(CONFIG_INPUT_FT6146_PERIOD_MS),
+		      K_MSEC(CONFIG_INPUT_FT6146_PERIOD_MS));
 #endif
 
 	return ret;

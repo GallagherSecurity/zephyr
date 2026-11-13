@@ -24,6 +24,12 @@ struct uaol_capabilities {
 	uint32_t max_rx_fifo_size;       /**< Max RX FIFO size */
 };
 
+/** @brief UAOL stream/endpoint direction. */
+enum uaol_direction {
+	UAOL_DIR_PLAYBACK = 0, /**< Host-to-device USB endpoint */
+	UAOL_DIR_CAPTURE  = 1, /**< Device-to-host USB endpoint */
+};
+
 /** @brief UAOL stream configuration data. */
 struct uaol_config {
 	uint8_t xhci_bus;                /**< xHCI controller bus */
@@ -38,6 +44,7 @@ struct uaol_config {
 	uint32_t sio_credit_size;        /**< SIO credit packet size in bytes */
 	uint16_t fifo_start_offset;      /**< UAOL FIFO start address offset */
 	uint16_t channel_map;            /**< HDA link stream and channels mapping for UAOL FIFO */
+	enum uaol_direction direction;   /**< USB stream/endpoint direction */
 };
 
 /** @brief UAOL stream endpoint table entry. */
@@ -85,9 +92,7 @@ __subsystem struct uaol_driver_api {
  */
 static inline int uaol_config(const struct device *dev, int stream, struct uaol_config *cfg)
 {
-	const struct uaol_driver_api *api = dev->api;
-
-	return api->config(dev, stream, cfg);
+	return DEVICE_API_GET(uaol, dev)->config(dev, stream, cfg);
 }
 
 /**
@@ -100,9 +105,7 @@ static inline int uaol_config(const struct device *dev, int stream, struct uaol_
  */
 static inline int uaol_start(const struct device *dev, int stream)
 {
-	const struct uaol_driver_api *api = dev->api;
-
-	return api->start(dev, stream);
+	return DEVICE_API_GET(uaol, dev)->start(dev, stream);
 }
 
 /**
@@ -115,9 +118,7 @@ static inline int uaol_start(const struct device *dev, int stream)
  */
 static inline int uaol_stop(const struct device *dev, int stream)
 {
-	const struct uaol_driver_api *api = dev->api;
-
-	return api->stop(dev, stream);
+	return DEVICE_API_GET(uaol, dev)->stop(dev, stream);
 }
 
 /**
@@ -133,9 +134,7 @@ static inline int uaol_stop(const struct device *dev, int stream)
 static inline int uaol_program_ep_table(const struct device *dev, int stream,
 					struct uaol_ep_table_entry entry, bool valid)
 {
-	const struct uaol_driver_api *api = dev->api;
-
-	return api->program_ep_table(dev, stream, entry, valid);
+	return DEVICE_API_GET(uaol, dev)->program_ep_table(dev, stream, entry, valid);
 }
 
 /**
@@ -148,9 +147,7 @@ static inline int uaol_program_ep_table(const struct device *dev, int stream,
  */
 static inline int uaol_get_capabilities(const struct device *dev, struct uaol_capabilities *caps)
 {
-	const struct uaol_driver_api *api = dev->api;
-
-	return api->get_capabilities(dev, caps);
+	return DEVICE_API_GET(uaol, dev)->get_capabilities(dev, caps);
 }
 
 /**

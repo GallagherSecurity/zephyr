@@ -42,12 +42,12 @@
 #define ROM_SIZE DT_REG_SIZE_BY_IDX(SPI_CTRL, 1)
 #endif
 #else /* CONFIG_XIP */
-#define ROM_BASE CONFIG_SRAM_BASE_ADDRESS
-#define ROM_SIZE KB(CONFIG_SRAM_SIZE)
+#define ROM_BASE DT_CHOSEN_SRAM_ADDR
+#define ROM_SIZE DT_CHOSEN_SRAM_SIZE
 #endif /* CONFIG_XIP */
 
-#define RAM_BASE CONFIG_SRAM_BASE_ADDRESS
-#define RAM_SIZE KB(CONFIG_SRAM_SIZE)
+#define RAM_BASE DT_CHOSEN_SRAM_ADDR
+#define RAM_SIZE DT_CHOSEN_SRAM_SIZE
 
 #ifdef CONFIG_RISCV_PMP
 	#define MPU_MIN_SIZE 4
@@ -300,7 +300,7 @@ SECTIONS
 		/*
 		 * QEMU doesn't vet each instruction fetch individually.
 		 * Instead, it grabs a whole page and perform dynamic
-		 * transation on it in a batch. It therefore validates
+		 * transaction on it in a batch. It therefore validates
 		 * PMP permissions using page-sized and -aligned chunks.
 		 */
 		. = ALIGN(0x1000);
@@ -481,7 +481,6 @@ SECTIONS
 
 #include <zephyr/linker/debug-sections.ld>
 
-    /DISCARD/ : { *(.note.GNU-stack) }
 
     SECTION_PROLOGUE(.riscv.attributes, 0,)
 	{
