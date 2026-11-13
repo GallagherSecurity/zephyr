@@ -34,7 +34,7 @@
 #include <zephyr/sys/clock.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/util_macro.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/toolchain.h>
 #include <zephyr/types.h>
 #include <zephyr/sys/byteorder.h>
@@ -193,10 +193,10 @@ static int sirk_encrypt(struct bt_conn *conn, const struct bt_csip_sirk *sirk,
 		/* test_k is from the sample data from A.2 in the CSIS spec */
 		static const uint8_t test_k[] = {
 			/* Sample data is in big-endian, we need it in little-endian. */
-			REVERSE_ARGS(0x67, 0x6e, 0x1b, 0x9b,
-				     0xd4, 0x48, 0x69, 0x6f,
-				     0x06, 0x1e, 0xc6, 0x22,
-				     0x3c, 0xe5, 0xce, 0xd9) };
+			REVERSE_ARGS(0x67U, 0x6EU, 0x1BU, 0x9BU,
+				     0xD4U, 0x48U, 0x69U, 0x6FU,
+				     0x06U, 0x1EU, 0xC6U, 0x22U,
+				     0x3CU, 0xE5U, 0xCEU, 0xD9U) };
 		LOG_DBG("Encrypting test SIRK");
 		k = test_k;
 	} else {
@@ -234,13 +234,13 @@ static int generate_prand(uint8_t dest[BT_CSIP_CRYPTO_PRAND_SIZE])
 
 		/* Validate Prand: Must contain both a 1 and a 0 */
 		prand = sys_get_le24(dest);
-		if (prand != 0 && prand != 0x3FFFFF) {
+		if (prand != 0U && prand != 0x3FFFFFU) {
 			valid = true;
 		}
 	} while (!valid);
 
-	dest[BT_CSIP_CRYPTO_PRAND_SIZE - 1] &= 0x3F;
-	dest[BT_CSIP_CRYPTO_PRAND_SIZE - 1] |= BIT(6);
+	dest[BT_CSIP_CRYPTO_PRAND_SIZE - 1] &= 0x3FU;
+	dest[BT_CSIP_CRYPTO_PRAND_SIZE - 1] |= BIT(6U);
 
 	return 0;
 }
@@ -560,7 +560,7 @@ static void csip_security_changed(struct bt_conn *conn, bt_security_t level,
 
 	ARG_UNUSED(level);
 
-	if (err != 0 || conn->encrypt == 0) {
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE) || err != 0 || conn->encrypt == 0) {
 		return;
 	}
 
@@ -641,6 +641,10 @@ static void handle_csip_disconnect(struct bt_csip_set_member_svc_inst *svc_inst,
 
 static void csip_disconnected(struct bt_conn *conn, uint8_t reason)
 {
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
 	LOG_DBG("Disconnected: %s (reason %u)", bt_conn_dst_str(conn), reason);
 
 	if (!bt_le_bond_exists(conn->id, &conn->le.dst)) {
@@ -686,6 +690,10 @@ static void handle_csip_auth_complete(struct bt_csip_set_member_svc_inst *svc_in
 
 static void auth_pairing_complete(struct bt_conn *conn, bool bonded)
 {
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
 	/**
 	 * If a pairing is complete for a bonded device, then we
 	 * 1) Store the connection pointer to later validate SIRK encryption
@@ -751,14 +759,14 @@ void *bt_csip_set_member_svc_decl_get(const struct bt_csip_set_member_svc_inst *
 static bool valid_register_param(const struct bt_csip_set_member_register_param *param)
 {
 	if (IS_ENABLED(CONFIG_BT_CSIP_SET_MEMBER_LOCK_SUPPORT) &&
-	    param->lockable && param->rank == 0) {
+	    param->lockable && param->rank == 0U) {
 		LOG_DBG("Rank cannot be 0 if service is lockable");
 		return false;
 	}
 
 	if (IS_ENABLED(CONFIG_BT_CSIP_SET_MEMBER_SIZE_SUPPORT) &&
 	    IS_ENABLED(CONFIG_BT_CSIP_SET_MEMBER_RANK_SUPPORT) &&
-	    param->rank > 0 && param->set_size > 0 && param->rank > param->set_size) {
+	    param->rank > 0U && param->set_size > 0U && param->rank > param->set_size) {
 		LOG_DBG("Invalid rank: %u (shall be less than or equal to set_size: %u)",
 			param->rank, param->set_size);
 		return false;
@@ -1169,6 +1177,7 @@ int bt_csip_set_member_register(const struct bt_csip_set_member_register_param *
 		int mutex_err;
 
 		LOG_DBG("CSIS service register failed: %d", err);
+		(void)memset(inst, 0, offsetof(struct bt_csip_set_member_svc_inst, mutex));
 		mutex_err = k_mutex_unlock(&inst->mutex);
 		__ASSERT(mutex_err == 0, "Failed to unlock mutex: %d", mutex_err);
 		return err;
@@ -1190,8 +1199,8 @@ int bt_csip_set_member_register(const struct bt_csip_set_member_register_param *
 #endif /* CONFIG_BT_CSIP_SET_MEMBER_LOCK_SUPPORT */
 	if (IS_ENABLED(CONFIG_BT_CSIP_SET_MEMBER_TEST_SAMPLE_DATA)) {
 		uint8_t test_sirk[] = {
-			0xcd, 0xcc, 0x72, 0xdd, 0x86, 0x8c, 0xcd, 0xce,
-			0x22, 0xfd, 0xa1, 0x21, 0x09, 0x7d, 0x7d, 0x45,
+			0xCDU, 0xCCU, 0x72U, 0xDDU, 0x86U, 0x8CU, 0xCDU, 0xCEU,
+			0x22U, 0xFDU, 0xA1U, 0x21U, 0x09U, 0x7DU, 0x7DU, 0x45U,
 		};
 
 		(void)memcpy(inst->sirk.value, test_sirk, sizeof(test_sirk));

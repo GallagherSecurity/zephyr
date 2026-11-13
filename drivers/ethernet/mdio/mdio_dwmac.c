@@ -9,19 +9,31 @@
 #include <errno.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/clock_control.h>
-#include <zephyr/drivers/pinctrl.h>
 #include <zephyr/drivers/mdio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/device_mmio.h>
 #include <zephyr/sys/util.h>
 
-#include "../eth_dwmac_priv.h"
+#ifdef CONFIG_PINCTRL
+#include <zephyr/drivers/pinctrl.h>
+#endif
+
+#include "../dwc_mac/eth_dwmac_priv.h"
 
 LOG_MODULE_REGISTER(snps_dwmac_mdio, CONFIG_MDIO_LOG_LEVEL);
 
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
+/* QoS v4/v5 operation codes */
 #define DWMAC_MDIO_OP_WRITE MAC_MDIO_ADDRESS_GOC_0
 #define DWMAC_MDIO_OP_READ  (MAC_MDIO_ADDRESS_GOC_1 | MAC_MDIO_ADDRESS_GOC_0)
+#define DWMAC_MDIO_BUSY_BIT MAC_MDIO_ADDRESS_GOC_GB
+#else
+/* v3.x operation codes */
+#define DWMAC_MDIO_OP_WRITE MAC_MDIO_ADDRESS_GWRITE
+#define DWMAC_MDIO_OP_READ  0
+#define DWMAC_MDIO_BUSY_BIT MAC_MDIO_ADDRESS_GBUSY
+#endif
 
 #define DWMAC_MDIO_PINCTRL_ENABLED DT_ANY_INST_HAS_PROP_STATUS_OKAY(pinctrl_0)
 
@@ -29,7 +41,9 @@ struct dwmac_mdio_config {
 	const struct device *mac_dev;
 	uint32_t mdc_frequency;
 	uint8_t csr_clk_indx;
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
 	bool suppress_preamble;
+#endif /* CONFIG_ETH_DWC_ETHER_QOS_CORE */
 #if DWMAC_MDIO_PINCTRL_ENABLED
 	const struct pinctrl_dev_config *pincfg;
 #endif
@@ -37,6 +51,10 @@ struct dwmac_mdio_config {
 
 struct dwmac_mdio_data {
 	struct k_mutex lock;
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
+	/* wait for the MAC interrupt on MDIO transaction completion, else poll */
+	bool use_irq;
+#endif /* CONFIG_ETH_DWC_ETHER_QOS_CORE */
 	uint8_t csr_clk_indx;
 };
 
@@ -57,6 +75,7 @@ static const struct dwmac_mdio_clk_div dwmac_mdio_std_clk_divs[] = {
 	{ 324U, 7U },
 };
 
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
 /* Fast MDC range (above 2.5 MHz) for PHYs that support it. */
 static const struct dwmac_mdio_clk_div dwmac_mdio_fast_clk_divs[] = {
 	{ 4U, 8U },
@@ -68,6 +87,7 @@ static const struct dwmac_mdio_clk_div dwmac_mdio_fast_clk_divs[] = {
 	{ 16U, 14U },
 	{ 18U, 15U },
 };
+#endif /* CONFIG_ETH_DWC_ETHER_QOS_CORE */
 
 #define DWMAC_MDIO_MDC_IEEE_LIMIT_HZ 2500000U
 
@@ -75,7 +95,7 @@ static int dwmac_mdio_wait_idle(mm_reg_t base)
 {
 	bool ready;
 
-	ready = WAIT_FOR(!(sys_read32(base + MAC_MDIO_ADDRESS) & MAC_MDIO_ADDRESS_GOC_GB),
+	ready = WAIT_FOR(!(sys_read32(base + MAC_MDIO_ADDRESS) & DWMAC_MDIO_BUSY_BIT),
 			 CONFIG_MDIO_DWMAC_BUSY_CHECK_TIMEOUT,
 			 k_busy_wait(1));
 	if (!ready) {
@@ -139,6 +159,8 @@ static int dwmac_mdio_resolve_csr_clk_idx(const struct dwmac_mdio_config *cfg,
 		return ret;
 	}
 
+	/* Only try fast dividers for QoS v4/v5 cores. */
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
 	if ((cfg->mdc_frequency > DWMAC_MDIO_MDC_IEEE_LIMIT_HZ) &&
 	    dwmac_mdio_csr_clk_idx_from_rate(dwmac_mdio_fast_clk_divs,
 					     ARRAY_SIZE(dwmac_mdio_fast_clk_divs), clock_rate,
@@ -151,6 +173,9 @@ static int dwmac_mdio_resolve_csr_clk_idx(const struct dwmac_mdio_config *cfg,
 				sys_read32(DEVICE_MMIO_GET(cfg->mac_dev) + MAC_VERSION)) > 0x42)
 			     ? ARRAY_SIZE(dwmac_mdio_std_clk_divs)
 			     : ARRAY_SIZE(dwmac_mdio_std_clk_divs) - 2;
+#else
+	divs_count = ARRAY_SIZE(dwmac_mdio_std_clk_divs);
+#endif
 
 	if (dwmac_mdio_csr_clk_idx_from_rate(dwmac_mdio_std_clk_divs, divs_count, clock_rate,
 					     cfg->mdc_frequency, csr_clk_indx)) {
@@ -165,16 +190,17 @@ static int dwmac_mdio_resolve_csr_clk_idx(const struct dwmac_mdio_config *cfg,
 	return 0;
 }
 
-static uint32_t dwmac_mdio_make_addr(const struct dwmac_mdio_config *cfg,
+static uint32_t dwmac_mdio_make_addr(const struct dwmac_mdio_config *cfg __maybe_unused,
 				     const struct dwmac_mdio_data *data, uint8_t prtad,
-				     uint8_t regad, uint32_t op, bool c45)
+				     uint8_t regad, uint32_t op, bool c45 __maybe_unused)
 {
 	uint32_t addr = FIELD_PREP(MAC_MDIO_ADDRESS_PA, prtad) |
 			FIELD_PREP(MAC_MDIO_ADDRESS_RDA, regad) |
 			FIELD_PREP(MAC_MDIO_ADDRESS_CR, data->csr_clk_indx) |
 			op |
-			MAC_MDIO_ADDRESS_GOC_GB;
+			DWMAC_MDIO_BUSY_BIT;
 
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
 	if (c45) {
 		addr |= MAC_MDIO_ADDRESS_GOC_C45E;
 	}
@@ -182,6 +208,7 @@ static uint32_t dwmac_mdio_make_addr(const struct dwmac_mdio_config *cfg,
 	if (cfg->suppress_preamble) {
 		addr |= MAC_MDIO_ADDRESS_PSE;
 	}
+#endif
 
 	return addr;
 }
@@ -191,6 +218,7 @@ static int dwmac_mdio_transfer(const struct device *dev, uint8_t prtad, uint8_t 
 {
 	const struct dwmac_mdio_config *cfg = dev->config;
 	struct dwmac_mdio_data *data = dev->data;
+	struct dwmac_priv *mac_data __maybe_unused = cfg->mac_dev->data;
 	mm_reg_t base = DEVICE_MMIO_GET(cfg->mac_dev);
 	int ret;
 
@@ -201,10 +229,25 @@ static int dwmac_mdio_transfer(const struct device *dev, uint8_t prtad, uint8_t 
 		goto end;
 	}
 
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
+	if (data->use_irq) {
+		k_sem_reset(&mac_data->mdio_done);
+	}
+#endif /* CONFIG_ETH_DWC_ETHER_QOS_CORE */
+
 	sys_write32(data_in, base + MAC_MDIO_DATA);
 	sys_write32(dwmac_mdio_make_addr(cfg, data, prtad, regad, op, c45),
 		    base + MAC_MDIO_ADDRESS);
 
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
+	if (data->use_irq &&
+	    (k_sem_take(&mac_data->mdio_done, K_USEC(CONFIG_MDIO_DWMAC_BUSY_CHECK_TIMEOUT)) != 0)) {
+		ret = -ETIMEDOUT;
+		goto end;
+	}
+#endif /* CONFIG_ETH_DWC_ETHER_QOS_CORE */
+
+	/* after the interrupt, this only confirms the busy bit is cleared */
 	ret = dwmac_mdio_wait_idle(base);
 	if ((ret == 0) && (data_out != NULL)) {
 		*data_out = FIELD_GET(MAC_MDIO_DATA_GD, sys_read32(base + MAC_MDIO_DATA));
@@ -227,6 +270,7 @@ static int dwmac_mdio_write(const struct device *dev, uint8_t prtad, uint8_t reg
 				   FIELD_PREP(MAC_MDIO_DATA_GD, data), NULL, false);
 }
 
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
 static int dwmac_mdio_read_c45(const struct device *dev, uint8_t prtad, uint8_t devad,
 			       uint16_t regad, uint16_t *data)
 {
@@ -256,6 +300,26 @@ static int dwmac_mdio_write_c45(const struct device *dev, uint8_t prtad, uint8_t
 	return ret;
 }
 
+/*
+ * The MDIO completion interrupt only exists from IP version 5.00 on, older
+ * versions poll the busy bit. It is also optional in the IP configuration,
+ * in which case MDIOIE reads back as zero.
+ */
+static bool dwmac_mdio_irq_enable(const struct dwmac_mdio_config *cfg)
+{
+	mm_reg_t base = DEVICE_MMIO_GET(cfg->mac_dev);
+
+	if (FIELD_GET(MAC_VERSION_SNPSVER, sys_read32(base + MAC_VERSION)) < 0x50U) {
+		return false;
+	}
+
+	sys_write32(sys_read32(base + MAC_IRQ_ENABLE) | MAC_IRQ_ENABLE_MDIOIE,
+		    base + MAC_IRQ_ENABLE);
+
+	return (sys_read32(base + MAC_IRQ_ENABLE) & MAC_IRQ_ENABLE_MDIOIE) != 0U;
+}
+#endif /* CONFIG_ETH_DWC_ETHER_QOS_CORE */
+
 static int dwmac_mdio_init(const struct device *dev)
 {
 	const struct dwmac_mdio_config *cfg = dev->config;
@@ -282,14 +346,22 @@ static int dwmac_mdio_init(const struct device *dev)
 
 	k_mutex_init(&data->lock);
 
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
+	data->use_irq = dwmac_mdio_irq_enable(cfg);
+
+	LOG_INF("using %s for MDIO completion", data->use_irq ? "interrupt" : "polling");
+#endif
+
 	return 0;
 }
 
 static DEVICE_API(mdio, dwmac_mdio_api) = {
 	.read = dwmac_mdio_read,
 	.write = dwmac_mdio_write,
+#ifdef CONFIG_ETH_DWC_ETHER_QOS_CORE
 	.read_c45 = dwmac_mdio_read_c45,
 	.write_c45 = dwmac_mdio_write_c45,
+#endif /* CONFIG_ETH_DWC_ETHER_QOS_CORE */
 };
 
 #if DWMAC_MDIO_PINCTRL_ENABLED
@@ -311,7 +383,8 @@ static DEVICE_API(mdio, dwmac_mdio_api) = {
 		.mac_dev = DEVICE_DT_GET(DT_INST_PARENT(inst)),                                    \
 		.csr_clk_indx = DT_PROP_OR(DT_INST_PARENT(inst), snps_clk_csr, UINT8_MAX),         \
 		.mdc_frequency = DT_INST_PROP(inst, clock_frequency),                              \
-		.suppress_preamble = DT_INST_PROP(inst, suppress_preamble),                        \
+		IF_ENABLED(CONFIG_ETH_DWC_ETHER_QOS_CORE,                                          \
+			   (.suppress_preamble = DT_INST_PROP(inst, suppress_preamble),))          \
 		DWMAC_MDIO_PINCTRL_CONFIG(inst)                                                    \
 	};                                                                                         \
                                                                                                    \

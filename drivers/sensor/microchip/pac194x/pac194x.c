@@ -76,6 +76,7 @@ static const struct pac194x_chip_info pac194x_chip_info_table[] = {
 struct pac194x_config {
 	struct i2c_dt_spec i2c;
 	uint32_t shunt_micro_ohms;
+	uint8_t refresh_mode;
 	struct pac194x_channel_config channels[4];
 };
 
@@ -122,6 +123,42 @@ static char *pac194x_accum_mode_name_get(uint8_t mode)
 	}
 }
 
+static inline uint8_t pac194x_sensor_channel_to_chan_id(enum sensor_channel chan)
+{
+	int chan_id;
+	/* Convert channel to channel ID */
+	switch ((enum pac194x_sensor_channel)chan) {
+	case PAC194X_CHAN_VBUS1:
+	case PAC194X_CHAN_CURR1:
+	case PAC194X_CHAN_ACC1:
+	case PAC194X_CHAN_ACC1_AVG:
+		chan_id = 0;
+		break;
+	case PAC194X_CHAN_VBUS2:
+	case PAC194X_CHAN_CURR2:
+	case PAC194X_CHAN_ACC2:
+	case PAC194X_CHAN_ACC2_AVG:
+		chan_id = 1;
+		break;
+	case PAC194X_CHAN_VBUS3:
+	case PAC194X_CHAN_CURR3:
+	case PAC194X_CHAN_ACC3:
+	case PAC194X_CHAN_ACC3_AVG:
+		chan_id = 2;
+		break;
+	case PAC194X_CHAN_VBUS4:
+	case PAC194X_CHAN_CURR4:
+	case PAC194X_CHAN_ACC4:
+	case PAC194X_CHAN_ACC4_AVG:
+		chan_id = 3;
+		break;
+	default:
+		chan_id = 0xff;
+	}
+
+	return chan_id;
+}
+
 static int pac194x_cmd_refresh(const struct device *dev)
 {
 	const struct pac194x_config *config = dev->config;
@@ -151,79 +188,150 @@ static int pac194x_cmd_refresh_all(const struct device *dev)
 	return 0;
 }
 
-static int pac194x_sample_fetch(const struct device *dev, enum sensor_channel chan)
+static int pac194x_read_16(const struct device *dev, uint8_t reg, uint16_t *data)
 {
 	const struct pac194x_config *config = dev->config;
-	struct pac194x_data *data = dev->data;
-	uint8_t buf_4[4];
+	uint8_t buf[2];
 	int ret;
-	int i;
 
-	/* Trigger REFRESH in non-default AUTO_WAIT mode. Specification requires
-	 * to wait at least 1ms before latched values are valid. We don't want to
-	 * call msleep inside the sample_fetch routine unless the user explicitly
-	 * choose to wait. This is the only way to gather data from a current
-	 * measurement window automatically.
-	 */
-	if (data->refresh_mode == PAC194X_SENSOR_ATTR_REFRESH_MODE_AUTO_WAIT) {
-		/* Trigger REFRESH to latch current data into readable registers */
-		pac194x_cmd_refresh(dev);
-		k_msleep(2);
-	}
-
-	for (i = 0; i < data->info->phys_channels; i++) {
-		/* Check if the channel is enabled */
-		if (!data->channels[i].enabled) {
-			continue;
-		}
-
-		uint8_t buf_2[2];
-		uint8_t buf_8[8];
-
-		/* Read VBUS (Bus Voltage) - 2 bytes */
-		ret = i2c_burst_read_dt(&config->i2c, PAC194X_REG_VBUS1 + i, buf_2, sizeof(buf_2));
-		if (ret < 0) {
-			return ret;
-		}
-		data->channels[i].vbus = sys_get_be16(buf_2);
-
-		/* Read VSENSE (Sense Resistor Voltage) - 2 bytes */
-		ret = i2c_burst_read_dt(&config->i2c, PAC194X_REG_VSENSE1 + i,
-					buf_2, sizeof(buf_2));
-		if (ret < 0) {
-			return ret;
-		}
-		data->channels[i].vsense = sys_get_be16(buf_2);
-
-		/* Read VACC (Accumulator) - 56 bits (7 bytes) */
-		buf_8[0] = 0;
-		ret = i2c_burst_read_dt(&config->i2c, PAC194X_REG_VACC1 + i, &buf_8[1], 7);
-		if (ret < 0) {
-			return ret;
-		}
-		data->channels[i].vacc = sys_get_be64(buf_8);
-	}
-
-	/* Store Accumulator counter */
-	ret = i2c_burst_read_dt(&config->i2c, PAC194X_REG_ACC_COUNT, buf_4, sizeof(buf_4));
+	ret = i2c_burst_read_dt(&config->i2c, reg, buf, sizeof(buf));
 	if (ret < 0) {
 		return ret;
 	}
-	data->acc_count = sys_get_be32(buf_4);
 
-	/* DEFAULT:
-	 * Trigger REFRESH in AUTO_NOWAIT mode. PAC needs to wait 1ms after the data
-	 * is latched and available. Call refresh at the end of sample_fetch so it
-	 * will available on the next iteration. This way we gather data from the
-	 * last measurement window (not current) but we don't need to wait and
-	 * block the calling thread.
-	 */
-	if (data->refresh_mode == PAC194X_SENSOR_ATTR_REFRESH_MODE_AUTO_NOWAIT) {
-		/*
-		 * Trigger REFRESH to latch current data into readable registers,
-		 * will be available on the next sample fetch.
+	*data = sys_get_be16(buf);
+
+	return ret;
+}
+
+static int pac194x_read_32(const struct device *dev, uint8_t reg, uint32_t *data)
+{
+	const struct pac194x_config *config = dev->config;
+	uint8_t buf[4];
+	int ret;
+
+	ret = i2c_burst_read_dt(&config->i2c, reg, buf, sizeof(buf));
+	if (ret < 0) {
+		return ret;
+	}
+
+	*data = sys_get_be32(buf);
+
+	return ret;
+}
+
+static int pac194x_read_56(const struct device *dev, uint8_t reg, uint64_t *data)
+{
+	const struct pac194x_config *config = dev->config;
+	uint8_t buf[8];
+	int ret;
+
+	buf[0] = 0;
+	ret = i2c_burst_read_dt(&config->i2c, reg, &buf[1], sizeof(buf) - 1);
+	if (ret < 0) {
+		return ret;
+	}
+
+	*data = sys_get_be64(buf);
+
+	return ret;
+}
+
+static int pac194x_sample_fetch(const struct device *dev, enum sensor_channel chan)
+{
+	struct pac194x_data *data = dev->data;
+	uint8_t chan_id;
+	int ret;
+	int i;
+
+	chan_id = pac194x_sensor_channel_to_chan_id(chan);
+	if ((int)chan >= PAC194X_CHAN_VBUS1 && (int)chan <= PAC194X_CHAN_VBUS4) {
+		/* Read VBUS (Bus Voltage) - 2 bytes */
+		ret = pac194x_read_16(dev, PAC194X_REG_VBUS1 + chan_id,
+				      &data->channels[chan_id].vbus);
+		if (ret < 0) {
+			return ret;
+		}
+	} else if ((int)chan >= PAC194X_CHAN_CURR1 && (int)chan <= PAC194X_CHAN_CURR4) {
+		/* Read VSENSE (Sense Resistor Voltage) - 2 bytes */
+		ret = pac194x_read_16(dev, PAC194X_REG_VSENSE1 + chan_id,
+				      &data->channels[chan_id].vsense);
+		if (ret < 0) {
+			return ret;
+		}
+	} else if ((int)chan >= PAC194X_CHAN_ACC1 && (int)chan <= PAC194X_CHAN_ACC4_AVG) {
+		/* Read VACC (Accumulator) - 56 bits (7 bytes) */
+		ret = pac194x_read_56(dev, PAC194X_REG_VACC1 + chan_id,
+				      &data->channels[chan_id].vacc);
+		if (ret < 0) {
+			return ret;
+		}
+	} else if ((int)chan == PAC194X_CHAN_ACC_COUNT) {
+		/* Store Accumulator counter */
+		ret = pac194x_read_32(dev, PAC194X_REG_ACC_COUNT, &data->acc_count);
+		if (ret < 0) {
+			return ret;
+		}
+	} else if ((int)chan == SENSOR_CHAN_ALL) {
+		/* Trigger REFRESH in non-default AUTO_WAIT mode. Specification requires
+		 * to wait at least 1ms before latched values are valid. We don't want to
+		 * call msleep inside the sample_fetch routine unless the user explicitly
+		 * choose to wait. This is the only way to gather data from a current
+		 * measurement window automatically.
 		 */
-		pac194x_cmd_refresh(dev);
+		if (data->refresh_mode == PAC194X_SENSOR_ATTR_REFRESH_MODE_AUTO_WAIT) {
+			/* Trigger REFRESH to latch current data into readable registers */
+			pac194x_cmd_refresh(dev);
+			k_msleep(2);
+		}
+
+		for (i = 0; i < data->info->phys_channels; i++) {
+			/* Check if the channel is enabled */
+			if (!data->channels[i].enabled) {
+				continue;
+			}
+			/* Read VBUS (Bus Voltage) - 2 bytes */
+			ret = pac194x_read_16(dev, PAC194X_REG_VBUS1 + i, &data->channels[i].vbus);
+			if (ret < 0) {
+				return ret;
+			}
+
+			/* Read VSENSE (Sense Resistor Voltage) - 2 bytes */
+			ret = pac194x_read_16(dev, PAC194X_REG_VSENSE1 + i,
+					      &data->channels[i].vsense);
+			if (ret < 0) {
+				return ret;
+			}
+
+			/* Read VACC (Accumulator) - 56 bits (7 bytes) */
+			ret = pac194x_read_56(dev, PAC194X_REG_VACC1 + i, &data->channels[i].vacc);
+			if (ret < 0) {
+				return ret;
+			}
+		}
+
+		/* Store Accumulator counter */
+		ret = pac194x_read_32(dev, PAC194X_REG_ACC_COUNT, &data->acc_count);
+		if (ret < 0) {
+			return ret;
+		}
+
+		/* DEFAULT:
+		 * Trigger REFRESH in AUTO_NOWAIT mode. PAC needs to wait 1ms after the data
+		 * is latched and available. Call refresh at the end of sample_fetch so it
+		 * will available on the next iteration. This way we gather data from the
+		 * last measurement window (not current) but we don't need to wait and
+		 * block the calling thread.
+		 */
+		if (data->refresh_mode == PAC194X_SENSOR_ATTR_REFRESH_MODE_AUTO_NOWAIT) {
+			/*
+			 * Trigger REFRESH to latch current data into readable registers,
+			 * will be available on the next sample fetch.
+			 */
+			pac194x_cmd_refresh(dev);
+		}
+	} else {
+		return -ENOTSUP;
 	}
 
 	return 0;
@@ -403,7 +511,7 @@ static int pac194x_parse_sensor_acc_avg(const struct device *dev, uint16_t ch_id
 			res_uv = i128.low >> denominator;
 			res_uv |= i128.high << (64 - denominator);
 
-			if (i128.high >> denominator) {
+			if (((int64_t)i128.high >> denominator) != (res_uv >> 63)) {
 				/* This is VERY unlikely but take care of the corner case */
 				LOG_ERR("accumulated power exceeds 64-bit");
 				return -E2BIG;
@@ -518,39 +626,9 @@ static int pac194x_attr_set(const struct device *dev,
 {
 	const struct pac194x_config *config = dev->config;
 	struct pac194x_data *data = dev->data;
+	uint8_t chan_id = pac194x_sensor_channel_to_chan_id(chan);
 	int mode;
 	int ret;
-	uint8_t chan_id;
-
-	/* Convert channel to channel ID */
-	switch ((enum pac194x_sensor_channel)chan) {
-	case PAC194X_CHAN_VBUS1:
-	case PAC194X_CHAN_CURR1:
-	case PAC194X_CHAN_ACC1:
-	case PAC194X_CHAN_ACC1_AVG:
-		chan_id = 0;
-		break;
-	case PAC194X_CHAN_VBUS2:
-	case PAC194X_CHAN_CURR2:
-	case PAC194X_CHAN_ACC2:
-	case PAC194X_CHAN_ACC2_AVG:
-		chan_id = 1;
-		break;
-	case PAC194X_CHAN_VBUS3:
-	case PAC194X_CHAN_CURR3:
-	case PAC194X_CHAN_ACC3:
-	case PAC194X_CHAN_ACC3_AVG:
-		chan_id = 2;
-		break;
-	case PAC194X_CHAN_VBUS4:
-	case PAC194X_CHAN_CURR4:
-	case PAC194X_CHAN_ACC4:
-	case PAC194X_CHAN_ACC4_AVG:
-		chan_id = 3;
-		break;
-	default:
-		chan_id = 0xff;
-	}
 
 	mode = val->val1;
 	switch ((int)attr) {
@@ -610,7 +688,15 @@ static int pac194x_attr_set(const struct device *dev,
 		 * It is necessary to manually refresh ACC counters on every
 		 * PAC194X_CTRL_REG change.
 		 */
-		return pac194x_cmd_refresh(dev);
+		ret = pac194x_cmd_refresh(dev);
+		if (ret < 0) {
+			return ret;
+		}
+
+		/* Wait at least 1ms (t_REFRESH) for the refresh cycle to complete */
+		k_msleep(2);
+
+		return 0;
 	}
 	case SENSOR_ATTR_REFRESH_MODE:
 		switch (val->val1) {
@@ -703,12 +789,34 @@ static void pac194x_dump_config(const struct device *dev)
 	LOG_DBG("-------------------------------------------");
 }
 
+static void pac194x_configure_refresh(const struct device *dev)
+{
+	const struct pac194x_config *config = dev->config;
+	struct pac194x_data *data = dev->data;
+	int refresh_mode = config->refresh_mode;
+
+	switch (refresh_mode) {
+	case PAC_REFRESH_AUTO_NOWAIT:
+		data->refresh_mode = PAC194X_SENSOR_ATTR_REFRESH_MODE_AUTO_NOWAIT;
+		break;
+	case PAC_REFRESH_AUTO_WAIT:
+		data->refresh_mode = PAC194X_SENSOR_ATTR_REFRESH_MODE_AUTO_WAIT;
+		break;
+	case PAC_REFRESH_MANUAL:
+	default:
+		data->refresh_mode = PAC194X_SENSOR_ATTR_REFRESH_MODE_MANUAL;
+		break;
+	}
+}
+
 static int pac194x_configure_channels(const struct device *dev)
 {
 	const struct pac194x_config *config = dev->config;
+	struct pac194x_data *data = dev->data;
 	int ret;
 	uint8_t a, vsense, vbus, accum;
 	uint8_t buf[2];
+	uint16_t off_bits;
 
 	if (IS_ENABLED(CONFIG_SENSOR_LOG_LEVEL_DBG)) {
 		pac194x_dump_config(dev);
@@ -724,7 +832,7 @@ static int pac194x_configure_channels(const struct device *dev)
 			continue;
 		}
 
-		tmp = config->channels[a].vbus_mode;
+		tmp = config->channels[a].vsense_mode;
 		switch (tmp) {
 		case PAC_UNIPOLAR_FSR:
 		case PAC_BIPOLAR_FSR:
@@ -736,7 +844,7 @@ static int pac194x_configure_channels(const struct device *dev)
 		}
 		vsense |= tmp << (2 * (3 - a));
 
-		tmp = config->channels[a].vsense_mode;
+		tmp = config->channels[a].vbus_mode;
 		switch (tmp) {
 		case PAC_UNIPOLAR_FSR:
 		case PAC_BIPOLAR_FSR:
@@ -783,10 +891,17 @@ static int pac194x_configure_channels(const struct device *dev)
 		return ret;
 	}
 
-	/* Disable all channels */
+	/* Enable the channels described in devicetree, disable all the others */
+	off_bits = PAC194X_CTRL_CHANNEL_N_OFF_MASK;
+	for (a = 0; a < MIN(PAC194X_MAX_CHANNELS, data->info->phys_channels); a++) {
+		if (config->channels[a].configured) {
+			off_bits &= ~PAC194X_CTRL_CHANNEL_N_OFF(a);
+			data->channels[a].enabled = true;
+		}
+	}
+
 	ret = pac194_reg_mask_write_16(dev, PAC194X_REG_CTRL,
-				       PAC194X_CTRL_CHANNEL_N_OFF_MASK,
-				       PAC194X_CTRL_CHANNEL_N_OFF_MASK);
+				       PAC194X_CTRL_CHANNEL_N_OFF_MASK, off_bits);
 
 	if (ret < 0) {
 		return ret;
@@ -810,6 +925,8 @@ static int pac194x_init(const struct device *dev)
 	if (pac194x_chip_identify(dev)) {
 		return -ENODEV;
 	}
+
+	pac194x_configure_refresh(dev);
 
 	if (pac194x_configure_channels(dev)) {
 		LOG_ERR("failed to configure channels");
@@ -836,6 +953,7 @@ static int pac194x_init(const struct device *dev)
 												\
 	static const struct pac194x_config pac194x_config_##inst = {				\
 		.i2c = I2C_DT_SPEC_INST_GET(inst),						\
+		.refresh_mode = DT_INST_PROP(inst, microchip_refresh_mode),			\
 		.channels = {									\
 			DT_INST_FOREACH_CHILD_STATUS_OKAY(inst, PAC194X_SET_CHANNEL)		\
 		},										\

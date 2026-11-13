@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef ZEPHYR_INCLUDE_TOOLCHAIN_STDINT_H_
-#define ZEPHYR_INCLUDE_TOOLCHAIN_STDINT_H_
+#ifndef ZEPHYR_INCLUDE_TOOLCHAIN_ZEPHYR_STDINT_H_
+#define ZEPHYR_INCLUDE_TOOLCHAIN_ZEPHYR_STDINT_H_
 
 /*
  * Some gcc versions and/or configurations as found in the Zephyr SDK
@@ -15,33 +15,6 @@
  * being compatible with int pointers. Let's redefine them to follow
  * common expectations and usage.
  */
-
-/*
- * If the compiler does not define __SIZEOF_INT__ deduce it from __INT_MAX__
- * or INT_MAX.
- */
-#if !defined(__SIZEOF_INT__)
-
-#if defined(__INT_MAX__)
-/* GCC >= 3.3.0 has __<val>__ implicitly defined. */
-#define __Z_INT_MAX __INT_MAX__
-#else
-/* Fall back to POSIX versions from <limits.h> */
-#define __Z_INT_MAX INT_MAX
-#include <limits.h>
-#endif
-
-#if __Z_INT_MAX == 0x7fff
-#define __SIZEOF_INT__ 2
-#elif __Z_INT_MAX == 0x7fffffffL
-#define __SIZEOF_INT__ 4
-#elif __Z_INT_MAX > 0x7fffffffL
-#define __SIZEOF_INT__ 8
-#endif
-
-#undef __Z_INT_MAX
-
-#endif
 
 #if __SIZEOF_INT__ != 4
 #error "unexpected int width"
@@ -103,4 +76,4 @@
 #define __INT64_C(c) c ## LL
 #define __UINT64_C(c) c ## ULL
 
-#endif /* ZEPHYR_INCLUDE_TOOLCHAIN_STDINT_H_ */
+#endif /* ZEPHYR_INCLUDE_TOOLCHAIN_ZEPHYR_STDINT_H_ */

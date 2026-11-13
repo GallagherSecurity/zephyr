@@ -14,7 +14,6 @@ import logging
 import os
 import random
 import re
-from enum import Enum
 
 from twisterlib.constants import (
     PYTEST_HARNESSES,
@@ -24,7 +23,7 @@ from twisterlib.constants import (
     SUPPORTED_SIMS_WITH_EXEC,
 )
 from twisterlib.environment import TwisterEnv
-from twisterlib.error import BuildError, StatusAttributeError, TwisterException
+from twisterlib.error import BuildError, TwisterException
 from twisterlib.handlers import (
     BinaryHandler,
     DeviceHandler,
@@ -38,13 +37,13 @@ from twisterlib.hardwaremap import HardwareMap
 from twisterlib.hardwareutil import HardwareReservationManager
 from twisterlib.platform import Platform
 from twisterlib.size_calc import SizeCalculator
-from twisterlib.statuses import TwisterStatus
+from twisterlib.statuses import StatusMixin, TwisterStatus
 from twisterlib.testsuite import TestCase, TestSuite
 
 logger = logging.getLogger('twister')
 
 
-class TestInstance:
+class TestInstance(StatusMixin):
     """Class representing the execution of a particular TestSuite on a platform
 
     @param test The TestSuite object we want to build/execute
@@ -106,6 +105,9 @@ class TestInstance:
         self.required_applications = []
         self.required_build_dirs = []
         self.reserved_duts: list[CompoundHardwareData] = []
+        # Sidecar attached to this instance; defaults to the testsuite `sidecar:`
+        # field but twister may set it itself (e.g. to attach ivshmem coverage).
+        self.sidecar = testsuite.sidecar
 
     def setup_run_id(self):
         self.run_id = self._get_run_id()
@@ -128,19 +130,6 @@ class TestInstance:
                                     quoting = csv.QUOTE_NONNUMERIC)
                 cw.writeheader()
                 cw.writerows(self.recording)
-
-    @property
-    def status(self) -> TwisterStatus:
-        return self._status
-
-    @status.setter
-    def status(self, value : TwisterStatus) -> None:
-        # Check for illegal assignments by value
-        try:
-            key = value.name if isinstance(value, Enum) else value
-            self._status = TwisterStatus[key]
-        except KeyError as err:
-            raise StatusAttributeError(self.__class__, value) from err
 
     def add_filter(self, reason, filter_type):
         self.filters.append({'type': filter_type, 'reason': reason })
@@ -312,10 +301,26 @@ class TestInstance:
                 not simulator.is_runnable():
             target_ready = False
 
+        # A sidecar provisions host-side resources around the run; when the
+        # host lacks what it needs (for example no virtiofsd binary), build
+        # the test but do not try to run it, like a missing simulator.
+        if target_ready and self.sidecar:
+            from twisterlib.sidecars import SidecarImporter
+            try:
+                sidecar = SidecarImporter.get_sidecar(self.sidecar)
+            except ValueError:
+                # Unknown sidecar names are reported at the run stage.
+                sidecar = None
+            if sidecar is not None:
+                sidecar.configure(self)
+                if not sidecar.host_ready():
+                    target_ready = False
+
         if testsuite_runnable := self.testsuite.harness in SUPPORTED_HARNESSES:
             if device_testing:
                 testsuite_runnable = HardwareReservationManager(
-                    hardware_map, self.platform.name, self.testsuite.harness_config).is_runnable()
+                    hardware_map, self.platform.name, self.testsuite.harness_config
+                ).is_runnable()
 
             elif fixture := self.testsuite.harness_config.fixture:
                 # if we have a fixture that is also being supplied on the
@@ -335,13 +340,28 @@ class TestInstance:
 
         return testsuite_runnable and target_ready
 
+    @staticmethod
+    def platform_supports_semihost(platform):
+        """Whether the platform can write coverage data over semihosting.
+
+        Semihosting is implemented for ARM, RISC-V and Xtensa targets and is
+        exercised through QEMU's automatic -semihosting-config switch, so limit
+        the per-test semihost transport to QEMU-simulated targets on those
+        architectures.
+        """
+        return (
+            platform.arch in ("arm", "arm64", "riscv", "riscv32", "riscv64", "xtensa")
+            and platform.simulation == "qemu"
+        )
+
     def create_overlay(
         self,
         platform,
         enable_asan=False,
         enable_ubsan=False,
         enable_coverage=False,
-        coverage_platform=None
+        coverage_platform=None,
+        coverage_per_test=False
     ):
         if coverage_platform is None:
             coverage_platform = []
@@ -392,6 +412,13 @@ class TestInstance:
             for cp in coverage_platform:
                 if cp in platform.aliases:
                     content = content + "\nCONFIG_COVERAGE=y"
+                    if coverage_per_test:
+                        content = content + "\nCONFIG_ZTEST_COVERAGE_PER_TEST=y"
+                        if self.platform_supports_semihost(platform):
+                            # Route the per-test dumps to the host filesystem via
+                            # semihosting instead of the serial console.
+                            content = content + "\nCONFIG_SEMIHOST=y"
+                            content = content + "\nCONFIG_COVERAGE_SEMIHOST=y"
 
         if platform.type == "native":
             if enable_asan:
@@ -436,7 +463,7 @@ class TestInstance:
         fns = glob.glob(os.path.join(build_dir, "zephyr", "*.elf"))
         fns.extend(glob.glob(os.path.join(build_dir, "testbinary")))
         blocklist = [
-                'remapped', # used for xtensa plaforms
+                'remapped', # used for xtensa platforms
                 'zefi', # EFI for Zephyr
                 'qemu', # elf files generated after running in qemu
                 '_pre']
@@ -478,7 +505,8 @@ class TestInstance:
 
             pattern = f"{platform_name}/.*/{application_name}"
             for build_dir in self.required_build_dirs:
-                if re.search(pattern, build_dir):
+                # Normalize separators so the '/'-based pattern matches Windows '\' build dirs.
+                if re.search(pattern, build_dir.replace(os.sep, "/")):
                     # found matching build dir
                     break
             else:

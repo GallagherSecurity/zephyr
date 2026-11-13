@@ -13,7 +13,7 @@
 #include <scheduler.h>
 
 #ifdef CONFIG_OBJ_CORE_PIPE
-static struct k_obj_type obj_type_pipe;
+K_OBJ_TYPE_DEFINE(obj_type_pipe, k_pipe, K_OBJ_TYPE_PIPE_ID, NULL);
 #endif /* CONFIG_OBJ_CORE_PIPE */
 
 static inline bool pipe_closed(struct k_pipe *pipe)
@@ -131,18 +131,18 @@ static size_t copy_to_pending_readers(struct k_pipe *pipe, bool *need_resched,
 			} else {
 				/*
 				 * This reader has received all the data
-				 * it was waiting for: wake it up with
-				 * the scheduler lock still held.
+				 * it was waiting for. Set its return
+				 * value, unpend, abort its timeout, and
+				 * ready it, all under the scheduler lock
+				 * so a racing timeout handler cannot
+				 * observe a half-initialized wake-up.
 				 */
+				z_thread_return_value_set_with_data(reader, 0, NULL);
 				unpend_thread_no_timeout(reader);
-				z_abort_thread_timeout(reader);
+				(void)z_try_abort_thread_timeout(reader);
+				z_sched_ready_locked(reader);
+				*need_resched = true;
 			}
-		}
-		if (reader != NULL) {
-			/* rest of thread wake-up outside the scheduler lock */
-			z_thread_return_value_set_with_data(reader, 0, NULL);
-			z_ready_thread(reader);
-			*need_resched = true;
 		}
 	} while (reader != NULL && written < len);
 
@@ -153,15 +153,21 @@ int z_impl_k_pipe_write(struct k_pipe *pipe, const uint8_t *data, size_t len, k_
 {
 	int rc;
 	size_t written = 0;
+	size_t added;
 	k_timepoint_t end = sys_timepoint_calc(timeout);
 	k_spinlock_key_t key = k_spin_lock(&pipe->lock);
 	bool need_resched = false;
 
 	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_pipe, write, pipe, data, len, timeout);
 
+	if (unlikely(len > INT_MAX)) {
+		rc = -EOVERFLOW;
+		goto out;
+	}
+
 	if (unlikely(pipe_resetting(pipe))) {
 		rc = -ECANCELED;
-		goto exit;
+		goto out;
 	}
 
 	for (;;) {
@@ -193,12 +199,16 @@ int z_impl_k_pipe_write(struct k_pipe *pipe, const uint8_t *data, size_t len, k_
 			}
 		}
 
+		added = ring_buf_put(&pipe->buf, &data[written], len - written);
+
 #ifdef CONFIG_POLL
-		need_resched |= z_handle_obj_poll_events(&pipe->poll_events,
-							 K_POLL_STATE_PIPE_DATA_AVAILABLE);
+		if (added != 0) {
+			need_resched |= z_handle_obj_poll_events(&pipe->poll_events,
+								 K_POLL_STATE_PIPE_DATA_AVAILABLE);
+		}
 #endif /* CONFIG_POLL */
 
-		written += ring_buf_put(&pipe->buf, &data[written], len - written);
+		written += added;
 		if (likely(written == len)) {
 			rc = written;
 			break;
@@ -212,7 +222,7 @@ int z_impl_k_pipe_write(struct k_pipe *pipe, const uint8_t *data, size_t len, k_
 			break;
 		}
 	}
-exit:
+out:
 	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_pipe, write, pipe, rc);
 	if (need_resched) {
 		z_reschedule(&pipe->lock, key);
@@ -232,9 +242,14 @@ int z_impl_k_pipe_read(struct k_pipe *pipe, uint8_t *data, size_t len, k_timeout
 
 	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_pipe, read, pipe, data, len, timeout);
 
+	if (unlikely(len > INT_MAX)) {
+		rc = -EOVERFLOW;
+		goto out;
+	}
+
 	if (unlikely(pipe_resetting(pipe))) {
 		rc = -ECANCELED;
-		goto exit;
+		goto out;
 	}
 
 	for (;;) {
@@ -262,7 +277,7 @@ int z_impl_k_pipe_read(struct k_pipe *pipe, uint8_t *data, size_t len, k_timeout
 			break;
 		}
 	}
-exit:
+out:
 	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_pipe, read, pipe, rc);
 	if (need_resched) {
 		z_reschedule(&pipe->lock, key);
@@ -288,13 +303,35 @@ void z_impl_k_pipe_reset(struct k_pipe *pipe)
 
 void z_impl_k_pipe_close(struct k_pipe *pipe)
 {
+	k_spinlock_key_t key;
+	bool need_resched;
+
 	SYS_PORT_TRACING_OBJ_FUNC_ENTER(k_pipe, close, pipe);
-	K_SPINLOCK(&pipe->lock) {
-		pipe->flags = 0;
-		z_sched_wake_all(&pipe->data, 0, NULL);
-		z_sched_wake_all(&pipe->space, 0, NULL);
+
+	key = k_spin_lock(&pipe->lock);
+
+	pipe->flags = 0;
+	need_resched = z_sched_wake_all(&pipe->data, 0, NULL);
+	need_resched |= z_sched_wake_all(&pipe->space, 0, NULL);
+
+#ifdef CONFIG_POLL
+	/*
+	 * Closing is a broadcast: wake every registered poller. Later
+	 * k_poll() calls see the hangup through is_condition_met().
+	 */
+	while (z_handle_obj_poll_events(&pipe->poll_events,
+					K_POLL_STATE_PIPE_DATA_AVAILABLE)) {
+		need_resched = true;
 	}
+#endif /* CONFIG_POLL */
+
 	SYS_PORT_TRACING_OBJ_FUNC_EXIT(k_pipe, close, pipe);
+
+	if (need_resched) {
+		z_reschedule(&pipe->lock, key);
+	} else {
+		k_spin_unlock(&pipe->lock, key);
+	}
 }
 
 #ifdef CONFIG_USERSPACE
@@ -339,22 +376,3 @@ void z_vrfy_k_pipe_close(struct k_pipe *pipe)
 }
 #include <zephyr/syscalls/k_pipe_close_mrsh.c>
 #endif /* CONFIG_USERSPACE */
-
-#ifdef CONFIG_OBJ_CORE_PIPE
-static int init_pipe_obj_core_list(void)
-{
-	/* Initialize pipe object type */
-	z_obj_type_init(&obj_type_pipe, K_OBJ_TYPE_PIPE_ID,
-			offsetof(struct k_pipe, obj_core));
-
-	/* Initialize and link statically defined pipes */
-	STRUCT_SECTION_FOREACH(k_pipe, pipe) {
-		k_obj_core_init_and_link(K_OBJ_CORE(pipe), &obj_type_pipe);
-	}
-
-	return 0;
-}
-
-SYS_INIT(init_pipe_obj_core_list, PRE_KERNEL_1,
-	 CONFIG_KERNEL_INIT_PRIORITY_OBJECTS);
-#endif /* CONFIG_OBJ_CORE_PIPE */

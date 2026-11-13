@@ -228,7 +228,7 @@ static int dmac_setup_desc(struct dma_block_config *desc_config, dma_descriptor_
 
 	val32 = ras | was | prio | auto_start;
 
-	/* If programed to a value greater than the maximum trigger index, or 0, all
+	/* If programmed to a value greater than the maximum trigger index, or 0, all
 	 * external triggers are disabled. Only software triggering is available.
 	 */
 	if (config->dma_slot <= DMAC_TRIG_MAX) {
@@ -252,6 +252,12 @@ static int dmac_setup_desc(struct dma_block_config *desc_config, dma_descriptor_
 				    ? config->dest_burst_length
 				    : config->source_burst_length;
 	}
+
+	/* Default to 1 if burst_len is 0 (CSZ=0 causes bus errors) */
+	if (burst_len == 0U) {
+		burst_len = 1U;
+	}
+
 	if (burst_len > (DMA_CHXSIZ_CSZ_Msk >> DMA_CHXSIZ_CSZ_Pos)) {
 		return -EINVAL;
 	}

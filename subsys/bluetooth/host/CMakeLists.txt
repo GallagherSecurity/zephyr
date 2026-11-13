@@ -10,7 +10,6 @@ zephyr_library_sources_ifdef(CONFIG_BT_HCI_RAW          hci_raw.c hci_common.c)
 zephyr_library_sources_ifdef(CONFIG_BT_MONITOR          monitor.c)
 zephyr_library_sources_ifdef(CONFIG_BT_SETTINGS         settings.c)
 zephyr_library_sources_ifdef(CONFIG_BT_HOST_CCM         aes_ccm.c)
-zephyr_library_sources_ifdef(CONFIG_BT_LONG_WQ          long_wq.c)
 
 if(CONFIG_BT_HCI_HOST)
   zephyr_library_sources(
@@ -88,12 +87,6 @@ if(CONFIG_BT_SMP_LOG_LEVEL_DBG OR CONFIG_BT_KEYS_LOG_LEVEL_DBG OR CONFIG_BT_LOG_
   message(WARNING "One of these options are enabled:
   CONFIG_BT_SMP_LOG_LEVEL_DBG CONFIG_BT_KEYS_LOG_LEVEL_DBG CONFIG_BT_LOG_SNIFFER_INFO.
   Private security keys such as the LTK will be printed out, do not use in
-  production."
-    )
-endif()
-if(CONFIG_BT_FIXED_PASSKEY)
-  message(WARNING "CONFIG_BT_FIXED_PASSKEY is enabled
-  A fixed passkey is easy to deduce during the pairing procedure, do not use in
   production."
     )
 endif()

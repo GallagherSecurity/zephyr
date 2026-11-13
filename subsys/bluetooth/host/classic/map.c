@@ -12,14 +12,14 @@
 
 #include <zephyr/bluetooth/conn.h>
 
-#include "common/assert.h"
+#include <common/assert.h>
 
 #include <zephyr/bluetooth/classic/sdp.h>
 #include <zephyr/bluetooth/classic/goep.h>
 #include <zephyr/bluetooth/classic/map.h>
 
-#include "host/hci_core.h"
-#include "host/conn_internal.h"
+#include <host/hci_core.h>
+#include <host/conn_internal.h>
 #include "l2cap_br_internal.h"
 #include "obex_internal.h"
 
@@ -76,7 +76,7 @@ struct map_required_hdr {
 };
 
 #define MAP_REQUIRED_APP_PARAM_LIST(...)                                                           \
-	COND_CODE_0(NUM_VA_ARGS_LESS_1(__VA_ARGS__), \
+	COND_CODE_1(IS_EMPTY(__VA_ARGS__), \
 		    ({.count = 0, .tags = NULL}), \
 		    (_MAP_REQUIRED_APP_PARAM_LIST(__VA_ARGS__)))
 
@@ -88,8 +88,8 @@ struct map_required_hdr {
 	}
 
 #define MAP_REQUIRED_HDR_LIST(...)                                                                 \
-	COND_CODE_0(NUM_VA_ARGS_LESS_1(__VA_ARGS__), \
-		    ({.count = 0, .tags = NULL}), \
+	COND_CODE_1(IS_EMPTY(__VA_ARGS__), \
+		    ({.count = 0, .hdrs = NULL}), \
 		    (_MAP_REQUIRED_HDR_LIST(__VA_ARGS__)))
 #define _MAP_REQUIRED_HDR_LIST(...)                                                                \
 	MAP_REQUIRED_HDR(sizeof((uint8_t[]){__VA_ARGS__}), ((uint8_t[]){__VA_ARGS__}))
@@ -121,7 +121,7 @@ static bool has_required_app_params(struct net_buf *buf, const struct map_requir
 }
 
 #define SEND_EVENT_REQUIRED_HDR BT_OBEX_HEADER_ID_CONN_ID, BT_OBEX_HEADER_ID_TYPE
-#define SEND_EVENT_REQUIRED_AP
+#define SEND_EVENT_REQUIRED_AP  BT_MAP_APPL_PARAM_TAG_ID_MAS_INST_ID
 
 #define SET_NTF_REG_REQUIRED_HDR                                                                   \
 	BT_OBEX_HEADER_ID_CONN_ID, BT_OBEX_HEADER_ID_TYPE, BT_OBEX_HEADER_ID_APP_PARAM
@@ -135,8 +135,9 @@ static bool has_required_app_params(struct net_buf *buf, const struct map_requir
 #define GET_MSG_LISTING_REQUIRED_AP
 
 #define GET_MSG_REQUIRED_HDR                                                                       \
-	BT_OBEX_HEADER_ID_CONN_ID, BT_OBEX_HEADER_ID_TYPE, BT_OBEX_HEADER_ID_NAME
-#define GET_MSG_REQUIRED_AP
+	BT_OBEX_HEADER_ID_CONN_ID, BT_OBEX_HEADER_ID_TYPE, BT_OBEX_HEADER_ID_NAME,                 \
+		BT_OBEX_HEADER_ID_APP_PARAM
+#define GET_MSG_REQUIRED_AP BT_MAP_APPL_PARAM_TAG_ID_ATTACHMENT, BT_MAP_APPL_PARAM_TAG_ID_CHARSET
 
 #define SET_MSG_STATUS_REQUIRED_HDR                                                                \
 	BT_OBEX_HEADER_ID_CONN_ID, BT_OBEX_HEADER_ID_TYPE, BT_OBEX_HEADER_ID_NAME,                 \
@@ -360,17 +361,6 @@ static int map_check_target(const struct bt_uuid *uuid, struct net_buf *buf)
 }
 
 #if defined(CONFIG_BT_MAP_MCE)
-int bt_map_mce_mas_cb_register(struct bt_map_mce_mas *mce_mas, const struct bt_map_mce_mas_cb *cb)
-{
-	if (mce_mas == NULL || cb == NULL) {
-		return -EINVAL;
-	}
-
-	mce_mas->_cb = cb;
-
-	LOG_DBG("MCE MAS callbacks registered");
-	return 0;
-}
 
 static void mce_mas_clear_pending_request(struct bt_map_mce_mas *mce_mas)
 {
@@ -385,7 +375,7 @@ static void mce_mas_transport_connected(struct bt_conn *conn, struct bt_goep *go
 	LOG_DBG("MCE MAS transport connected");
 	atomic_set(&mce_mas->_transport_state, BT_MAP_TRANSPORT_STATE_CONNECTED);
 
-	if (mce_mas->_transport_type == MAP_TRANSPORT_TYPE_L2CAP) {
+	if (mce_mas->goep.v2 != NULL) {
 		if (mce_mas->_cb != NULL && mce_mas->_cb->l2cap_connected != NULL) {
 			mce_mas->_cb->l2cap_connected(conn, mce_mas);
 		}
@@ -405,7 +395,7 @@ static void mce_mas_transport_disconnected(struct bt_goep *goep)
 	atomic_set(&mce_mas->_state, BT_MAP_STATE_DISCONNECTED);
 	mce_mas_clear_pending_request(mce_mas);
 
-	if (mce_mas->_transport_type == MAP_TRANSPORT_TYPE_L2CAP) {
+	if (mce_mas->goep.v2 != NULL) {
 		if (mce_mas->_cb != NULL && mce_mas->_cb->l2cap_disconnected != NULL) {
 			mce_mas->_cb->l2cap_disconnected(mce_mas);
 		}
@@ -422,13 +412,16 @@ static struct bt_goep_transport_ops mce_mas_transport_ops = {
 };
 
 static int mce_mas_transport_connect(struct bt_conn *conn, struct bt_map_mce_mas *mce_mas,
-				     uint8_t type, uint16_t psm, uint8_t channel)
+				     const struct bt_map_mce_mas_cb *cb, uint8_t type, uint16_t psm,
+				     uint8_t channel)
 {
 	int err;
 
-	if (conn == NULL || mce_mas == NULL) {
+	if (conn == NULL || mce_mas == NULL || cb == NULL) {
 		return -EINVAL;
 	}
+
+	mce_mas->_cb = cb;
 
 	if (atomic_get(&mce_mas->_transport_state) != BT_MAP_TRANSPORT_STATE_DISCONNECTED) {
 		LOG_DBG("MCE MAS transport connect in progress");
@@ -436,7 +429,6 @@ static int mce_mas_transport_connect(struct bt_conn *conn, struct bt_map_mce_mas
 	}
 
 	LOG_DBG("MCE MAS transport connecting, type %u", type);
-	mce_mas->_transport_type = type;
 	mce_mas->goep.transport_ops = &mce_mas_transport_ops;
 	atomic_set(&mce_mas->_transport_state, BT_MAP_TRANSPORT_STATE_CONNECTING);
 
@@ -459,22 +451,23 @@ static int mce_mas_transport_connect(struct bt_conn *conn, struct bt_map_mce_mas
 }
 
 int bt_map_mce_mas_rfcomm_connect(struct bt_conn *conn, struct bt_map_mce_mas *mce_mas,
-				  uint8_t channel)
+				  const struct bt_map_mce_mas_cb *cb, uint8_t channel)
 {
 	if (channel == 0) {
 		return -EINVAL;
 	}
 
-	return mce_mas_transport_connect(conn, mce_mas, MAP_TRANSPORT_TYPE_RFCOMM, 0, channel);
+	return mce_mas_transport_connect(conn, mce_mas, cb, MAP_TRANSPORT_TYPE_RFCOMM, 0, channel);
 }
 
-int bt_map_mce_mas_l2cap_connect(struct bt_conn *conn, struct bt_map_mce_mas *mce_mas, uint16_t psm)
+int bt_map_mce_mas_l2cap_connect(struct bt_conn *conn, struct bt_map_mce_mas *mce_mas,
+				 const struct bt_map_mce_mas_cb *cb, uint16_t psm)
 {
 	if (psm == 0) {
 		return -EINVAL;
 	}
 
-	return mce_mas_transport_connect(conn, mce_mas, MAP_TRANSPORT_TYPE_L2CAP, psm, 0);
+	return mce_mas_transport_connect(conn, mce_mas, cb, MAP_TRANSPORT_TYPE_L2CAP, psm, 0);
 }
 
 static int mce_mas_transport_disconnect(struct bt_map_mce_mas *mce_mas, uint8_t type)
@@ -531,7 +524,9 @@ static void mce_mas_connect(struct bt_obex_client *client, uint8_t rsp_code, uin
 		err = bt_obex_get_header_conn_id(buf, &c->_conn_id);
 		if (err != 0) {
 			LOG_ERR("Failed to get connection ID: %d", err);
-			mce_mas_transport_disconnect(c, c->_transport_type);
+			mce_mas_transport_disconnect(c, c->goep.v2 != NULL
+								? MAP_TRANSPORT_TYPE_L2CAP
+								: MAP_TRANSPORT_TYPE_RFCOMM);
 		} else {
 			LOG_DBG("Connection ID: %u", c->_conn_id);
 		}
@@ -1008,6 +1003,7 @@ static int mce_mas_get_or_put(struct bt_map_mce_mas *mce_mas, bool is_get, const
 
 	if (!is_get && final && !bt_obex_has_header(buf, BT_OBEX_HEADER_ID_END_BODY)) {
 		LOG_ERR("OBEX header (End of Body) is missing");
+		err = -ENODATA;
 		goto failed;
 	}
 
@@ -1054,18 +1050,6 @@ MAP_MCE_MAS_API(true, GET_CONVO_LISTING, get_convo_listing)
 MAP_MCE_MAS_API(false, SET_NTF_FILTER, set_ntf_filter)
 
 /* MCE MNS Implementation */
-int bt_map_mce_mns_cb_register(struct bt_map_mce_mns *mce_mns, const struct bt_map_mce_mns_cb *cb)
-{
-	if (mce_mns == NULL || cb == NULL) {
-		return -EINVAL;
-	}
-
-	mce_mns->_cb = cb;
-
-	LOG_DBG("MCE MNS callbacks registered");
-	return 0;
-}
-
 static void mce_mns_clear_pending_request(struct bt_map_mce_mns *mce_mns)
 {
 	mce_mns->_opcode = 0;
@@ -1080,7 +1064,7 @@ static void mce_mns_transport_connected(struct bt_conn *conn, struct bt_goep *go
 	LOG_DBG("MCE MNS transport connected");
 	atomic_set(&mce_mns->_transport_state, BT_MAP_TRANSPORT_STATE_CONNECTED);
 
-	if (mce_mns->_transport_type == MAP_TRANSPORT_TYPE_L2CAP) {
+	if (mce_mns->goep.v2 != NULL) {
 		if (mce_mns->_cb != NULL && mce_mns->_cb->l2cap_connected != NULL) {
 			mce_mns->_cb->l2cap_connected(conn, mce_mns);
 		}
@@ -1094,19 +1078,13 @@ static void mce_mns_transport_connected(struct bt_conn *conn, struct bt_goep *go
 static void mce_mns_transport_disconnected(struct bt_goep *goep)
 {
 	struct bt_map_mce_mns *mce_mns = CONTAINER_OF(goep, struct bt_map_mce_mns, goep);
-	int err;
 
 	LOG_DBG("MCE MNS transport disconnected");
 	atomic_set(&mce_mns->_transport_state, BT_MAP_TRANSPORT_STATE_DISCONNECTED);
 	atomic_set(&mce_mns->_state, BT_MAP_STATE_DISCONNECTED);
 	mce_mns_clear_pending_request(mce_mns);
 
-	err = bt_obex_server_unregister(&mce_mns->_server);
-	if (err != 0) {
-		LOG_ERR("Failed to unregister obex server: %d", err);
-	}
-
-	if (mce_mns->_transport_type == MAP_TRANSPORT_TYPE_L2CAP) {
+	if (mce_mns->goep.v2 != NULL) {
 		if (mce_mns->_cb != NULL && mce_mns->_cb->l2cap_disconnected != NULL) {
 			mce_mns->_cb->l2cap_disconnected(mce_mns);
 		}
@@ -1223,7 +1201,7 @@ static enum bt_obex_rsp_code mce_mns_get_req_cb(struct bt_map_mce_mns *mce_mns, 
 			continue;
 		}
 
-		if (!has_required_app_params(buf, &map_mas_functions[i].ap)) {
+		if (!has_required_app_params(buf, &map_mns_functions[i].ap)) {
 			continue;
 		}
 
@@ -1312,11 +1290,34 @@ static const struct bt_obex_server_ops mce_mns_ops = {
 	.action = NULL,
 };
 
+int bt_map_mce_mns_register(struct bt_map_mce_mns *mce_mns, const struct bt_map_mce_mns_cb *cb)
+{
+	int err;
+
+	if (mce_mns == NULL || cb == NULL) {
+		return -EINVAL;
+	}
+
+	mce_mns->_cb = cb;
+	mce_mns->_server.ops = &mce_mns_ops;
+	mce_mns->_server.obex = &mce_mns->goep.obex;
+	mce_mns->_conn_id = map_get_connect_id();
+
+	err = bt_obex_server_register(&mce_mns->_server, map_mns_uuid);
+	if (err != 0) {
+		LOG_ERR("Failed to register MCE MNS obex server: %d", err);
+		return err;
+	}
+
+	LOG_DBG("MCE MNS registered");
+	return 0;
+}
+
 #define MNS_RFCOMM_SERVER(server) CONTAINER_OF(server, struct bt_map_mce_mns_rfcomm_server, server)
 #define MNS_L2CAP_SERVER(server)  CONTAINER_OF(server, struct bt_map_mce_mns_l2cap_server, server)
 static int mce_mns_accept(struct bt_conn *conn, void *server, uint8_t type, struct bt_goep **goep)
 {
-	struct bt_map_mce_mns *mce_mns;
+	struct bt_map_mce_mns *mce_mns = NULL;
 	int err;
 
 	LOG_DBG("MCE MNS %s accept", type == MAP_TRANSPORT_TYPE_RFCOMM ? "RFCOMM" : "L2CAP");
@@ -1344,25 +1345,13 @@ static int mce_mns_accept(struct bt_conn *conn, void *server, uint8_t type, stru
 		return err;
 	}
 
-	if (mce_mns == NULL || mce_mns->_cb == NULL) {
-		LOG_WRN("Invalid parameter");
-		return -EINVAL;
-	}
+	__ASSERT(mce_mns != NULL && mce_mns->_cb != NULL, "Invalid mce_mns instance or callback");
 
-	mce_mns->_transport_type = type;
 	mce_mns->goep.transport_ops = &mce_mns_transport_ops;
 	if (type == MAP_TRANSPORT_TYPE_RFCOMM) {
 		BT_GOEP_INIT_V1(&mce_mns->goep, &mce_mns->goep_transport.v1);
 	} else {
 		BT_GOEP_INIT_V2(&mce_mns->goep, &mce_mns->goep_transport.v2);
-	}
-	mce_mns->_server.ops = &mce_mns_ops;
-	mce_mns->_server.obex = &mce_mns->goep.obex;
-	mce_mns->_conn_id = map_get_connect_id();
-	err = bt_obex_server_register(&mce_mns->_server, map_mns_uuid);
-	if (err != 0) {
-		LOG_ERR("Failed to register obex server: %d", err);
-		return err;
 	}
 	*goep = &mce_mns->goep;
 	atomic_set(&mce_mns->_transport_state, BT_MAP_TRANSPORT_STATE_CONNECTING);
@@ -1610,18 +1599,6 @@ int bt_map_mce_mns_send_event(struct bt_map_mce_mns *mce_mns, uint8_t rsp_code, 
 #endif /* CONFIG_BT_MAP_MCE */
 
 #if defined(CONFIG_BT_MAP_MSE)
-int bt_map_mse_mas_cb_register(struct bt_map_mse_mas *mse_mas, const struct bt_map_mse_mas_cb *cb)
-{
-	if (mse_mas == NULL || cb == NULL) {
-		return -EINVAL;
-	}
-
-	mse_mas->_cb = cb;
-
-	LOG_DBG("MSE MAS callbacks registered");
-	return 0;
-}
-
 static void mse_mas_clear_pending_request(struct bt_map_mse_mas *mse_mas)
 {
 	mse_mas->_opcode = 0;
@@ -1636,7 +1613,7 @@ static void mse_mas_transport_connected(struct bt_conn *conn, struct bt_goep *go
 	LOG_DBG("MSE MAS transport connected");
 	atomic_set(&mse_mas->_transport_state, BT_MAP_TRANSPORT_STATE_CONNECTED);
 
-	if (mse_mas->_transport_type == MAP_TRANSPORT_TYPE_L2CAP) {
+	if (mse_mas->goep.v2 != NULL) {
 		if (mse_mas->_cb != NULL && mse_mas->_cb->l2cap_connected != NULL) {
 			mse_mas->_cb->l2cap_connected(conn, mse_mas);
 		}
@@ -1650,19 +1627,13 @@ static void mse_mas_transport_connected(struct bt_conn *conn, struct bt_goep *go
 static void mse_mas_transport_disconnected(struct bt_goep *goep)
 {
 	struct bt_map_mse_mas *mse_mas = CONTAINER_OF(goep, struct bt_map_mse_mas, goep);
-	int err;
 
 	LOG_DBG("MSE MAS transport disconnected");
 	atomic_set(&mse_mas->_transport_state, BT_MAP_TRANSPORT_STATE_DISCONNECTED);
 	atomic_set(&mse_mas->_state, BT_MAP_STATE_DISCONNECTED);
 	mse_mas_clear_pending_request(mse_mas);
 
-	err = bt_obex_server_unregister(&mse_mas->_server);
-	if (err != 0) {
-		LOG_ERR("Failed to unregister obex server: %d", err);
-	}
-
-	if (mse_mas->_transport_type == MAP_TRANSPORT_TYPE_L2CAP) {
+	if (mse_mas->goep.v2 != NULL) {
 		if (mse_mas->_cb != NULL && mse_mas->_cb->l2cap_disconnected != NULL) {
 			mse_mas->_cb->l2cap_disconnected(mse_mas);
 		}
@@ -1921,11 +1892,34 @@ static const struct bt_obex_server_ops mse_mas_ops = {
 	.action = NULL,
 };
 
+int bt_map_mse_mas_register(struct bt_map_mse_mas *mse_mas, const struct bt_map_mse_mas_cb *cb)
+{
+	int err;
+
+	if (mse_mas == NULL || cb == NULL) {
+		return -EINVAL;
+	}
+
+	mse_mas->_cb = cb;
+	mse_mas->_server.ops = &mse_mas_ops;
+	mse_mas->_server.obex = &mse_mas->goep.obex;
+	mse_mas->_conn_id = map_get_connect_id();
+
+	err = bt_obex_server_register(&mse_mas->_server, map_mas_uuid);
+	if (err != 0) {
+		LOG_ERR("Failed to register MSE MAS obex server: %d", err);
+		return err;
+	}
+
+	LOG_DBG("MSE MAS registered");
+	return 0;
+}
+
 #define MAS_RFCOMM_SERVER(server) CONTAINER_OF(server, struct bt_map_mse_mas_rfcomm_server, server)
 #define MAS_L2CAP_SERVER(server)  CONTAINER_OF(server, struct bt_map_mse_mas_l2cap_server, server)
 static int mse_mas_accept(struct bt_conn *conn, void *server, uint8_t type, struct bt_goep **goep)
 {
-	struct bt_map_mse_mas *mse_mas;
+	struct bt_map_mse_mas *mse_mas = NULL;
 	int err;
 
 	LOG_DBG("MSE MAS %s accept", type == MAP_TRANSPORT_TYPE_RFCOMM ? "RFCOMM" : "L2CAP");
@@ -1953,25 +1947,13 @@ static int mse_mas_accept(struct bt_conn *conn, void *server, uint8_t type, stru
 		return err;
 	}
 
-	if (mse_mas == NULL || mse_mas->_cb == NULL) {
-		LOG_WRN("Invalid parameter");
-		return -EINVAL;
-	}
+	__ASSERT(mse_mas != NULL && mse_mas->_cb != NULL, "Invalid mse_mas instance or callback");
 
-	mse_mas->_transport_type = type;
 	mse_mas->goep.transport_ops = &mse_mas_transport_ops;
 	if (type == MAP_TRANSPORT_TYPE_RFCOMM) {
 		BT_GOEP_INIT_V1(&mse_mas->goep, &mse_mas->goep_transport.v1);
 	} else {
 		BT_GOEP_INIT_V2(&mse_mas->goep, &mse_mas->goep_transport.v2);
-	}
-	mse_mas->_server.ops = &mse_mas_ops;
-	mse_mas->_server.obex = &mse_mas->goep.obex;
-	mse_mas->_conn_id = map_get_connect_id();
-	err = bt_obex_server_register(&mse_mas->_server, map_mas_uuid);
-	if (err != 0) {
-		LOG_ERR("Failed to register obex server: %d", err);
-		return err;
 	}
 	*goep = &mse_mas->goep;
 	atomic_set(&mse_mas->_transport_state, BT_MAP_TRANSPORT_STATE_CONNECTING);
@@ -2263,18 +2245,6 @@ MAP_MSE_MAS_API(true, GET_CONVO_LISTING, get_convo_listing)
 MAP_MSE_MAS_API(false, SET_NTF_FILTER, set_ntf_filter)
 
 /* MSE MNS Implementation */
-int bt_map_mse_mns_cb_register(struct bt_map_mse_mns *mse_mns, const struct bt_map_mse_mns_cb *cb)
-{
-	if (mse_mns == NULL || cb == NULL) {
-		return -EINVAL;
-	}
-
-	mse_mns->_cb = cb;
-
-	LOG_DBG("MSE MNS callbacks registered");
-	return 0;
-}
-
 static void mse_mns_clear_pending_request(struct bt_map_mse_mns *mse_mns)
 {
 	mse_mns->_rsp_cb = NULL;
@@ -2288,7 +2258,7 @@ static void mse_mns_transport_connected(struct bt_conn *conn, struct bt_goep *go
 	LOG_DBG("MSE MNS transport connected");
 	atomic_set(&mse_mns->_transport_state, BT_MAP_TRANSPORT_STATE_CONNECTED);
 
-	if (mse_mns->_transport_type == MAP_TRANSPORT_TYPE_L2CAP) {
+	if (mse_mns->goep.v2 != NULL) {
 		if (mse_mns->_cb != NULL && mse_mns->_cb->l2cap_connected != NULL) {
 			mse_mns->_cb->l2cap_connected(conn, mse_mns);
 		}
@@ -2308,7 +2278,7 @@ static void mse_mns_transport_disconnected(struct bt_goep *goep)
 	atomic_set(&mse_mns->_state, BT_MAP_STATE_DISCONNECTED);
 	mse_mns_clear_pending_request(mse_mns);
 
-	if (mse_mns->_transport_type == MAP_TRANSPORT_TYPE_L2CAP) {
+	if (mse_mns->goep.v2 != NULL) {
 		if (mse_mns->_cb != NULL && mse_mns->_cb->l2cap_disconnected != NULL) {
 			mse_mns->_cb->l2cap_disconnected(mse_mns);
 		}
@@ -2325,13 +2295,16 @@ static struct bt_goep_transport_ops mse_mns_transport_ops = {
 };
 
 static int mse_mns_transport_connect(struct bt_conn *conn, struct bt_map_mse_mns *mse_mns,
-				     uint8_t type, uint16_t psm, uint8_t channel)
+				     const struct bt_map_mse_mns_cb *cb, uint8_t type, uint16_t psm,
+				     uint8_t channel)
 {
 	int err;
 
-	if (conn == NULL || mse_mns == NULL) {
+	if (conn == NULL || mse_mns == NULL || cb == NULL) {
 		return -EINVAL;
 	}
+
+	mse_mns->_cb = cb;
 
 	if (atomic_get(&mse_mns->_transport_state) != BT_MAP_TRANSPORT_STATE_DISCONNECTED) {
 		LOG_DBG("MSE MNS transport connect in progress");
@@ -2339,7 +2312,6 @@ static int mse_mns_transport_connect(struct bt_conn *conn, struct bt_map_mse_mns
 	}
 
 	LOG_DBG("MSE MNS transport connecting, type %u", type);
-	mse_mns->_transport_type = type;
 	mse_mns->goep.transport_ops = &mse_mns_transport_ops;
 	atomic_set(&mse_mns->_transport_state, BT_MAP_TRANSPORT_STATE_CONNECTING);
 
@@ -2362,22 +2334,23 @@ static int mse_mns_transport_connect(struct bt_conn *conn, struct bt_map_mse_mns
 }
 
 int bt_map_mse_mns_rfcomm_connect(struct bt_conn *conn, struct bt_map_mse_mns *mse_mns,
-				  uint8_t channel)
+				  const struct bt_map_mse_mns_cb *cb, uint8_t channel)
 {
 	if (channel == 0) {
 		return -EINVAL;
 	}
 
-	return mse_mns_transport_connect(conn, mse_mns, MAP_TRANSPORT_TYPE_RFCOMM, 0, channel);
+	return mse_mns_transport_connect(conn, mse_mns, cb, MAP_TRANSPORT_TYPE_RFCOMM, 0, channel);
 }
 
-int bt_map_mse_mns_l2cap_connect(struct bt_conn *conn, struct bt_map_mse_mns *mse_mns, uint16_t psm)
+int bt_map_mse_mns_l2cap_connect(struct bt_conn *conn, struct bt_map_mse_mns *mse_mns,
+				 const struct bt_map_mse_mns_cb *cb, uint16_t psm)
 {
 	if (psm == 0) {
 		return -EINVAL;
 	}
 
-	return mse_mns_transport_connect(conn, mse_mns, MAP_TRANSPORT_TYPE_L2CAP, psm, 0);
+	return mse_mns_transport_connect(conn, mse_mns, cb, MAP_TRANSPORT_TYPE_L2CAP, psm, 0);
 }
 
 static int mse_mns_transport_disconnect(struct bt_map_mse_mns *mse_mns, uint8_t type)
@@ -2434,7 +2407,9 @@ static void mse_mns_connect(struct bt_obex_client *client, uint8_t rsp_code, uin
 		err = bt_obex_get_header_conn_id(buf, &c->_conn_id);
 		if (err != 0) {
 			LOG_ERR("Failed to get connection ID: %d", err);
-			mse_mns_transport_disconnect(c, c->_transport_type);
+			mse_mns_transport_disconnect(c, c->goep.v2 != NULL
+								? MAP_TRANSPORT_TYPE_L2CAP
+								: MAP_TRANSPORT_TYPE_RFCOMM);
 		} else {
 			LOG_DBG("Connection ID: %u", c->_conn_id);
 		}
@@ -2818,6 +2793,7 @@ static int mse_mns_get_or_put(struct bt_map_mse_mns *mse_mns, bool is_get, const
 
 	if (!is_get && final && !bt_obex_has_header(buf, BT_OBEX_HEADER_ID_END_BODY)) {
 		LOG_ERR("OBEX header (End of Body) is missing");
+		err = -ENODATA;
 		goto failed;
 	}
 

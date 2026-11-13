@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef ZEPHYR_INCLUDE_XTENSA_STRUCTS_H_
-#define ZEPHYR_INCLUDE_XTENSA_STRUCTS_H_
+#ifndef ZEPHYR_INCLUDE_ARCH_XTENSA_STRUCTS_H_
+#define ZEPHYR_INCLUDE_ARCH_XTENSA_STRUCTS_H_
 
 /* Per CPU architecture specifics */
 struct _cpu_arch {
@@ -15,9 +15,11 @@ struct _cpu_arch {
 	atomic_ptr_val_t save_hifi;  /* Save HiFi on IPI if match hifi_owner */
 #endif
 #elif defined(__cplusplus)
-	/* Ensure this struct does not have a size of 0 which is not allowed in C++. */
+	/* An empty struct is not valid C, and compilers that accept it give
+	 * it size 0 while C++ gives 1. Keep a byte so both languages agree.
+	 */
 	uint8_t dummy;
 #endif
 };
 
-#endif /* ZEPHYR_INCLUDE_XTENSA_STRUCTS_H_ */
+#endif /* ZEPHYR_INCLUDE_ARCH_XTENSA_STRUCTS_H_ */

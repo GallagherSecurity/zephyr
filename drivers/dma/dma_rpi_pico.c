@@ -219,6 +219,9 @@ static int dma_rpi_pico_reload(const struct device *dev, uint32_t ch, uint32_t s
 		return -EBUSY;
 	}
 
+	dma_irqn_acknowledge_channel(dma_rpi_pico_channel_irq(dev, ch), ch);
+	dma_irqn_set_channel_enabled(dma_rpi_pico_channel_irq(dev, ch), ch, true);
+
 	data->channels[ch].source_address = (void *)src;
 	data->channels[ch].dest_address = (void *)dst;
 	data->channels[ch].block_size = size;
@@ -238,6 +241,10 @@ static int dma_rpi_pico_start(const struct device *dev, uint32_t ch)
 	if (ch >= cfg->channels) {
 		LOG_ERR("start channel must be < %" PRIu32 " (%" PRIu32 ")", cfg->channels, ch);
 		return -EINVAL;
+	}
+
+	if (dma_channel_is_busy(ch)) {
+		return 0;
 	}
 
 	dma_irqn_acknowledge_channel(dma_rpi_pico_channel_irq(dev, ch), ch);
@@ -319,9 +326,10 @@ static void dma_rpi_pico_isr(const struct device *dev)
 {
 	const struct dma_rpi_pico_config *cfg = dev->config;
 	struct dma_rpi_pico_data *data = dev->data;
-	int err = 0;
 
 	for (uint32_t i = 0; i < cfg->channels; i++) {
+		int err = 0;
+
 		if (!dma_irqn_get_channel_status(dma_rpi_pico_channel_irq(dev, i), i)) {
 			continue;
 		}

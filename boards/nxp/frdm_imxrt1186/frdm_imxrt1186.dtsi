@@ -132,6 +132,14 @@
 	status = "okay";
 };
 
+&tstmr1 {
+	status = "okay";
+};
+
+&tstmr2 {
+	status = "okay";
+};
+
 &flexcan1 {
 	status = "okay";
 	pinctrl-0 = <&pinmux_flexcan1>;
@@ -153,6 +161,18 @@ p3t1755dp_ard_i2c_interface: &lpi2c3 {};
 
 &systick {
 	status = "okay";
+};
+
+&flexspi {
+	/*
+	 * FlexSPI1 is configured by the Boot ROM for HyperRAM (via XMCD).
+	 * Reinitializing the controller overwrites the Boot ROM configuration
+	 * and makes HyperRAM inaccessible. Enable this node via an overlay only
+	 * when the application explicitly manages FlexSPI1 initialization, or
+	 * when CM7 executes XIP from HyperRAM (the XIP guard preserves the
+	 * Boot ROM configuration in that case).
+	 */
+	status = "disabled";
 };
 
 &flexspi2 {
@@ -259,7 +279,7 @@ p3t1755dp_ard_i2c_interface: &lpi2c3 {};
 
 /* Internal port */
 &enetc_psi1 {
-	local-mac-address = [00 00 00 01 03 00];
+	zephyr,random-mac-address;
 	status = "okay";
 };
 
@@ -272,7 +292,7 @@ p3t1755dp_ard_i2c_interface: &lpi2c3 {};
 };
 
 &switch_port0 {
-	local-mac-address = [00 00 00 01 05 00];
+	zephyr,random-mac-address;
 	pinctrl-0 = <&eth0_default>;
 	pinctrl-names = "default";
 	phy-handle = <&phy0>;
@@ -281,7 +301,7 @@ p3t1755dp_ard_i2c_interface: &lpi2c3 {};
 };
 
 &switch_port2 {
-	local-mac-address = [00 00 00 01 07 00];
+	zephyr,random-mac-address;
 	pinctrl-0 = <&eth2_default>;
 	pinctrl-names = "default";
 	phy-handle = <&phy2>;
@@ -291,7 +311,11 @@ p3t1755dp_ard_i2c_interface: &lpi2c3 {};
 
 /* Internal port connecting switch to CPU */
 &switch_port4 {
-	local-mac-address = [00 00 00 01 08 00];
+	zephyr,random-mac-address;
+	status = "okay";
+};
+
+&dac {
 	status = "okay";
 };
 

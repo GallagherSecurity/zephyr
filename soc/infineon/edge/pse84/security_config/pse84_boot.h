@@ -1,6 +1,6 @@
 /*
- * SPDX-FileCopyrightText: <text>Copyright (c) 2026 Infineon Technologies AG,
- * or an affiliate of Infineon Technologies AG. All rights reserved.</text>
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Infineon Technologies AG,
+ * SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -11,10 +11,10 @@
 #include <cy_sysint.h>
 #include <system_edge.h>
 #include "pse84_s_sau.h"
-#include "cy_pdl.h"
+#include <cy_pdl.h>
 
 #if defined(CONFIG_SOC_PSE84_M55_ENABLE)
-#include "partition_ARMCM33.h"
+#include <partition_ARMCM33.h>
 #include <zephyr/drivers/timer/system_timer.h>
 
 #include "pse84_s_system.h"

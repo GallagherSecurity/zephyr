@@ -48,7 +48,7 @@ def test_warnings(caplog):
 
     enums_hpath = hpath('test-bindings/enums.yaml')
     expected_warnings = [
-        f"'oldprop' is marked as deprecated in 'properties:' in '{hpath('test-bindings/deprecated.yaml')}' for node /test-deprecated.",
+        f"'oldprop' is marked as deprecated in 'properties:' in '{hpath('test-bindings/deprecated.yaml')}' for node /test-deprecated (set in /test-deprecated).",
         "unit address and first address in 'reg' (0x1) don't match for /reg-zero-size-cells/node",
         "unit address and first address in 'reg' (0x5) don't match for /reg-ranges/parent/node",
         "unit address and first address in 'reg' (0x30000000200000001) don't match for /reg-nested-ranges/grandparent/parent/node",
@@ -395,6 +395,41 @@ def test_include():
                  ['foo', 'bar', 'baz', 'qaz'],
                  ['int', 'int', 'int', 'int'],
                  [0, 1, 2, 3])
+
+def test_class_merge():
+    '''Test the union merge of the 'class:' key across includes.'''
+    fname2path = {'class-base-1.yaml': 'test-bindings-include/class-base-1.yaml',
+                  'class-base-2.yaml': 'test-bindings-include/class-base-2.yaml'}
+
+    with from_here():
+        binding = edtlib.Binding('test-bindings-include/class-base-1.yaml', {})
+    assert binding.classes == ['class-a']
+
+    with from_here():
+        binding = edtlib.Binding('test-bindings-include/class-base-2.yaml', {})
+    assert binding.classes == ['class-b', 'class-a']
+
+    # The including binding's own 'class:' comes first, then the included
+    # bindings' classes in include order, without duplicates.
+    with from_here():
+        binding = edtlib.Binding('test-bindings-include/class-union.yaml',
+                                 fname2path)
+    assert binding.classes == ['class-c', 'class-a', 'class-b']
+
+    # The union also applies at child-binding roots.
+    with from_here():
+        binding = edtlib.Binding(
+            'test-bindings-include/class-child-union.yaml',
+            {'class-child-base.yaml':
+             'test-bindings-include/class-child-base.yaml'})
+    assert binding.classes == []
+    assert binding.child_binding.classes == ['class-child-b', 'class-child-a']
+
+    # Malformed names and duplicates are rejected.
+    for fname in ('class-bad-name.yaml', 'class-dup.yaml'):
+        with from_here():
+            with pytest.raises(edtlib.EDTError):
+                edtlib.Binding(f'test-bindings-include/{fname}', {})
 
 def test_include_filters():
     '''Test property-allowlist and property-blocklist in an include.'''
@@ -767,6 +802,19 @@ def test_props():
     verify_phandle_array_prop(props_node,
                               'bar-io-channels',
                               [(ctrl_2, {'io-channel-one': 2})])
+
+def test_cpu_props_fallback_from_cpus_node():
+    """CPU property lookup falls back to parent /cpus when missing on cpu@N."""
+    with from_here():
+        edt = edtlib.EDT("test.dts", ["test-bindings"])
+
+    cpu0 = edt.get_node("/cpus/cpu@0")
+    cpu1 = edt.get_node("/cpus/cpu@1")
+
+    # Inherited from /cpus.
+    assert cpu0.props["clock-frequency"].val == 1000
+    # CPU-local value takes precedence.
+    assert cpu1.props["clock-frequency"].val == 2000
 
 def test_nexus():
     '''Test <prefix>-map via gpio-map (the most common case).'''
@@ -1447,7 +1495,7 @@ def test_dependencies():
     assert edt.get_node("/in-dir-1") in edt.get_node("/").required_by
 
 def test_child_dependencies():
-    '''Test dependencies relashionship with child nodes propagated to parent'''
+    '''Test dependencies relationship with child nodes propagated to parent'''
     with from_here():
         edt = edtlib.EDT("test.dts", ["test-bindings"])
 
@@ -1459,6 +1507,32 @@ def test_child_dependencies():
     assert edt.get_node("/child-binding") in dep_node.required_by
     assert edt.get_node("/child-binding/child-1/grandchild") in dep_node.required_by
     assert edt.get_node("/child-binding/child-2") in dep_node.required_by
+
+def test_dependency_mode():
+    '''Test dependency relations affected by dependency-mode in bindings.'''
+    with from_here():
+        edt = edtlib.EDT("test.dts", ["test-bindings"])
+
+    target = edt.get_node("/dependency-mode-target")
+    normal = edt.get_node("/dependency-mode-normal")
+    reverse = edt.get_node("/dependency-mode-reverse")
+    ignore = edt.get_node("/dependency-mode-ignore")
+    child_ignore = edt.get_node("/dependency-mode-child-ignore")
+    local_child = edt.get_node("/dependency-mode-child-ignore/local-child")
+
+    assert target in normal.depends_on
+    assert normal in target.required_by
+
+    assert reverse in target.depends_on
+    assert target in reverse.required_by
+
+    assert target not in ignore.depends_on
+    assert ignore not in target.required_by
+
+    assert local_child not in child_ignore.depends_on
+    assert child_ignore not in local_child.required_by
+    assert target in child_ignore.depends_on
+    assert child_ignore in target.required_by
 
 def test_slice_errs(tmp_path):
     '''Test error messages from the internal _slice() helper'''

@@ -109,7 +109,9 @@ static ATOMIC_DEFINE(adv_opt, SHELL_ADV_OPT_NUM);
 #if defined(CONFIG_BT_EXT_ADV)
 uint8_t selected_adv;
 struct bt_le_ext_adv *adv_sets[CONFIG_BT_EXT_ADV_MAX_ADV_SET];
-static ATOMIC_DEFINE(adv_set_opt, SHELL_ADV_OPT_NUM)[CONFIG_BT_EXT_ADV_MAX_ADV_SET];
+static ATOMIC_DEFINE(adv_set_opt[CONFIG_BT_EXT_ADV_MAX_ADV_SET], SHELL_ADV_OPT_NUM);
+BUILD_ASSERT(ARRAY_SIZE(adv_set_opt) == CONFIG_BT_EXT_ADV_MAX_ADV_SET,
+	     "adv_set_opt must have one bitmap per advertising set");
 #endif /* CONFIG_BT_EXT_ADV */
 #endif /* CONFIG_BT_BROADCASTER */
 
@@ -572,6 +574,17 @@ static void scan_recv(const struct bt_le_scan_recv_info *info, struct net_buf_si
 		       info->interval, BT_CONN_INTERVAL_TO_US(info->interval),
 		       info->sid);
 
+	if (info->direct_addr != NULL) {
+		const char *unresolved = "";
+
+		if (info->direct_addr->type == BT_ADDR_LE_UNRESOLVED) {
+			unresolved = " [unresolved]";
+		}
+
+		bt_shell_print("%*sDirected to %s%s", (int)strlen(scan_response_label), "",
+			       bt_addr_le_str(info->direct_addr), unresolved);
+	}
+
 	if (scan_verbose_output) {
 		bt_shell_info("%*s[SCAN DATA START - %s]",
 			      (int)strlen(scan_response_label), "",
@@ -744,10 +757,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
 
 done:
 	/* clear connection reference for sec mode 3 pairing */
-	if (pairing_conn) {
-		bt_conn_unref(pairing_conn);
-		pairing_conn = NULL;
-	}
+	bt_conn_drop(&pairing_conn);
 }
 
 static void disconnected_set_new_default_conn_cb(struct bt_conn *conn, void *user_data)
@@ -788,8 +798,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		if (err != 0) {
 			bt_shell_error("Unable to get info: conn %p (err %d)", conn, err);
 		}
-		bt_conn_unref(default_conn);
-		default_conn = NULL;
+		bt_conn_drop(&default_conn);
 
 		if (err == 0) {
 			/* If we are connected to other devices, set one of them as default */
@@ -1275,81 +1284,6 @@ static struct bt_le_ext_adv_cb adv_callbacks = {
 #endif /* CONFIG_BT_BROADCASTER */
 #endif /* CONFIG_BT_EXT_ADV */
 
-#if defined(CONFIG_BT_PER_ADV_SYNC)
-struct bt_le_per_adv_sync *per_adv_syncs[CONFIG_BT_PER_ADV_SYNC_MAX];
-size_t selected_per_adv_sync;
-
-static void per_adv_sync_sync_cb(struct bt_le_per_adv_sync *sync,
-				 struct bt_le_per_adv_sync_synced_info *info)
-{
-	bt_shell_print("PER_ADV_SYNC[%u]: [DEVICE]: %s synced, "
-		       "Interval 0x%04x (%u us), PHY %s, SD 0x%04X, PAST peer %s",
-		       bt_le_per_adv_sync_get_index(sync), bt_addr_le_str(info->addr),
-		       info->interval, BT_CONN_INTERVAL_TO_US(info->interval),
-		       phy2str(info->phy), info->service_data,
-		       info->conn != NULL ? bt_conn_dst_str(info->conn) : "not present");
-
-	if (info->conn) { /* if from PAST */
-		for (int i = 0; i < ARRAY_SIZE(per_adv_syncs); i++) {
-			if (!per_adv_syncs[i]) {
-				per_adv_syncs[i] = sync;
-				break;
-			}
-		}
-	}
-}
-
-static void per_adv_sync_terminated_cb(
-	struct bt_le_per_adv_sync *sync,
-	const struct bt_le_per_adv_sync_term_info *info)
-{
-	for (int i = 0; i < ARRAY_SIZE(per_adv_syncs); i++) {
-		if (per_adv_syncs[i] == sync) {
-			per_adv_syncs[i] = NULL;
-			break;
-		}
-	}
-
-	bt_shell_print("PER_ADV_SYNC[%u]: [DEVICE]: %s sync terminated",
-		       bt_le_per_adv_sync_get_index(sync), bt_addr_le_str(info->addr));
-}
-
-static void per_adv_sync_recv_cb(
-	struct bt_le_per_adv_sync *sync,
-	const struct bt_le_per_adv_sync_recv_info *info,
-	struct net_buf_simple *buf)
-{
-	bt_shell_print("PER_ADV_SYNC[%u]: [DEVICE]: %s, tx_power %i, "
-		       "RSSI %i, CTE %u, data length %u",
-		       bt_le_per_adv_sync_get_index(sync),
-		       bt_addr_le_str(info->addr), info->tx_power,
-		       info->rssi, info->cte_type, buf->len);
-}
-
-static void per_adv_sync_biginfo_cb(struct bt_le_per_adv_sync *sync,
-				    const struct bt_iso_biginfo *biginfo)
-{
-	bt_shell_print("BIG_INFO PER_ADV_SYNC[%u]: [DEVICE]: %s, sid 0x%02x, num_bis %u, "
-		       "nse 0x%02x, interval 0x%04x (%u us), bn 0x%02x, pto 0x%02x, irc 0x%02x, "
-		       "max_pdu 0x%04x, sdu_interval 0x%04x, max_sdu 0x%04x, phy %s, framing 0x%02x, "
-		       "%sencrypted",
-		       bt_le_per_adv_sync_get_index(sync),
-		       bt_addr_le_str(biginfo->addr), biginfo->sid, biginfo->num_bis,
-		       biginfo->sub_evt_count, biginfo->iso_interval,
-		       BT_CONN_INTERVAL_TO_US(biginfo->iso_interval), biginfo->burst_number,
-		       biginfo->offset, biginfo->rep_count, biginfo->max_pdu, biginfo->sdu_interval,
-		       biginfo->max_sdu, phy2str(biginfo->phy), biginfo->framing,
-		       biginfo->encryption ? "" : "not ");
-}
-
-static struct bt_le_per_adv_sync_cb per_adv_sync_cb = {
-	.synced = per_adv_sync_sync_cb,
-	.term = per_adv_sync_terminated_cb,
-	.recv = per_adv_sync_recv_cb,
-	.biginfo = per_adv_sync_biginfo_cb,
-};
-#endif /* CONFIG_BT_PER_ADV_SYNC */
-
 static void bt_ready(int err)
 {
 	if (err) {
@@ -1375,10 +1309,6 @@ static void bt_ready(int err)
 #if defined(CONFIG_BT_CONN)
 	default_conn = NULL;
 #endif /* CONFIG_BT_CONN */
-
-#if defined(CONFIG_BT_PER_ADV_SYNC)
-	bt_le_per_adv_sync_cb_register(&per_adv_sync_cb);
-#endif /* CONFIG_BT_PER_ADV_SYNC */
 
 #if defined(CONFIG_BT_SMP)
 	bt_conn_auth_info_cb_register(&auth_info_cb);
@@ -1418,7 +1348,15 @@ static int cmd_init(const struct shell *sh, size_t argc, char *argv[])
 
 static int cmd_disable(const struct shell *sh, size_t argc, char *argv[])
 {
-	return bt_disable();
+	int err;
+
+	err = bt_disable();
+	if (err != 0) {
+		shell_error(sh, "Bluetooth disable failed (err %d)", err);
+		return -ENOEXEC;
+	}
+
+	return 0;
 }
 
 #ifdef CONFIG_SETTINGS
@@ -1548,9 +1486,10 @@ static int cmd_id_create(const struct shell *sh, size_t argc, char *argv[])
 	int err;
 
 	if (argc > 1) {
-		err = bt_addr_le_from_str(argv[1], "random", &addr);
+		err = bt_addr_le_from_str(argv[1], &addr);
 		if (err) {
 			shell_error(sh, "Invalid address");
+			return err;
 		}
 	} else {
 		bt_addr_le_copy(&addr, BT_ADDR_LE_ANY);
@@ -1581,7 +1520,7 @@ static int cmd_id_reset(const struct shell *sh, size_t argc, char *argv[])
 	id = strtol(argv[1], NULL, 10);
 
 	if (argc > 2) {
-		err = bt_addr_le_from_str(argv[2], "random", &addr);
+		err = bt_addr_le_from_str(argv[2], &addr);
 		if (err) {
 			shell_print(sh, "Invalid address");
 			return err;
@@ -1743,7 +1682,7 @@ static int cmd_scan_off(const struct shell *sh)
 static int cmd_scan(const struct shell *sh, size_t argc, char *argv[])
 {
 	struct sys_getopt_state *state = sys_getopt_state_get();
-	enum { TIMEOUT, INTERVAL, WINDOW, FILTER_DUPS, FAL, CODED, NO_1M };
+	enum { TIMEOUT, INTERVAL, WINDOW, FILTER_DUPS, FAL, CODED, NO_1M, EXT_FILTER_POLICY };
 	static const struct sys_getopt_option long_options[] = {
 		{ "timeout", sys_getopt_required_argument, NULL, TIMEOUT },
 		{ "interval", sys_getopt_required_argument, NULL, INTERVAL },
@@ -1752,6 +1691,7 @@ static int cmd_scan(const struct shell *sh, size_t argc, char *argv[])
 		{ "fal", sys_getopt_no_argument, NULL, FAL },
 		{ "coded", sys_getopt_no_argument, NULL, CODED },
 		{ "no-1m", sys_getopt_no_argument, NULL, NO_1M },
+		{ "ext-filter-policy", sys_getopt_no_argument, NULL, EXT_FILTER_POLICY },
 		{ "help", sys_getopt_no_argument, NULL, 'h' },
 		{},
 	};
@@ -1802,6 +1742,9 @@ static int cmd_scan(const struct shell *sh, size_t argc, char *argv[])
 			break;
 		case NO_1M:
 			options |= BT_LE_SCAN_OPT_NO_1M;
+			break;
+		case EXT_FILTER_POLICY:
+			options |= BT_LE_SCAN_OPT_EXT_FILTER_POLICY;
 			break;
 		case 'h':
 			shell_help(sh);
@@ -2288,14 +2231,15 @@ static int cmd_directed_adv(const struct shell *sh,
 	bt_addr_le_t addr;
 	struct bt_le_adv_param param;
 
-	err = bt_addr_le_from_str(argv[1], argv[2], &addr);
-	param = *BT_LE_ADV_CONN_DIR(&addr);
+	err = bt_addr_le_from_str(argv[1], &addr);
 	if (err) {
 		shell_error(sh, "Invalid peer address (err %d)", err);
 		return err;
 	}
 
-	for (size_t argn = 3; argn < argc; argn++) {
+	param = *BT_LE_ADV_CONN_DIR(&addr);
+
+	for (size_t argn = 2; argn < argc; argn++) {
 		const char *arg = argv[argn];
 
 		if (!strcmp(arg, "low")) {
@@ -2387,16 +2331,16 @@ static bool parse_and_set_adv_param(size_t argc, char *argv[], struct bt_le_adv_
 		} else if (!strcmp(arg, "directed")) {
 			static bt_addr_le_t addr;
 
-			if ((argn + 2) >= argc) {
+			if ((argn + 1) >= argc) {
 				return false;
 			}
 
-			if (bt_addr_le_from_str(argv[argn + 1], argv[argn + 2], &addr)) {
+			if (bt_addr_le_from_str(argv[argn + 1], &addr) != 0) {
 				return false;
 			}
 
 			param->peer = &addr;
-			argn += 2;
+			argn++;
 		} else {
 			return false;
 		}
@@ -2636,14 +2580,14 @@ static int cmd_adv_start(const struct shell *sh, size_t argc, char *argv[])
 			}
 
 			timeout = strtoul(argv[argn], NULL, 16);
-		}
-
-		if (!strcmp(arg, "num-events")) {
+		} else if (!strcmp(arg, "num-events")) {
 			if (++argn == argc) {
 				goto fail_show_help;
 			}
 
 			num_events = strtoul(argv[argn], NULL, 16);
+		} else {
+			goto fail_show_help;
 		}
 	}
 
@@ -2661,7 +2605,7 @@ static int cmd_adv_start(const struct shell *sh, size_t argc, char *argv[])
 
 fail_show_help:
 	shell_help(sh);
-	return -ENOEXEC;
+	return SHELL_CMD_HELP_PRINTED;
 }
 
 static int cmd_adv_stop(const struct shell *sh, size_t argc, char *argv[])
@@ -2726,6 +2670,32 @@ static int cmd_adv_select(const struct shell *sh, size_t argc, char *argv[])
 	return -ENOEXEC;
 }
 
+static const char *ext_adv_state_to_str(enum bt_le_ext_adv_state state)
+{
+	switch (state) {
+	case BT_LE_EXT_ADV_STATE_DISABLED:
+		return "Disabled";
+	case BT_LE_EXT_ADV_STATE_ENABLED:
+		return "Enabled";
+	default:
+		return "Unknown";
+	}
+}
+
+static const char *per_adv_state_to_str(enum bt_le_per_adv_state state)
+{
+	switch (state) {
+	case BT_LE_PER_ADV_STATE_NONE:
+		return "None";
+	case BT_LE_PER_ADV_STATE_DISABLED:
+		return "Disabled";
+	case BT_LE_PER_ADV_STATE_ENABLED:
+		return "Enabled";
+	default:
+		return "Unknown";
+	}
+}
+
 static int cmd_adv_info(const struct shell *sh, size_t argc, char *argv[])
 {
 	struct bt_le_ext_adv *adv = adv_sets[selected_adv];
@@ -2744,11 +2714,13 @@ static int cmd_adv_info(const struct shell *sh, size_t argc, char *argv[])
 
 	shell_print(sh, "Advertiser[%d] %p", selected_adv, adv);
 	shell_print(sh, "Id: %d, SID %u, TX power: %d dBm", info.id, info.sid, info.tx_power);
-	shell_print(sh, "Adv state: %d", info.ext_adv_state);
+	shell_print(sh, "Adv state: %s (%d)", ext_adv_state_to_str(info.ext_adv_state),
+		    info.ext_adv_state);
 	print_le_addr("Address", info.addr);
 
 	if (IS_ENABLED(CONFIG_BT_PER_ADV)) {
-		shell_print(sh, "Per Adv state: %d", info.per_adv_state);
+		shell_print(sh, "Per Adv state: %s (%d)", per_adv_state_to_str(info.per_adv_state),
+			    info.per_adv_state);
 	}
 
 	return 0;
@@ -2853,8 +2825,13 @@ static int cmd_per_adv_param(const struct shell *sh, size_t argc,
 		return -EINVAL;
 	}
 
-	if (argc > 3 && !strcmp(argv[3], "tx-power")) {
-		param.options = BT_LE_ADV_OPT_USE_TX_POWER;
+	if (argc > 3) {
+		if (!strcmp(argv[3], "tx-power")) {
+			param.options = BT_LE_ADV_OPT_USE_TX_POWER;
+		} else {
+			shell_help(sh);
+			return SHELL_CMD_HELP_PRINTED;
+		}
 	} else {
 		param.options = 0;
 	}
@@ -2938,11 +2915,119 @@ static int cmd_per_adv_data(const struct shell *sh, size_t argc,
 
 	return 0;
 }
+
+static int cmd_per_adv_update_did(const struct shell *sh, size_t argc, char *argv[])
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	const struct bt_le_ext_adv *adv = adv_sets[selected_adv];
+	int err;
+
+	if (adv == NULL) {
+		shell_error(sh, "No extended advertisement set selected");
+		return -EINVAL;
+	}
+
+	err = bt_le_per_adv_update_did(adv);
+	if (err != 0) {
+		shell_error(sh, "Failed to update periodic advertising DID (%d)", err);
+		return -ENOEXEC;
+	}
+
+	return 0;
+}
 #endif /* CONFIG_BT_PER_ADV */
 #endif /* CONFIG_BT_EXT_ADV */
 #endif /* CONFIG_BT_BROADCASTER */
 
 #if defined(CONFIG_BT_PER_ADV_SYNC)
+struct bt_le_per_adv_sync *per_adv_syncs[CONFIG_BT_PER_ADV_SYNC_MAX];
+size_t selected_per_adv_sync;
+
+static void per_adv_sync_sync_cb(struct bt_le_per_adv_sync *sync,
+				 struct bt_le_per_adv_sync_synced_info *info)
+{
+	bt_shell_print("PER_ADV_SYNC[%u]: [DEVICE]: %s synced, "
+		       "Interval 0x%04x (%u us), PHY %s, SD 0x%04X, PAST peer %s",
+		       bt_le_per_adv_sync_get_index(sync), bt_addr_le_str(info->addr),
+		       info->interval, BT_CONN_INTERVAL_TO_US(info->interval), phy2str(info->phy),
+		       info->service_data,
+		       info->conn != NULL ? bt_conn_dst_str(info->conn) : "not present");
+
+	if (info->conn != NULL) { /* if from PAST */
+		for (size_t i = 0U; i < ARRAY_SIZE(per_adv_syncs); i++) {
+			if (per_adv_syncs[i] == NULL) {
+				per_adv_syncs[i] = sync;
+				break;
+			}
+		}
+	}
+}
+
+static void per_adv_sync_terminated_cb(struct bt_le_per_adv_sync *sync,
+				       const struct bt_le_per_adv_sync_term_info *info)
+{
+	for (size_t i = 0U; i < ARRAY_SIZE(per_adv_syncs); i++) {
+		if (per_adv_syncs[i] == sync) {
+			per_adv_syncs[i] = NULL;
+			break;
+		}
+	}
+
+	bt_shell_print("PER_ADV_SYNC[%u]: [DEVICE]: %s sync terminated",
+		       bt_le_per_adv_sync_get_index(sync), bt_addr_le_str(info->addr));
+}
+
+static void per_adv_sync_recv_cb(struct bt_le_per_adv_sync *sync,
+				 const struct bt_le_per_adv_sync_recv_info *info,
+				 struct net_buf_simple *buf)
+{
+	bt_shell_print("PER_ADV_SYNC[%u]: [DEVICE]: %s, tx_power %i, "
+		       "RSSI %i, CTE %u, data length %u",
+		       bt_le_per_adv_sync_get_index(sync), bt_addr_le_str(info->addr),
+		       info->tx_power, info->rssi, info->cte_type, buf->len);
+}
+
+static void per_adv_sync_biginfo_cb(struct bt_le_per_adv_sync *sync,
+				    const struct bt_iso_biginfo *biginfo)
+{
+	bt_shell_print(
+		"BIG_INFO PER_ADV_SYNC[%u]: [DEVICE]: %s, sid 0x%02x, num_bis %u, "
+		"nse 0x%02x, interval 0x%04x (%u us), bn 0x%02x, pto 0x%02x, irc 0x%02x, "
+		"max_pdu 0x%04x, sdu_interval 0x%04x, max_sdu 0x%04x, phy %s, framing 0x%02x, "
+		"%sencrypted",
+		bt_le_per_adv_sync_get_index(sync), bt_addr_le_str(biginfo->addr), biginfo->sid,
+		biginfo->num_bis, biginfo->sub_evt_count, biginfo->iso_interval,
+		BT_CONN_INTERVAL_TO_US(biginfo->iso_interval), biginfo->burst_number,
+		biginfo->offset, biginfo->rep_count, biginfo->max_pdu, biginfo->sdu_interval,
+		biginfo->max_sdu, phy2str(biginfo->phy), biginfo->framing,
+		biginfo->encryption ? "" : "not ");
+}
+
+static int try_register_per_adv_sync_cbs(void)
+{
+	static bool cbs_registered;
+
+	if (!cbs_registered) {
+		static struct bt_le_per_adv_sync_cb per_adv_sync_cb = {
+			.synced = per_adv_sync_sync_cb,
+			.term = per_adv_sync_terminated_cb,
+			.recv = per_adv_sync_recv_cb,
+			.biginfo = per_adv_sync_biginfo_cb,
+		};
+
+		const int err = bt_le_per_adv_sync_cb_register(&per_adv_sync_cb);
+
+		if (err != 0) {
+			return err;
+		}
+
+		cbs_registered = true;
+	}
+
+	return 0;
+}
 
 static int cmd_per_adv_sync_create(const struct shell *sh, size_t argc,
 				   char *argv[])
@@ -2957,7 +3042,7 @@ static int cmd_per_adv_sync_create(const struct shell *sh, size_t argc,
 		return -ENOEXEC;
 	}
 
-	err = bt_addr_le_from_str(argv[1], argv[2], &create_params.addr);
+	err = bt_addr_le_from_str(argv[1], &create_params.addr);
 	if (err) {
 		shell_error(sh, "Invalid peer address (err %d)", err);
 		return -ENOEXEC;
@@ -2967,9 +3052,9 @@ static int cmd_per_adv_sync_create(const struct shell *sh, size_t argc,
 	create_params.timeout = 1000; /* 10 seconds */
 	create_params.skip = 10;
 
-	create_params.sid = strtol(argv[3], NULL, 16);
+	create_params.sid = strtol(argv[2], NULL, 16);
 
-	for (int j = 4; j < argc; j++) {
+	for (int j = 3; j < argc; j++) {
 		if (!strcmp(argv[j], "aoa")) {
 			options |= BT_LE_PER_ADV_SYNC_OPT_DONT_SYNC_AOA;
 		} else if (!strcmp(argv[j], "aod_1us")) {
@@ -3001,6 +3086,12 @@ static int cmd_per_adv_sync_create(const struct shell *sh, size_t argc,
 	}
 
 	create_params.options = options;
+
+	err = try_register_per_adv_sync_cbs();
+	if (err != 0) {
+		shell_error(sh, "Failed to register per_adv_sync_cb: %d", err);
+		return -ENOEXEC;
+	}
 
 	err = bt_le_per_adv_sync_create(&create_params, &per_adv_syncs[selected_per_adv_sync]);
 	if (err) {
@@ -3047,7 +3138,7 @@ static int cmd_per_adv_sync_select(const struct shell *sh, size_t argc, char *ar
 			return -ENOEXEC;
 		}
 
-		if (id > ARRAY_SIZE(adv_sets)) {
+		if (id >= ARRAY_SIZE(per_adv_syncs)) {
 			shell_error(sh, "Invalid id: %lu", id);
 			return -EINVAL;
 		}
@@ -3056,9 +3147,9 @@ static int cmd_per_adv_sync_select(const struct shell *sh, size_t argc, char *ar
 		return 0;
 	}
 
-	for (size_t i = 0U; i < ARRAY_SIZE(adv_sets); i++) {
-		if (adv_sets[i]) {
-			shell_print(sh, "PER_ADV_SYNC[%zu] %p", i, adv_sets[i]);
+	for (size_t i = 0U; i < ARRAY_SIZE(per_adv_syncs); i++) {
+		if (per_adv_syncs[i]) {
+			shell_print(sh, "PER_ADV_SYNC[%zu] %p", i, per_adv_syncs[i]);
 		}
 	}
 
@@ -3123,7 +3214,11 @@ static int cmd_past_subscribe(const struct shell *sh, size_t argc,
 		}
 	}
 
-	bt_le_per_adv_sync_cb_register(&per_adv_sync_cb);
+	err = try_register_per_adv_sync_cbs();
+	if (err != 0) {
+		shell_error(sh, "Failed to register per_adv_sync_cb: %d", err);
+		return -ENOEXEC;
+	}
 
 	err = bt_le_per_adv_sync_transfer_subscribe(
 		global ? NULL : default_conn, &param);
@@ -3173,18 +3268,24 @@ static int cmd_per_adv_sync_transfer(const struct shell *sh, size_t argc,
 				     char *argv[])
 {
 	int err;
-	int index;
+	unsigned long index;
 	struct bt_le_per_adv_sync *per_adv_sync;
 
 	if (argc > 1) {
-		index = strtol(argv[1], NULL, 10);
+		err = 0;
+		index = shell_strtoul(argv[1], 0, &err);
+		if (err != 0) {
+			shell_error(sh, "Could not parse index: %d", err);
+			return -ENOEXEC;
+		}
 	} else {
-		index = 0;
+		index = 0U;
 	}
 
 	if (index >= ARRAY_SIZE(per_adv_syncs)) {
-		shell_error(sh, "Maximum index is %zu but %d was requested",
+		shell_error(sh, "Maximum index is %zu but %lu was requested",
 			    ARRAY_SIZE(per_adv_syncs) - 1, index);
+		return -EINVAL;
 	}
 
 	per_adv_sync = per_adv_syncs[index];
@@ -3678,11 +3779,7 @@ static int bt_do_connect_le(int *ercd, size_t argc, char *argv[])
 			return -ENOENT;
 		}
 	} else {
-		if (argc < 3U) {
-			return SHELL_CMD_HELP_PRINTED;
-		}
-
-		err = bt_addr_le_from_str(argv[1], argv[2], &addr);
+		err = bt_addr_le_from_str(argv[1], &addr);
 		if (err) {
 			*ercd = err;
 			return -EINVAL;
@@ -3690,7 +3787,7 @@ static int bt_do_connect_le(int *ercd, size_t argc, char *argv[])
 	}
 
 #if defined(CONFIG_BT_EXT_ADV)
-	for (size_t argn = 3; argn < argc; argn++) {
+	for (size_t argn = 2; argn < argc; argn++) {
 		const char *arg = argv[argn];
 
 		if (!strcmp(arg, "coded")) {
@@ -3790,17 +3887,17 @@ static int cmd_disconnect(const struct shell *sh, size_t argc, char *argv[])
 	struct bt_conn *conn;
 	int err;
 
-	if (default_conn && argc < 3) {
+	if (default_conn && argc < 2) {
 		conn = bt_conn_ref(default_conn);
 	} else {
 		bt_addr_le_t addr;
 
-		if (argc < 3) {
+		if (argc < 2) {
 			shell_help(sh);
 			return SHELL_CMD_HELP_PRINTED;
 		}
 
-		err = bt_addr_le_from_str(argv[1], argv[2], &addr);
+		err = bt_addr_le_from_str(argv[1], &addr);
 		if (err) {
 			shell_error(sh, "Invalid peer address (err %d)", err);
 			return err;
@@ -3831,7 +3928,7 @@ static int cmd_select(const struct shell *sh, size_t argc, char *argv[])
 	bt_addr_le_t addr;
 	int err;
 
-	err = bt_addr_le_from_str(argv[1], argv[2], &addr);
+	err = bt_addr_le_from_str(argv[1], &addr);
 	if (err) {
 		shell_error(sh, "Invalid peer address (err %d)", err);
 		return err;
@@ -3873,6 +3970,26 @@ static const char *get_conn_role_str(uint8_t role)
 	}
 }
 
+#if defined(CONFIG_BT_ISO)
+static const char *iso_chan_type_str(enum bt_iso_chan_type type)
+{
+	switch (type) {
+	case BT_ISO_CHAN_TYPE_NONE:
+		return "None";
+	case BT_ISO_CHAN_TYPE_CENTRAL:
+		return "Central";
+	case BT_ISO_CHAN_TYPE_PERIPHERAL:
+		return "Peripheral";
+	case BT_ISO_CHAN_TYPE_BROADCASTER:
+		return "Broadcaster";
+	case BT_ISO_CHAN_TYPE_SYNC_RECEIVER:
+		return "Sync Receiver";
+	default:
+		return "Unknown";
+	}
+}
+#endif /* CONFIG_BT_ISO */
+
 static int cmd_info(const struct shell *sh, size_t argc, char *argv[])
 {
 	struct bt_conn *conn = NULL;
@@ -3887,17 +4004,7 @@ static int cmd_info(const struct shell *sh, size_t argc, char *argv[])
 		}
 		break;
 	case 2:
-		addr.type = BT_ADDR_LE_PUBLIC;
-		err = bt_addr_from_str(argv[1], &addr.a);
-		if (err) {
-			shell_error(sh, "Invalid peer address (err %d)", err);
-			return err;
-		}
-		conn = bt_conn_lookup_addr_le(selected_id, &addr);
-		break;
-	case 3:
-		err = bt_addr_le_from_str(argv[1], argv[2], &addr);
-
+		err = bt_addr_le_from_str(argv[1], &addr);
 		if (err) {
 			shell_error(sh, "Invalid peer address (err %d)", err);
 			return err;
@@ -4136,7 +4243,7 @@ static int cmd_oob_remote(const struct shell *sh, size_t argc,
 	int err;
 	bt_addr_le_t addr;
 
-	err = bt_addr_le_from_str(argv[1], argv[2], &addr);
+	err = bt_addr_le_from_str(argv[1], &addr);
 	if (err) {
 		shell_error(sh, "Invalid peer address (err %d)", err);
 		return err;
@@ -4144,10 +4251,10 @@ static int cmd_oob_remote(const struct shell *sh, size_t argc,
 
 	bt_addr_le_copy(&oob_remote.addr, &addr);
 
-	if (argc == 5) {
-		hex2bin(argv[3], strlen(argv[3]), oob_remote.le_sc_data.r,
+	if (argc == 4) {
+		hex2bin(argv[2], strlen(argv[2]), oob_remote.le_sc_data.r,
 			sizeof(oob_remote.le_sc_data.r));
-		hex2bin(argv[4], strlen(argv[4]), oob_remote.le_sc_data.c,
+		hex2bin(argv[3], strlen(argv[3]), oob_remote.le_sc_data.c,
 			sizeof(oob_remote.le_sc_data.c));
 		bt_le_oob_set_sc_flag(true);
 	} else {
@@ -4184,13 +4291,7 @@ static int cmd_clear(const struct shell *sh, size_t argc, char *argv[])
 		return 0;
 	}
 
-	if (argc < 3) {
-		shell_print(sh, "Both address and address type needed");
-		return -ENOEXEC;
-	} else {
-		err = bt_addr_le_from_str(argv[1], argv[2], &addr);
-	}
-
+	err = bt_addr_le_from_str(argv[1], &addr);
 	if (err) {
 		shell_print(sh, "Invalid address");
 		return err;
@@ -4320,6 +4421,22 @@ static int cmd_bonds(const struct shell *sh, size_t argc, char *argv[])
 	return 0;
 }
 
+static const char *conn_state_to_str(enum bt_conn_state state)
+{
+	switch (state) {
+	case BT_CONN_STATE_DISCONNECTED:
+		return "Disconnected";
+	case BT_CONN_STATE_CONNECTING:
+		return "Connecting";
+	case BT_CONN_STATE_CONNECTED:
+		return "Connected";
+	case BT_CONN_STATE_DISCONNECTING:
+		return "Disconnecting";
+	default:
+		return "Unknown";
+	}
+}
+
 static void connection_info(struct bt_conn *conn, void *user_data)
 {
 	int *conn_count = user_data;
@@ -4340,19 +4457,48 @@ static void connection_info(struct bt_conn *conn, void *user_data)
 	switch (info.type) {
 #if defined(CONFIG_BT_CLASSIC)
 	case BT_CONN_TYPE_BR:
-		bt_shell_print("%s#%u [BR][%s] %s", selected, info.id, role_str,
-			       bt_conn_dst_str(conn));
+		bt_shell_print("%s#%u [BR][%s] %s (%s)", selected, info.id, role_str,
+			       bt_conn_dst_str(conn), conn_state_to_str(info.state));
 		break;
 #endif
 	case BT_CONN_TYPE_LE:
-		bt_shell_print("%s#%u [LE][%s] %s: Interval %u us, latency %u, timeout %u ms",
+		bt_shell_print("%s#%u [LE][%s] %s: Interval %u us, latency %u, timeout %u ms (%s)",
 			       selected, info.id, role_str, bt_conn_dst_str(conn),
-			       info.le.interval_us, info.le.latency, info.le.timeout * 10);
+			       info.le.interval_us, info.le.latency, info.le.timeout * 10,
+			       conn_state_to_str(info.state));
 		break;
 #if defined(CONFIG_BT_ISO)
-	case BT_CONN_TYPE_ISO:
-		bt_shell_print(" #%u [ISO][%s] %s", info.id, role_str, bt_conn_dst_str(conn));
+	case BT_CONN_TYPE_ISO: {
+		const struct bt_iso_chan *chan = bt_iso_get_chan_by_conn(conn);
+
+		if (chan != NULL) {
+			struct bt_iso_info iso_info;
+
+#if defined(CONFIG_BT_ISO_UNICAST)
+			selected = chan == &iso_chan ? "*" : " ";
+#else
+			selected = " ";
+#endif /* CONFIG_BT_ISO_UNICAST */
+
+			err = bt_iso_chan_get_info(chan, &iso_info);
+			if (err != 0) {
+				bt_shell_error("Unable to get ISO info: chan %p (err %d)", chan,
+					       err);
+				return;
+			}
+
+			bt_shell_print("%s#%u [ISO][%s]: ISO interval %u us%s%s (%s)", selected,
+				       info.id, iso_chan_type_str(iso_info.type),
+				       BT_GAP_ISO_INTERVAL_TO_US(iso_info.iso_interval),
+				       iso_info.can_send ? " TX" : "",
+				       iso_info.can_recv ? " RX" : "",
+				       bt_iso_chan_state_str(chan->state));
+		} else {
+			return; /* return to avoid incrementing conn_count */
+		}
+
 		break;
+	}
 #endif
 	default:
 		break;
@@ -4409,10 +4555,7 @@ static void auth_cancel(struct bt_conn *conn)
 	bt_shell_print("Pairing cancelled: %s", bt_conn_dst_str(conn));
 
 	/* clear connection reference for sec mode 3 pairing */
-	if (pairing_conn) {
-		bt_conn_unref(pairing_conn);
-		pairing_conn = NULL;
-	}
+	bt_conn_drop(&pairing_conn);
 }
 
 static void auth_pairing_confirm(struct bt_conn *conn)
@@ -4772,7 +4915,7 @@ static int cmd_fal_add(const struct shell *sh, size_t argc, char *argv[])
 	bt_addr_le_t addr;
 	int err;
 
-	err = bt_addr_le_from_str(argv[1], argv[2], &addr);
+	err = bt_addr_le_from_str(argv[1], &addr);
 	if (err) {
 		shell_error(sh, "Invalid peer address (err %d)", err);
 		return err;
@@ -4792,7 +4935,7 @@ static int cmd_fal_rem(const struct shell *sh, size_t argc, char *argv[])
 	bt_addr_le_t addr;
 	int err;
 
-	err = bt_addr_le_from_str(argv[1], argv[2], &addr);
+	err = bt_addr_le_from_str(argv[1], &addr);
 	if (err) {
 		shell_error(sh, "Invalid peer address (err %d)", err);
 		return err;
@@ -4857,6 +5000,9 @@ static int cmd_fal_connect(const struct shell *sh, size_t argc, char *argv[])
 			shell_error(sh, "Auto connect stop failed (err %d)", err);
 		}
 		return err;
+	} else {
+		shell_help(sh);
+		return SHELL_CMD_HELP_PRINTED;
 	}
 
 	return 0;
@@ -5251,7 +5397,8 @@ static int cmd_default_handler(const struct shell *sh, size_t argc, char **argv)
 #define HELP_NONE "[none]"
 #define HELP_ONOFF "<on, off>"
 #define HELP_ADDR "<address: XX:XX:XX:XX:XX:XX>"
-#define HELP_ADDR_LE "<address: XX:XX:XX:XX:XX:XX> <type: (public|random)>"
+#define HELP_ADDR_LE "<address: P:XX:XX:XX:XX:XX:XX or R:XX:XX:XX:XX:XX:XX>"
+#define HELP_ADDR_LE_STATIC "[<static random address: R:XX:XX:XX:XX:XX:XX>]"
 
 #if defined(CONFIG_BT_EXT_ADV)
 #define EXT_ADV_SCAN_OPT " [coded] [no-1m]"
@@ -5306,8 +5453,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bt_cmds,
 #if defined(CONFIG_BT_HCI)
 	SHELL_CMD_ARG(hci-cmd, NULL, "<ogf> <ocf> [data]", cmd_hci_cmd, 3, 1),
 #endif
-	SHELL_CMD_ARG(id-create, NULL, HELP_ADDR, cmd_id_create, 1, 1),
-	SHELL_CMD_ARG(id-reset, NULL, "<id> "HELP_ADDR, cmd_id_reset, 2, 1),
+	SHELL_CMD_ARG(id-create, NULL, HELP_ADDR_LE_STATIC, cmd_id_create, 1, 1),
+	SHELL_CMD_ARG(id-reset, NULL, "<id> "HELP_ADDR_LE_STATIC, cmd_id_reset, 2, 1),
 	SHELL_CMD_ARG(id-delete, NULL, "<id>", cmd_id_delete, 2, 0),
 	SHELL_CMD_ARG(id-show, NULL, HELP_NONE, cmd_id_show, 1, 0),
 	SHELL_CMD_ARG(id-select, NULL, "<id>", cmd_id_select, 2, 0),
@@ -5320,9 +5467,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bt_cmds,
 #if defined(CONFIG_BT_OBSERVER)
 	SHELL_CMD_ARG(scan, NULL,
 		      "[--timeout <timeout>] [--filter-dups] [--fal] [--coded] [--no-1m] "
+		      "[--ext-filter-policy] "
 		      "[--interval <n * 0.625 ms] [--window <n * 0.625 ms>] "
 		      "<value: on, passive, off>",
-		      cmd_scan, 2, 11),
+		      cmd_scan, 2, 12),
 	SHELL_CMD(scan-filter-set, &bt_scan_filter_set_cmds,
 		      "Scan filter set commands",
 		      cmd_default_handler),
@@ -5392,7 +5540,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bt_cmds,
 #if defined(CONFIG_BT_PERIPHERAL)
 	SHELL_CMD_ARG(directed-adv, NULL, HELP_ADDR_LE " [mode: low] "
 		      "[identity] [dir-rpa]",
-		      cmd_directed_adv, 3, 6),
+		      cmd_directed_adv, 2, 6),
 #endif /* CONFIG_BT_PERIPHERAL */
 #if defined(CONFIG_BT_EXT_ADV)
 	SHELL_CMD_ARG(adv-create, NULL, EXT_ADV_PARAM, cmd_adv_create, 2, 11),
@@ -5417,9 +5565,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bt_cmds,
 #if defined(CONFIG_BT_PER_ADV)
 	SHELL_CMD_ARG(per-adv, NULL, HELP_ONOFF, cmd_per_adv, 2, 0),
 	SHELL_CMD_ARG(per-adv-param, NULL,
-		      "[<interval-min> [<interval-max> [tx_power]]]",
+		      "[<interval-min> [<interval-max> [tx-power]]]",
 		      cmd_per_adv_param, 1, 3),
 	SHELL_CMD_ARG(per-adv-data, NULL, "[data]", cmd_per_adv_data, 1, 1),
+	SHELL_CMD_ARG(per-adv-update-did, NULL, "Update periodic advertising DID",
+		     cmd_per_adv_update_did, 1, 0),
 #endif /* CONFIG_BT_PER_ADV */
 #endif /* CONFIG_BT_EXT_ADV */
 #endif /* CONFIG_BT_BROADCASTER */
@@ -5427,10 +5577,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bt_cmds,
 	SHELL_CMD_ARG(per-adv-sync-create, NULL,
 		      HELP_ADDR_LE " <sid> [skip <count>] [timeout <ms>] [aoa] "
 		      "[aod_1us] [aod_2us] [cte_only]",
-		      cmd_per_adv_sync_create, 4, 6),
+		      cmd_per_adv_sync_create, 3, 6),
 	SHELL_CMD_ARG(per-adv-sync-delete, NULL, "[<index>]",
 		      cmd_per_adv_sync_delete, 1, 1),
-	SHELL_CMD_ARG(per-adv-sync-select, NULL, "[adv]", cmd_per_adv_sync_select, 1, 1),
+	SHELL_CMD_ARG(per-adv-sync-select, NULL, "[sync]", cmd_per_adv_sync_select, 1, 1),
 #endif /* defined(CONFIG_BT_PER_ADV_SYNC) */
 #if defined(CONFIG_BT_EAD)
 	SHELL_CMD(encrypted-ad, &bt_encrypted_ad_cmds, "Manage advertiser with encrypted data",
@@ -5460,9 +5610,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bt_cmds,
 	SHELL_CMD_ARG(connect-name, NULL, "<name filter>",
 		      cmd_connect_le_name, 2, 0),
 #endif /* CONFIG_BT_CENTRAL */
-	SHELL_CMD_ARG(disconnect, NULL, HELP_ADDR_LE, cmd_disconnect, 1, 2),
-	SHELL_CMD_ARG(select, NULL, HELP_ADDR_LE, cmd_select, 3, 0),
-	SHELL_CMD_ARG(info, NULL, HELP_ADDR_LE, cmd_info, 1, 2),
+	SHELL_CMD_ARG(disconnect, NULL, HELP_ADDR_LE, cmd_disconnect, 1, 1),
+	SHELL_CMD_ARG(select, NULL, HELP_ADDR_LE, cmd_select, 2, 0),
+	SHELL_CMD_ARG(info, NULL, HELP_ADDR_LE, cmd_info, 1, 1),
 	SHELL_CMD_ARG(conn-update, NULL, "<min> <max> <latency> <timeout>",
 		      cmd_conn_update, 5, 0),
 #if defined(CONFIG_BT_USER_DATA_LEN_UPDATE)
@@ -5478,7 +5628,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bt_cmds,
 		      cmd_chan_map, 2, 1),
 #endif /* CONFIG_BT_CENTRAL */
 	SHELL_CMD_ARG(oob, NULL, HELP_NONE, cmd_oob, 1, 0),
-	SHELL_CMD_ARG(clear, NULL, "[all] ["HELP_ADDR_LE"]", cmd_clear, 2, 1),
+	SHELL_CMD_ARG(clear, NULL, "[all] ["HELP_ADDR_LE"]", cmd_clear, 2, 0),
 #if defined(CONFIG_BT_SMP) || defined(CONFIG_BT_CLASSIC)
 	SHELL_CMD_ARG(security, NULL, "<security level BR/EDR: 0 - 4, "
 				      "LE: 1 - 4> [force-pair]",
@@ -5509,11 +5659,11 @@ SHELL_STATIC_SUBCMD_SET_CREATE(bt_cmds,
 #endif /* !defined(CONFIG_BT_SMP_SC_PAIR_ONLY) */
 	SHELL_CMD_ARG(oob-remote, NULL,
 		      HELP_ADDR_LE" <oob rand> <oob confirm>",
-		      cmd_oob_remote, 3, 2),
+		      cmd_oob_remote, 2, 2),
 	SHELL_CMD_ARG(oob-clear, NULL, HELP_NONE, cmd_oob_clear, 1, 0),
 #if defined(CONFIG_BT_FILTER_ACCEPT_LIST)
-	SHELL_CMD_ARG(fal-add, NULL, HELP_ADDR_LE, cmd_fal_add, 3, 0),
-	SHELL_CMD_ARG(fal-rem, NULL, HELP_ADDR_LE, cmd_fal_rem, 3, 0),
+	SHELL_CMD_ARG(fal-add, NULL, HELP_ADDR_LE, cmd_fal_add, 2, 0),
+	SHELL_CMD_ARG(fal-rem, NULL, HELP_ADDR_LE, cmd_fal_rem, 2, 0),
 	SHELL_CMD_ARG(fal-clear, NULL, HELP_NONE, cmd_fal_clear, 1, 0),
 
 #if defined(CONFIG_BT_CENTRAL)

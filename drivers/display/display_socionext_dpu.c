@@ -142,7 +142,6 @@ static void dpu_get_capabilities(const struct device *dev,
 	const struct dpu_config *config = dev->config;
 	struct dpu_data *data = dev->data;
 
-	memset(capabilities, 0, sizeof(struct display_capabilities));
 	capabilities->x_resolution = config->display_timing.width;
 	capabilities->y_resolution = config->display_timing.height;
 	capabilities->supported_pixel_formats = dpu_supported_fmts;
@@ -263,7 +262,7 @@ static int dpu_init(const struct device *dev)
 	/* ExtDst: set the dynamic source */
 	DPU_InitExtDst(config->base, kDPU_ExtDst0, DPU_MAKE_SRC_REG1(kDPU_UnitSrcLayerBlend1));
 
-	/* Layer blend: set the primary and seconday sources */
+	/* Layer blend: set the primary and secondary sources */
 	DPU_InitLayerBlend(config->base, kDPU_LayerBlend1,
 			   DPU_MAKE_SRC_REG2(kDPU_UnitSrcConstFrame0, kDPU_UnitSrcFetchYUV0));
 	DPU_LayerBlendGetDefaultConfig(&lbConfig);

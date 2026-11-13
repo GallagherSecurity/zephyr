@@ -249,9 +249,17 @@ void nrf_wifi_disp_scan_res_work_handler(struct k_work *work)
 	status = nrf_wifi_disp_scan_res_get_zep(vif_ctx_zep);
 	if (status != NRF_WIFI_STATUS_SUCCESS) {
 		LOG_ERR("%s: nrf_wifi_disp_scan_res_get_zep failed", __func__);
-		return;
+
+#ifdef CONFIG_NET_L2_WIFI_MGMT
+		if (vif_ctx_zep->disp_scan_cb) {
+			vif_ctx_zep->disp_scan_cb(vif_ctx_zep->zep_net_if_ctx, -EIO, NULL);
+			vif_ctx_zep->disp_scan_cb = NULL;
+		}
+#endif /* CONFIG_NET_L2_WIFI_MGMT */
+
+		vif_ctx_zep->scan_in_progress = false;
+		k_work_cancel_delayable(&vif_ctx_zep->scan_timeout_work);
 	}
-	vif_ctx_zep->scan_in_progress = false;
 }
 
 #ifdef CONFIG_NRF70_STA_MODE
@@ -805,9 +813,9 @@ static int nrf_wifi_drv_main_zep(const struct device *dev)
 #ifdef CONFIG_WIFI_MGMT_RAW_SCAN_RESULTS
 	callbk_fns.rx_bcn_prb_resp_callbk_fn = nrf_wifi_rx_bcn_prb_resp_frm;
 #endif /* CONFIG_WIFI_MGMT_RAW_SCAN_RESULTS */
-#ifdef CONFIG_NRF70_SYSTEM_MODE
+#if defined(CONFIG_NRF70_STA_MODE) || defined(CONFIG_NRF70_RAW_DATA_RX)
 	callbk_fns.set_if_callbk_fn = nrf_wifi_set_iface_event_handler;
-#endif /* CONFIG_NRF70_SYSTEM_MODE */
+#endif /* CONFIG_NRF70_STA_MODE || CONFIG_NRF70_RAW_DATA_RX */
 #ifdef CONFIG_NRF70_STA_MODE
 	callbk_fns.twt_config_callbk_fn = nrf_wifi_event_proc_twt_setup_zep;
 	callbk_fns.twt_teardown_callbk_fn = nrf_wifi_event_proc_twt_teardown_zep;
@@ -935,6 +943,7 @@ static const struct zep_wpa_supp_dev_ops wpa_supp_ops = {
 	.authenticate = nrf_wifi_wpa_supp_authenticate,
 	.associate = nrf_wifi_wpa_supp_associate,
 	.set_supp_port = nrf_wifi_wpa_set_supp_port,
+	.tx_control_port = nrf_wifi_wpa_tx_control_port,
 	.set_key = nrf_wifi_wpa_supp_set_key,
 	.signal_poll = nrf_wifi_wpa_supp_signal_poll,
 	.send_mlme = nrf_wifi_nl80211_send_mlme,

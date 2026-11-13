@@ -8,6 +8,8 @@
 #include <string.h>
 #include <zephyr/display/cfb.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/minmax.h>
+#include <zephyr/drivers/display.h>
 
 #define LOG_LEVEL CONFIG_CFB_LOG_LEVEL
 #include <zephyr/logging/log.h>
@@ -95,8 +97,8 @@ static inline bool is_tofu_border_pixel(const struct cfb_font *fptr, uint8_t px,
 	const uint8_t bottom = fptr->height - margin;
 	const uint8_t max_stroke_x = (right > (left + 1U)) ? (right - left - 1U) / 2U : 1U;
 	const uint8_t max_stroke_y = (bottom > (top + 1U)) ? (bottom - top - 1U) / 2U : 1U;
-	const uint8_t stroke = MIN(MAX(MIN(right - left, bottom - top) / 10U, 1U),
-				       MIN(max_stroke_x, max_stroke_y));
+	const uint8_t stroke = min3(max(min(right - left, bottom - top) / 10U, 1U),
+				    max_stroke_x, max_stroke_y);
 	const bool inside_box = (px >= left) && (px < right) && (py >= top) && (py < bottom);
 	const bool on_left_or_right_edge = (px < (left + stroke)) || (px >= (right - stroke));
 	const bool on_top_or_bottom_edge = (py < (top + stroke)) || (py >= (bottom - stroke));
@@ -703,7 +705,6 @@ int cfb_framebuffer_invert(const struct device *dev)
 
 int cfb_framebuffer_finalize(const struct device *dev)
 {
-	const struct display_driver_api *api = dev->api;
 	const struct char_framebuffer *fb = &char_fb;
 	int err;
 
@@ -722,12 +723,12 @@ int cfb_framebuffer_finalize(const struct device *dev)
 
 	if ((fb->pixel_format == PIXEL_FORMAT_MONO10) != fb->inverted) {
 		cfb_invert(fb);
-		err = api->write(dev, 0, 0, &desc, fb->buf);
+		err = display_write(dev, 0, 0, &desc, fb->buf);
 		cfb_invert(fb);
 		return err;
 	}
 
-	return api->write(dev, 0, 0, &desc, fb->buf);
+	return display_write(dev, 0, 0, &desc, fb->buf);
 }
 
 int cfb_get_display_parameter(const struct device *dev,
@@ -805,13 +806,12 @@ int cfb_get_numof_fonts(const struct device *dev)
 
 int cfb_framebuffer_init(const struct device *dev)
 {
-	const struct display_driver_api *api = dev->api;
 	struct char_framebuffer *fb = &char_fb;
 	struct display_capabilities cfg;
 
 	__ASSERT_NO_MSG(DEVICE_API_IS(display, dev));
 
-	api->get_capabilities(dev, &cfg);
+	display_get_capabilities(dev, &cfg);
 
 	STRUCT_SECTION_COUNT(cfb_font, &fb->numof_fonts);
 

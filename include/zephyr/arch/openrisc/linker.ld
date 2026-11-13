@@ -64,6 +64,7 @@ PROVIDE (__stack = RAM_BASE + (RAM_SIZE - 1024));
 SECTIONS
 {
 #include <zephyr/linker/rel-sections.ld>
+#include <zephyr/linker/llext-sections.ld>
 
     SECTION_PROLOGUE(.plt,,)
 	{
@@ -189,6 +190,12 @@ SECTIONS
 		 */
 		 . = ALIGN(4);
 		 __bss_start = .;
+
+/* Located in generated directory. This file is populated by the
+ * zephyr_linker_sources() Cmake function.
+ */
+#include <snippets-bss.ld>
+
 		 *(.dynbss)
 		 *(.sbss)
 		 *(.sbss.*)

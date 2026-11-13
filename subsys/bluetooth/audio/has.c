@@ -32,7 +32,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/util_macro.h>
 #include <zephyr/sys/util_utf8.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/toolchain.h>
 
 #include "../bluetooth/host/settings.h"
@@ -225,7 +225,7 @@ static struct client_context *context_find(const bt_addr_le_t *addr)
 {
 	__ASSERT_NO_MSG(addr != NULL);
 
-	for (size_t i = 0; i < ARRAY_SIZE(contexts); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(contexts); i++) {
 		if (bt_addr_le_eq(&contexts[i].addr, addr)) {
 			return &contexts[i];
 		}
@@ -276,8 +276,7 @@ static void client_free(struct has_client *client)
 		client->context = NULL;
 	}
 
-	bt_conn_unref(client->conn);
-	client->conn = NULL;
+	bt_conn_drop(&client->conn);
 }
 
 static struct has_client *client_alloc(struct bt_conn *conn)
@@ -286,7 +285,7 @@ static struct has_client *client_alloc(struct bt_conn *conn)
 	struct has_client *client = NULL;
 	int err;
 
-	for (size_t i = 0; i < ARRAY_SIZE(has_client_list); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(has_client_list); i++) {
 		if (conn == has_client_list[i].conn) {
 			return &has_client_list[i];
 		}
@@ -334,7 +333,7 @@ static struct has_client *client_alloc(struct bt_conn *conn)
 
 static struct has_client *client_find_by_conn(struct bt_conn *conn)
 {
-	for (size_t i = 0; i < ARRAY_SIZE(has_client_list); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(has_client_list); i++) {
 		if (conn == has_client_list[i].conn) {
 			return &has_client_list[i];
 		}
@@ -365,6 +364,10 @@ static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_
 	struct bt_conn_info info;
 	int ret;
 
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
 	LOG_DBG("conn %p level %d err %d", (void *)conn, level, err);
 
 	if (err != BT_SECURITY_ERR_SUCCESS) {
@@ -374,6 +377,10 @@ static void security_changed(struct bt_conn *conn, bt_security_t level, enum bt_
 	client = client_alloc(conn);
 	if (unlikely(!client)) {
 		LOG_ERR("Failed to allocate client");
+		return;
+	}
+
+	if (!has.registered) {
 		return;
 	}
 
@@ -396,6 +403,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
 	struct has_client *client;
 
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
 	LOG_DBG("conn %p reason %d", (void *)conn, reason);
 
 	client = client_find_by_conn(conn);
@@ -408,6 +419,10 @@ static void identity_resolved(struct bt_conn *conn, const bt_addr_le_t *rpa,
 			      const bt_addr_le_t *identity)
 {
 	struct has_client *client;
+
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
 
 	LOG_DBG("conn %p %s -> %s", (void *)conn, bt_addr_le_str(rpa), bt_addr_le_str(identity));
 
@@ -768,7 +783,13 @@ static void control_point_ind_complete(struct bt_conn *conn,
 
 static int control_point_send(struct has_client *client, struct net_buf_simple *buf)
 {
-	const uint16_t max_ntf_size = bt_audio_get_max_ntf_size(client->conn);
+	const int max_ntf_size = bt_att_get_max_notify_size(client->conn, BT_ATT_CHAN_OPT_NONE);
+
+	if (max_ntf_size < 0) {
+		__ASSERT(max_ntf_size != -EINVAL, "Unexpected -EINVAL");
+		LOG_DBG("Failed to get max notification size: %d", max_ntf_size);
+		return max_ntf_size; /* contains errno value */
+	}
 
 	if (max_ntf_size < buf->len) {
 		LOG_WRN("Sending truncated control point PDU %u < %u", max_ntf_size, buf->len);
@@ -945,7 +966,7 @@ static int settings_set_cb(const char *name, size_t len_rd, settings_read_cb rea
 
 		context->last_preset_index_known = store.last_preset_index_known;
 	} else {
-		context->last_preset_index_known = 0x00;
+		context->last_preset_index_known = 0x00U;
 	}
 
 	/* Notify all the characteristics values after reboot */
@@ -984,7 +1005,7 @@ static void update_last_preset_index_known(struct has_client *client, uint8_t in
 		return;
 	}
 
-	for (size_t i = 0; i < ARRAY_SIZE(has_client_list); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(has_client_list); i++) {
 		client = &has_client_list[i];
 
 		/* For each connected client */
@@ -1149,7 +1170,7 @@ static int preset_list_changed(struct has_client *client)
 	}
 
 	if (is_last) {
-		client->preset_changed_index_next = 0;
+		client->preset_changed_index_next = 0U;
 
 		/* It's the last preset notified, so update the highest index known to the client */
 		update_last_preset_index_known(client, preset->index);
@@ -1835,7 +1856,7 @@ int bt_has_register(const struct bt_has_features_param *features)
 	}
 
 #if defined(CONFIG_BT_HAS_PRESET_SUPPORT)
-	for (size_t i = 0; i < ARRAY_SIZE(preset_pool); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(preset_pool); i++) {
 		struct has_preset *preset = &preset_pool[i];
 
 		sys_slist_append(&preset_free_list, &preset->node);

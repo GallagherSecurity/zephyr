@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import platform
 import re
 import shlex
 import shutil
@@ -23,11 +22,12 @@ from string import Template
 import junitparser.junitparser as junit
 import yaml
 from pytest import ExitCode
-from twisterlib.constants import SUPPORTED_SIMS_IN_PYTEST
+from twisterlib.constants import FAULT_REASON, SUPPORTED_SIMS_IN_PYTEST
 from twisterlib.environment import PYTEST_PLUGIN_INSTALLED, ZEPHYR_BASE
 from twisterlib.error import ConfigurationError, StatusAttributeError
 from twisterlib.handlers import DeviceHandler, Handler, terminate_process
 from twisterlib.harnessconfig import TWISTER_PYTEST_CONFIG_FILE, HarnessPytestConfig
+from twisterlib.modulevars import expand_zephyr_vars
 from twisterlib.reports import ReportStatus
 from twisterlib.statuses import TwisterStatus
 from twisterlib.testinstance import TestInstance
@@ -35,7 +35,13 @@ from twisterlib.testsuitedata import HarnessConfig
 
 logger = logging.getLogger('twister')
 
-_WINDOWS = platform.system() == 'Windows'
+# pytest ExitCodes that mean the test tool itself errored rather than a test
+# failing. Shared by every report-based harness (see ReportHarness.run).
+REPORT_ERROR_EXIT_CODES = (
+    ExitCode.INTERRUPTED,
+    ExitCode.USAGE_ERROR,
+    ExitCode.INTERNAL_ERROR,
+)
 
 
 class HarnessException(Exception):
@@ -46,6 +52,11 @@ class Harness:
     GCOV_START = "GCOV_COVERAGE_DUMP_START"
     GCOV_END = "GCOV_COVERAGE_DUMP_END"
     FAULT = "ZEPHYR FATAL ERROR"
+    # Printed by Ztest's fatal-error/assert hooks
+    UNEXPECTED_FAULT_MARKERS = (
+        "fatal error was unexpected",
+        "assert failed was unexpected",
+    )
     RUN_PASSED = "PROJECT EXECUTION SUCCESSFUL"
     RUN_FAILED = "PROJECT EXECUTION FAILED"
     run_id_pattern = r"RunID: (?P<run_id>[0-9A-Fa-f]+)"
@@ -54,8 +65,8 @@ class Harness:
         self._status = TwisterStatus.NONE
         self.reason = None
         self.type = None
-        self.regex = []
-        self.matches = OrderedDict()
+        self.regex: list[re.Pattern] = []
+        self.matches: OrderedDict[re.Pattern, str] = OrderedDict()
         self.ordered = True
         self.id = None
         self.fail_on_fault = True
@@ -146,7 +157,7 @@ class Harness:
                     record[k] = { 'ERROR': { 'msg': str(parse_error), 'doc': record[k] } }
         return record
 
-    def parse_record(self, line) -> int:
+    def parse_record(self, line: str) -> int:
         match_cnt = 0
         for record_pattern in self.record_patterns:
             match = record_pattern.search(line)
@@ -168,7 +179,7 @@ class Harness:
                     self.recording.append(rec)
         return match_cnt
 
-    def process_test(self, line):
+    def process_test(self, line: str):
 
         self.parse_record(line)
 
@@ -179,19 +190,32 @@ class Harness:
             if run_id == str(self.run_id):
                 self.matched_run_id = True
 
+        # Faults are logged with a timestamp and module prefix, so the markers
+        # have to be matched as substrings rather than against the whole line.
+        line_lower = line.lower()
+        unexpected_hook_fault = any(
+            marker in line_lower for marker in self.UNEXPECTED_FAULT_MARKERS
+        )
+        if (self.fail_on_fault and self.FAULT in line) or unexpected_hook_fault:
+            self.fault = True
+            # A fault can be reported after the test has already announced
+            # success, for instance a stray interrupt taken once the test
+            # threads are done. Such a run is not healthy, so withdraw a PASS
+            # that was recorded earlier in the output.
+            if self.status == TwisterStatus.PASS:
+                self.status = TwisterStatus.FAIL
+                self.reason = FAULT_REASON
+
         if self.RUN_PASSED in line:
             if self.fault:
                 self.status = TwisterStatus.FAIL
-                self.reason = "Fault detected while running test"
+                self.reason = FAULT_REASON
             else:
                 self.status = TwisterStatus.PASS
 
         if self.RUN_FAILED in line:
             self.status = TwisterStatus.FAIL
             self.reason = "Testsuite failed"
-
-        if self.fail_on_fault and line == self.FAULT:
-            self.fault = True
 
         if self.GCOV_START in line:
             self.capture_coverage = True
@@ -203,7 +227,7 @@ class Robot(Harness):
 
     is_robot_test = True
 
-    def configure(self, instance):
+    def configure(self, instance: TestInstance):
         super().configure(instance)
         self.instance = instance
 
@@ -244,8 +268,18 @@ class Robot(Harness):
         else:
             command.append(os.path.join(handler.sourcedir, self.path))
 
-        with subprocess.Popen(command, stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT, cwd=self.instance.build_dir, env=env) as renode_test_proc:
+        try:
+            renode_test_proc = subprocess.Popen(command, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, cwd=self.instance.build_dir, env=env)
+        except (FileNotFoundError, PermissionError) as err:
+            reason = f"Robot test executable '{command[0]}' not found: {err.strerror}"
+            logger.warning(reason)
+            self.instance.status = TwisterStatus.SKIP
+            self.instance.reason = reason
+            self.instance.add_missing_case_status(TwisterStatus.SKIP)
+            return
+
+        with renode_test_proc:
             out, _ = renode_test_proc.communicate()
 
             self.instance.execution_time = time.time() - start_time
@@ -285,7 +319,7 @@ class Console(Harness):
             return self.instance.testcases[0].name
         return super().get_testcase_name()
 
-    def configure(self, instance):
+    def configure(self, instance: TestInstance):
         super().configure(instance)
         if self.regex is None or len(self.regex) == 0:
             self.status = TwisterStatus.FAIL
@@ -313,7 +347,7 @@ class Console(Harness):
             raise ConfigurationError(self.instance.name, tc.reason)
         #
 
-    def handle(self, line):
+    def handle(self, line: str) -> None:
         if self.type == "one_line":
             if self.pattern.search(line):
                 logger.debug(f"HARNESS:{self.__class__.__name__}:EXPECTED:"
@@ -321,8 +355,10 @@ class Console(Harness):
                 self.next_pattern += 1
                 self.status = TwisterStatus.PASS
         elif self.type == "multi_line" and self.ordered:
-            if (self.next_pattern < len(self.patterns) and
-                self.patterns[self.next_pattern].search(line)):
+            if (
+                self.next_pattern < len(self.patterns) and
+                self.patterns[self.next_pattern].search(line)
+            ):
                 logger.debug(f"HARNESS:{self.__class__.__name__}:EXPECTED("
                              f"{self.next_pattern + 1}/{self.patterns_expected}):"
                              f"'{self.patterns[self.next_pattern].pattern}'")
@@ -342,14 +378,6 @@ class Console(Harness):
         else:
             logger.error("Unknown harness_config type")
 
-        if self.fail_on_fault and self.FAULT in line:
-            self.fault = True
-
-        if self.GCOV_START in line:
-            self.capture_coverage = True
-        elif self.GCOV_END in line:
-            self.capture_coverage = False
-
         self.process_test(line)
         # Reset the resulting test state to FAIL when not all of the patterns were
         # found in the output, but just ztest's 'PROJECT EXECUTION SUCCESSFUL'.
@@ -358,17 +386,21 @@ class Console(Harness):
         # test image was executed.
         # TODO: Introduce explicit match policy type to reject
         # unexpected console output, allow missing patterns, deny duplicates.
-        if self.status == TwisterStatus.PASS and \
-           self.ordered and \
-           self.next_pattern < self.patterns_expected:
+        if (
+            self.status == TwisterStatus.PASS and
+            self.ordered and
+            self.next_pattern < self.patterns_expected
+        ):
             logger.error(f"HARNESS:{self.__class__.__name__}: failed with"
                          f" {self.next_pattern} of {self.patterns_expected}"
                          f" expected ordered patterns.")
             self.status = TwisterStatus.FAIL
             self.reason = "patterns did not match (ordered)"
-        if self.status == TwisterStatus.PASS and \
-           not self.ordered and \
-           len(self.matches) < self.patterns_expected:
+        if (
+            self.status == TwisterStatus.PASS and
+            not self.ordered and
+            len(self.matches) < self.patterns_expected
+        ):
             logger.error(f"HARNESS:{self.__class__.__name__}: failed with"
                          f" {len(self.matches)} of {self.patterns_expected}"
                          f" expected unordered patterns.")
@@ -378,7 +410,18 @@ class Console(Harness):
         tc = self.instance.get_case_or_create(self.get_testcase_name())
         if self.status == TwisterStatus.PASS:
             tc.status = TwisterStatus.PASS
+        elif self.status in [TwisterStatus.FAIL, TwisterStatus.ERROR]:
+            tc.status = self.status
+            tc.reason = self.reason or "Unknown Console harness failure"
         else:
+            # status is still NONE: not all patterns have matched *yet*.
+            # handle() runs once per console line, so while the test is still
+            # producing output this branch is hit on every line that does not
+            # complete the match - it is not a failure on its own. The final
+            # verdict for an incomplete match (test ended/timed out before all
+            # patterns were seen) is decided by the handler in
+            # _update_instance_info(), so do not log or set a reason here to
+            # avoid spurious errors and bogus reasons on tests that pass later.
             tc.status = TwisterStatus.FAIL
 
 
@@ -391,6 +434,7 @@ class Script(Harness):
         self.running_dir = None
         self.log_prefix = None
         self._output = []
+        self._script_names = {}
 
     def configure(self, instance: TestInstance):
         super().configure(instance)
@@ -402,16 +446,18 @@ class Script(Harness):
 
     def run(self, timeout: float) -> bool:
         self.instance.testcases = []
-        for script in self._get_test_scripts():
-            rc = -1
+
+        all_scripts = self._get_test_scripts()
+        if not all_scripts:
+            self._log_error("No scripts found!")
+
+        for script in all_scripts:
             if not os.path.exists(script):
-                reason = f"{script} not found!"
-                logger.error(reason)
-                self._add_testcase_from_script(script, rc, reason=reason)
+                self._handle_missing_script(script)
                 continue
+            rc = -1
             duration = 0.0
             cmd = self._build_script_command(script)
-            logger.debug(f"Running command: {shlex.join(cmd)}")
             try:
                 start_time = time.time()
                 rc = self.run_command(cmd, timeout, env=self._get_env())
@@ -424,26 +470,63 @@ class Script(Harness):
         self._update_test_status()
         return True
 
+    def _log_error(self, reason: str) -> None:
+        logger.error(reason)
+        with open(self.log_file_path, 'a') as log_file:
+            log_file.write(reason + '\n\n')
+
+    def _handle_missing_script(self, script: str) -> None:
+        reason = f"{script} not found!"
+        self._add_testcase_from_script(script, rc=-1, reason=reason)
+        self._log_error(reason)
+
     def _get_env(self) -> dict[str, str]:
         """Return environment variables with BOARD set to the platform name."""
         env = os.environ.copy()
         env['BOARD'] = self.instance.platform.name
         return env
 
+    @staticmethod
+    def _path_is_glob(path: str) -> bool:
+        """Return True if there are glob wildcard characters."""
+        return bool(re.search(r'[*?\[]', path))
+
     def _get_test_scripts(self) -> list[str]:
         """Return list of test scripts resolved from harness config."""
         input_sources = self.instance.testsuite.harness_config.tests_scripts or ['tests_scripts']
         tests_scripts = []
+        # In _script_names we save the relative path of the script inside the directory, in cases
+        # where we may have scripts with the same names in different sub-directories, so they don't
+        # end with the same testname.
+        self._script_names = {}
         for src in input_sources:
             source = os.path.normpath(
                 os.path.join(self.source_dir, os.path.expanduser(os.path.expandvars(src)))
             )
             if os.path.isdir(source):
-                # Get all .sh files in the directory, excluding those starting with '_'
-                scripts = glob(os.path.join(source, "*.sh"))
-                tests_scripts.extend(
-                    s for s in scripts if not os.path.basename(s).startswith('_')
-                )
+                # Get all .sh files in the directory and sub-directories,
+                # excluding those starting with '_'
+                scripts = sorted(glob(os.path.join(source, "**", "*.sh"), recursive=True))
+                for s in scripts:
+                    if os.path.basename(s).startswith('_'):
+                        continue
+                    tests_scripts.append(s)
+                    self._script_names[s] = os.path.relpath(s, source).replace(os.sep, '.')
+            elif self._path_is_glob(source):
+                # When the user provides a glob pattern, we use it as is
+                scripts = sorted(glob(source, recursive=True))
+                # Drop plain directories (which the glob may have matched)
+                scripts = [s for s in scripts if os.path.isfile(s)]
+                if not scripts:
+                    logger.warning(f"No scripts found matching pattern: {src}")
+                for s in scripts:
+                    tests_scripts.append(s)
+                    rel = os.path.relpath(s, self.source_dir)
+                    if rel.startswith('..'):
+                        # For relative paths above source_dir, let's just take the basename
+                        self._script_names[s] = os.path.basename(s)
+                    else:
+                        self._script_names[s] = rel.replace(os.sep, '.')
             else:
                 # A directly specified file or non-existent path are included as-is
                 tests_scripts.append(source)
@@ -459,6 +542,7 @@ class Script(Harness):
 
     def run_command(self, cmd: list[str], timeout: float, env: dict[str, str] | None = None) -> int:
         """Run a command, stream its output, and return the exit code."""
+        logger.debug(f"Running command: {shlex.join(cmd)}")
         with subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -493,7 +577,9 @@ class Script(Harness):
         self._output = []
         log_prefix = self.log_prefix or self.__class__.__name__.upper()
         while proc.stdout.readable() and proc.poll() is None:
-            line = proc.stdout.readline().decode().rstrip()
+            # errors="replace": a non-UTF-8 serial byte must not crash this reader
+            # thread (which would stop capturing the DUT's output mid-run).
+            line = proc.stdout.readline().decode(errors="replace").rstrip()
             if not line:
                 continue
             self._output.append(line)
@@ -504,7 +590,7 @@ class Script(Harness):
     def _add_testcase_from_script(
         self, script: str, rc: int, duration: float = 0.0, reason: str = ''
     ) -> None:
-        script_name = os.path.basename(script)
+        script_name = self._script_names.get(script, os.path.basename(script))
         tc_name = f"{self.id}.{script_name}"
         tc = self.instance.add_testcase(tc_name)
         tc.duration = duration
@@ -534,7 +620,59 @@ class Script(Harness):
             self.instance.add_missing_case_status(TwisterStatus.BLOCK, self.instance.reason)
 
 
-class Pytest(Script):
+class ReportHarness(Script):
+    """Base for harnesses that run an external tool and parse a JUnit report.
+
+    Subclasses set ``report_tool`` (the label used in status/reason messages)
+    and implement generate_command() and _parse_report_file(). run() and
+    _update_test_status() are shared here; Script's own script-oriented
+    implementations are deliberately overridden.
+    """
+    report_tool = 'Report'
+
+    def _get_run_env(self) -> dict[str, str] | None:
+        """Environment for the tool command; None inherits the current env."""
+        return None
+
+    def run(self, timeout):
+        try:
+            cmd = self.generate_command()
+            rc = self.run_command(cmd, timeout, self._get_run_env())
+            if rc in REPORT_ERROR_EXIT_CODES:
+                self.status = TwisterStatus.ERROR
+                self.instance.reason = f'{self.report_tool} error - return code {rc}'
+            self._flush_output_to_log(cmd, rc)
+        except HarnessException as err:
+            logger.error(str(err))
+            self.status = TwisterStatus.FAIL
+            self.instance.reason = str(err)
+        finally:
+            self.instance.record(self.recording)
+            self._update_test_status()
+        return True
+
+    def _update_test_status(self):
+        if self.status == TwisterStatus.NONE:
+            self.instance.testcases = []
+            try:
+                self._parse_report_file(self.report_file)
+            except Exception as e:
+                logger.error(f'Error when parsing file {self.report_file}: {e}')
+                self.status = TwisterStatus.FAIL
+            finally:
+                if not self.instance.testcases:
+                    self.instance.init_cases()
+
+        self.instance.status = self.status if self.status != TwisterStatus.NONE else \
+                               TwisterStatus.FAIL
+        if self.instance.status in [TwisterStatus.ERROR, TwisterStatus.FAIL]:
+            self.instance.reason = self.instance.reason or f'{self.report_tool} failed'
+            self.instance.add_missing_case_status(TwisterStatus.BLOCK, self.instance.reason)
+
+
+class Pytest(ReportHarness):
+
+    report_tool = 'Pytest'
 
     def configure(self, instance: TestInstance):
         super().configure(instance)
@@ -543,31 +681,14 @@ class Pytest(Script):
         self.pytest_config_file = os.path.join(self.running_dir, TWISTER_PYTEST_CONFIG_FILE)
         self.pytest_params = HarnessPytestConfig(platform=instance.platform.name)
 
-    def run(self, timeout):
-        try:
-            cmd = self.generate_command()
-            cmd, env = self._update_command_with_env_dependencies(cmd)
-            rc = self.run_command(cmd, timeout, env)
-            if rc in (ExitCode.INTERRUPTED, ExitCode.USAGE_ERROR, ExitCode.INTERNAL_ERROR):
-                self.status = TwisterStatus.ERROR
-                self.instance.reason = f'Pytest error - return code {rc}'
-            self._flush_output_to_log(cmd, rc)
-        except HarnessException as pytest_exception:
-            logger.error(str(pytest_exception))
-            self.status = TwisterStatus.FAIL
-            self.instance.reason = str(pytest_exception)
-        finally:
-            self.instance.record(self.recording)
-            self._update_test_status()
-        return True
-
     def generate_command(self):
         config: HarnessConfig = self.instance.testsuite.harness_config
         handler: Handler = self.instance.handler
         command = [
             sys.executable, '-m', 'pytest', '-s', '-v',
             '--log-cli-level=DEBUG',
-            '--log-cli-format=%(levelname)s: %(message)s',
+            '--log-cli-format=%(asctime)s %(levelname)s: %(message)s',
+            '--log-date-format=%Y-%m-%d %H:%M:%S',
             f'--junit-xml={self.report_file}',
             f'--twister-config={self.pytest_config_file}'
         ]
@@ -578,7 +699,10 @@ class Pytest(Script):
         command.extend(
             [
                 os.path.normpath(
-                    os.path.join(self.source_dir, os.path.expanduser(os.path.expandvars(src)))
+                    os.path.join(
+                        self.source_dir,
+                        expand_zephyr_vars(os.path.expanduser(os.path.expandvars(src))),
+                    )
                 )
                 for src in config.pytest_root
             ]
@@ -609,6 +733,9 @@ class Pytest(Script):
 
         # Save test parameters to YAML file for pytest-harness
         self.pytest_params.save_to_yaml(self.pytest_config_file)
+
+        if not PYTEST_PLUGIN_INSTALLED:
+            command.extend(['-p', 'twister_harness.plugin'])
 
         return command
 
@@ -642,53 +769,20 @@ class Pytest(Script):
         # Platform flash_before is intended for boards with USB reset issues during flashing
         self.pytest_params.flash_before = self.instance.platform.flash_before
 
-    @staticmethod
-    def _update_command_with_env_dependencies(cmd):
-        '''
-        If python plugin wasn't installed by pip, then try to indicate it to
-        pytest by update PYTHONPATH and append -p argument to pytest command.
-        '''
+    def _get_run_env(self) -> dict[str, str] | None:
+        """Add the plugin source dir to PYTHONPATH."""
+        if PYTEST_PLUGIN_INSTALLED:
+            return None
         env = os.environ.copy()
-        if not PYTEST_PLUGIN_INSTALLED:
-            cmd.extend(['-p', 'twister_harness.plugin'])
-            pytest_plugin_path = os.path.join(
-                ZEPHYR_BASE,
-                'scripts',
-                'pylib',
-                'pytest-twister-harness',
-                'src'
-            )
-            env['PYTHONPATH'] = pytest_plugin_path + os.pathsep + env.get('PYTHONPATH', '')
-            if _WINDOWS:
-                cmd_append_python_path = f'set PYTHONPATH={pytest_plugin_path};%PYTHONPATH% && '
-            else:
-                cmd_append_python_path = (
-                    f'export PYTHONPATH={pytest_plugin_path}:${{PYTHONPATH}} && '
-                )
+        pytest_plugin_path = os.path.join(
+            ZEPHYR_BASE, 'scripts', 'pylib', 'pytest-twister-harness', 'src'
+        )
+        env['PYTHONPATH'] = pytest_plugin_path + os.pathsep + env.get('PYTHONPATH', '')
+        if os.name == 'nt':
+            logger.debug(f'set "PYTHONPATH={env["PYTHONPATH"]}"')
         else:
-            cmd_append_python_path = ''
-        cmd_to_print = cmd_append_python_path + shlex.join(cmd)
-        logger.debug(f'Running pytest command: {cmd_to_print}')
-
-        return cmd, env
-
-    def _update_test_status(self):
-        if self.status == TwisterStatus.NONE:
-            self.instance.testcases = []
-            try:
-                self._parse_report_file(self.report_file)
-            except Exception as e:
-                logger.error(f'Error when parsing file {self.report_file}: {e}')
-                self.status = TwisterStatus.FAIL
-            finally:
-                if not self.instance.testcases:
-                    self.instance.init_cases()
-
-        self.instance.status = self.status if self.status != TwisterStatus.NONE else \
-                               TwisterStatus.FAIL
-        if self.instance.status in [TwisterStatus.ERROR, TwisterStatus.FAIL]:
-            self.instance.reason = self.instance.reason or 'Pytest failed'
-            self.instance.add_missing_case_status(TwisterStatus.BLOCK, self.instance.reason)
+            logger.debug(f"export PYTHONPATH={shlex.quote(env['PYTHONPATH'])}")
+        return env
 
     def _parse_report_file(self, report):
         tree = ET.parse(report)
@@ -798,10 +892,22 @@ class Power(Pytest):
 
 class Gtest(Harness):
     ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    # Google Test prints a test as <suite part>.<test part>. Either part can carry "/"-separated
+    # segments (an index or a name from a generator). The name shapes are:
+    # - TEST, TEST_F:                         Suite.Test
+    # - TYPED_TEST, index as type name:       Suite/0.Test
+    # - TYPED_TEST, custom type name:         Suite/Int.Test
+    # - TYPED_TEST_P, index as type name:     Prefix/Suite/0.Test
+    # - TYPED_TEST_P, custom type name:       Prefix/Suite/Int.Test
+    # - TEST_P, index as parameter name:      Prefix/Suite.Test/0
+    # - TEST_P, custom parameter name:        Prefix/Suite.Test/Name
+    # - TEST_P, empty instantiation prefix:   Suite.Test/0
+    # The internal test name is this token with "/" replaced by ".".
     _NAME_PATTERN = "[a-zA-Z_][a-zA-Z0-9_]*"
+    _SEGMENT_PATTERN = "[a-zA-Z0-9_]+"
     _SUITE_TEST_NAME_PATTERN = (
-            f"(?P<suite_name>{_NAME_PATTERN})(\\.|/)(?P<test_name>"
-            f"{_NAME_PATTERN})(/)?(?P<parametrized_test>[0-9]*\\.[a-zA-Z_]*)?"
+            f"(?P<full_name>(?P<suite_name>{_NAME_PATTERN})(?:/{_SEGMENT_PATTERN})*"
+            f"\\.{_NAME_PATTERN}(?:/{_SEGMENT_PATTERN})*)"
             )
     TEST_START_PATTERN = f".*\\[ RUN      \\] {_SUITE_TEST_NAME_PATTERN}"
     TEST_PASS_PATTERN = f".*\\[       OK \\] {_SUITE_TEST_NAME_PATTERN}"
@@ -833,9 +939,7 @@ class Gtest(Harness):
                 self.detected_suite_names.append(suite_name)
 
             # Generate the internal name of the test
-            name = "{}.{}.{}".format(self.id, suite_name, test_start_match.group("test_name"))
-            if test_start_match.group("parametrized_test"):
-                name += f".{test_start_match.group('parametrized_test')}"
+            name = self._internal_name(test_start_match)
 
             # Assert that we don't already have a running test
             assert (
@@ -859,6 +963,15 @@ class Gtest(Harness):
             tc = self.instance.get_case_or_create(self.id)
             if self.has_failures or self.tc is not None:
                 self.status = TwisterStatus.FAIL
+                if self.tc is not None and not self.has_failures:
+                    self.reason = f"Gtest failure - test {self.tc} did not finish"
+                else:
+                    failed = sum(
+                        1 for t in self.instance.testcases if t.status == TwisterStatus.FAIL
+                    )
+                    self.reason = "Gtest failure"
+                    if failed > 1:
+                        self.reason += f" - {failed} tests failed"
                 tc.status = TwisterStatus.FAIL
             else:
                 self.status = TwisterStatus.PASS
@@ -884,38 +997,23 @@ class Gtest(Harness):
         tc.status = state
         if tc.status == TwisterStatus.FAIL:
             self.has_failures = True
+            self.reason = f"Gtest failure - failed test {tc}"
             tc.output = self.testcase_output
         self.testcase_output = ""
         self._match = False
 
+    def _internal_name(self, match):
+        return f"{self.id}.{match.group('full_name').replace('/', '.')}"
+
     def _check_result(self, line):
-        test_pass_match = re.search(self.TEST_PASS_PATTERN, line)
-        if test_pass_match:
-            test_name = "{}.{}.{}".format(
-                        self.id, test_pass_match.group("suite_name"),
-                        test_pass_match.group("test_name")
-                    )
-            if test_pass_match.group("parametrized_test"):
-                test_name += f".{test_pass_match.group('parametrized_test')}"
-            return TwisterStatus.PASS, test_name
-        test_skip_match = re.search(self.TEST_SKIP_PATTERN, line)
-        if test_skip_match:
-            test_name = "{}.{}.{}".format(
-                        self.id, test_skip_match.group("suite_name"),
-                        test_skip_match.group("test_name")
-                    )
-            if test_skip_match.group("parametrized_test"):
-                test_name += f".{test_skip_match.group('parametrized_test')}"
-            return TwisterStatus.SKIP, test_name
-        test_fail_match = re.search(self.TEST_FAIL_PATTERN, line)
-        if test_fail_match:
-            test_name = "{}.{}.{}".format(
-                        self.id, test_fail_match.group("suite_name"),
-                        test_fail_match.group("test_name")
-                    )
-            if test_fail_match.group("parametrized_test"):
-                test_name += f".{test_fail_match.group('parametrized_test')}"
-            return TwisterStatus.FAIL, test_name
+        for pattern, status in (
+            (self.TEST_PASS_PATTERN, TwisterStatus.PASS),
+            (self.TEST_SKIP_PATTERN, TwisterStatus.SKIP),
+            (self.TEST_FAIL_PATTERN, TwisterStatus.FAIL),
+        ):
+            match = re.search(pattern, line)
+            if match:
+                return status, self._internal_name(match)
         return None, None
 
 
@@ -929,7 +1027,7 @@ class Test(Harness):
     test_suite_end_pattern = re.compile(
         r"TESTSUITE (?P<suite_name>\S*)\s+(?P<suite_status>succeeded|failed)"
     )
-    test_case_start_pattern = re.compile(r"START - (test_)?([a-zA-Z0-9_-]+)")
+    test_case_start_pattern = re.compile(r"START - (test_)?(\S+)")
     test_case_end_pattern = re.compile(
         r".*(PASS|FAIL|SKIP) - (test_)?(\S*) in (\d*[.,]?\d*) seconds"
     )
@@ -940,6 +1038,10 @@ class Test(Harness):
     test_case_summary_pattern = re.compile(
         r".*- (PASS|FAIL|SKIP) - \[([^\.]*).(test_)?(\S*)\] duration = (\d*[.,]?\d*) seconds"
     )
+    # Secondary restart signal: Ztest prints this at the start of every run
+    # (TC_PRINT_RUNID_START), so it is emitted on every (re)boot and, unlike the
+    # boot banner, is part of the test output rather than an application artifact.
+    test_runid_start_pattern = re.compile(r"RunID started:")
 
 
     def get_testcase(self, tc_name, phase, ts_name=None):
@@ -976,7 +1078,33 @@ class Test(Harness):
         tc_id = self.instance.testsuite.compose_case_name(tc_name)
         return self.instance.get_case_or_create(tc_id)
 
+    def discard_stale_ztest_state(self, phase, reason):
+        """ Drop Ztest state left pending by an image that has restarted.
+
+            Such state is console output captured from a previously-programmed
+            image -- the default flash_before=False opens the serial port before
+            flashing -- or from a run interrupted by a reboot. Attributing it to
+            this run leaves phantom 'started' cases that never end.
+        """
+        logger.debug(f"{phase}: {reason}; discarding stale Ztest state"
+                     f" suites={self.started_suites} cases={self.started_cases}")
+        for tc in self.instance.testcases:
+            if tc.status == TwisterStatus.STARTED:
+                tc.status = TwisterStatus.NONE
+        self.started_suites = {}
+        self.started_cases = {}
+        self.detected_suite_names = []
+        self.testcase_output = ""
+        self._match = False
+        self.ztest = False
+
     def start_suite(self, suite_name, phase='TS_START'):
+        if self.started_suites.get(suite_name, {}).get('count', 0) > 0 \
+           and not self.expect_reboot:
+            # A suite cannot start while it is already running, so the image
+            # restarted. Ztest emits this marker itself, so the restart evidence
+            # is present with no dependency on any Kconfig.
+            self.discard_stale_ztest_state(phase, f"suite '{suite_name}' already STARTED")
         if suite_name not in self.detected_suite_names:
             self.detected_suite_names.append(suite_name)
         if self.trace and suite_name not in self.instance.testsuite.ztest_suite_names:
@@ -985,11 +1113,7 @@ class Test(Harness):
             logger.debug(f"{phase}: unexpected Ztest suite '{suite_name}' is "
                          f"not present among: {self.instance.testsuite.ztest_suite_names}")
         if suite_name in self.started_suites:
-            if self.started_suites[suite_name]['count'] > 0 and not self.expect_reboot:
-                # Either the suite restarts itself or unexpected state transition.
-                logger.warning(f"{phase}: already STARTED '{suite_name}':"
-                               f"{self.started_suites[suite_name]}")
-            elif self.trace:
+            if self.trace:
                 logger.debug(f"{phase}: START suite '{suite_name}'")
             self.started_suites[suite_name]['count'] += 1
             self.started_suites[suite_name]['repeat'] += 1
@@ -1014,10 +1138,9 @@ class Test(Harness):
             logger.warning(f"{phase}: END suite '{suite_name}' without START detected")
 
     def start_case(self, tc_name, phase='TC_START'):
+        if self.started_cases.get(tc_name, {}).get('count', 0) > 0 and not self.expect_reboot:
+            self.discard_stale_ztest_state(phase, f"case '{tc_name}' already STARTED")
         if tc_name in self.started_cases:
-            if self.started_cases[tc_name]['count'] > 0 and not self.expect_reboot:
-                logger.warning(f"{phase}: already STARTED case "
-                               f"'{tc_name}':{self.started_cases[tc_name]}")
             self.started_cases[tc_name]['count'] += 1
         else:
             self.started_cases[tc_name] = { 'count': 1 }
@@ -1040,6 +1163,15 @@ class Test(Harness):
         testcase_match = None
         if self._match:
             self.testcase_output += line + "\n"
+        if (
+            not self.expect_reboot
+            and (self.started_suites or self.started_cases)
+            and self.test_runid_start_pattern.search(line)
+        ):
+            # Ztest emits this at the start of every run, so a second one seen
+            # while markers are still pending proves the image restarted. Catches
+            # a restart that never re-emits a marker that is still pending.
+            self.discard_stale_ztest_state('RUNID', 'RunID start marker while Ztest state pending')
         if test_suite_start_match := re.search(self.test_suite_start_pattern, line):
             self.start_suite(test_suite_start_match.group("suite_name"))
         elif test_suite_end_match := re.search(self.test_suite_end_pattern, line):
@@ -1152,28 +1284,13 @@ class Bsim(Script):
         shutil.copy(original_exe_path, new_exe_path)
 
 
-class Ctest(Script):
+class Ctest(ReportHarness):
+
+    report_tool = 'Ctest'
+
     def configure(self, instance: TestInstance):
         super().configure(instance)
         self.report_file = os.path.join(self.running_dir, 'report.xml')
-
-    def run(self, timeout):
-        assert self.instance is not None
-        try:
-            cmd = self.generate_command()
-            rc = self.run_command(cmd, timeout)
-            if rc in (ExitCode.INTERRUPTED, ExitCode.USAGE_ERROR, ExitCode.INTERNAL_ERROR):
-                self.status = TwisterStatus.ERROR
-                self.instance.reason = f'Ctest error - return code {rc}'
-            self._flush_output_to_log(cmd, rc)
-        except Exception as err:
-            logger.error(str(err))
-            self.status = TwisterStatus.FAIL
-            self.instance.reason = str(err)
-        finally:
-            self.instance.record(self.recording)
-            self._update_test_status()
-        return True
 
     def generate_command(self):
         config = self.instance.testsuite.harness_config
@@ -1198,24 +1315,6 @@ class Ctest(Script):
             command.extend(handler.options.ctest_args)
 
         return command
-
-    def _update_test_status(self):
-        if self.status == TwisterStatus.NONE:
-            self.instance.testcases = []
-            try:
-                self._parse_report_file(self.report_file)
-            except Exception as e:
-                logger.error(f'Error when parsing file {self.report_file}: {e}')
-                self.status = TwisterStatus.FAIL
-            finally:
-                if not self.instance.testcases:
-                    self.instance.init_cases()
-
-        self.instance.status = self.status if self.status != TwisterStatus.NONE else \
-                               TwisterStatus.FAIL
-        if self.instance.status in [TwisterStatus.ERROR, TwisterStatus.FAIL]:
-            self.instance.reason = self.instance.reason or 'Ctest failed'
-            self.instance.add_missing_case_status(TwisterStatus.BLOCK, self.instance.reason)
 
     def _parse_report_file(self, report):
         suite = junit.JUnitXml.fromfile(report)

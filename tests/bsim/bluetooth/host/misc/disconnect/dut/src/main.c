@@ -31,9 +31,6 @@ DEFINE_FLAG_STATIC(flag_data_length_updated);
 
 static atomic_t notifications;
 
-/* Defined in hci_core.c */
-extern k_tid_t bt_testing_tx_tid_get(void);
-
 static struct bt_conn *dconn;
 
 static void connected(struct bt_conn *conn, uint8_t conn_err)
@@ -228,7 +225,7 @@ void test_procedure_0(void)
 	 *
 	 * [setup]
 	 * - connect ACL, DUT is central and GATT client
-	 * - update data length (tinyhost doens't have recombination)
+	 * - update data length (tinyhost doesn't have recombination)
 	 * - dut: subscribe to NOTIFY on tester CHRC
 	 *
 	 * [procedure]

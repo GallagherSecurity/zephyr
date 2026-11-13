@@ -139,8 +139,7 @@ static void ag_sco_disconnected(struct bt_conn *sco_conn, uint8_t reason)
 		return;
 	}
 
-	bt_conn_unref(active_sco_conn);
-	active_sco_conn = NULL;
+	bt_conn_drop(&active_sco_conn);
 
 	err = pcm_rx_stop();
 	if (err != 0) {
@@ -377,7 +376,7 @@ static void discovery_timeout_cb(const struct bt_br_discovery_result *results, s
 		default_conn = bt_conn_create_br(&results[i].addr, BT_BR_CONN_PARAM_DEFAULT);
 
 		if (default_conn == NULL) {
-			printk("Fail to create the connecton\n");
+			printk("Fail to create the connection\n");
 		} else {
 			bt_conn_unref(default_conn);
 		}

@@ -23,10 +23,16 @@ endif # MODEM_DEDICATED_WORKQUEUE
 
 config MODEM_CHAT
 	bool "Modem chat module"
-	select RING_BUFFER
 	select MODEM_PIPE
 
 if MODEM_CHAT
+
+config MODEM_CHAT_COMMANDS_CONDITIONAL
+	bool
+	help
+	  Modem chat usage requires conditional command support. This option
+	  should be selected by any modem chat user that defines a conditional
+	  command, for example `MODEM_CHAT_SCRIPT_CMD_RESP_COND`.
 
 config MODEM_CHAT_WORK_BUFFER_SIZE
 	int "Modem chat work buffer size in bytes"
@@ -36,12 +42,20 @@ config MODEM_CHAT_LOG_BUFFER_SIZE
 	int "Modem chat log buffer size in bytes"
 	default 128
 
+config MODEM_CHAT_LOG_RAW_RX
+	bool "Log raw received modem lines"
+	depends on LOG
+	depends on MODEM_MODULES_LOG_LEVEL_DBG
+	help
+	  Log the raw received modem line instead of the parsed debug logging.
+	  This preserves separators and empty fields exactly as
+	  received before modem_chat tokenizes the response.
+
 endif
 
 config MODEM_CMUX
 	bool "Modem CMUX module"
 	select MODEM_PIPE
-	select RING_BUFFER
 	select EVENTS
 	select CRC
 
@@ -135,7 +149,6 @@ config MODEM_PPP
 	bool "Modem PPP module"
 	depends on NET_L2_PPP
 	select MODEM_PIPE
-	select RING_BUFFER
 	select CRC
 	select PM_DEVICE_RUNTIME_ASYNC if PM_DEVICE_RUNTIME
 
@@ -163,7 +176,6 @@ config MODEM_STATS_BUFFER_NAME_SIZE
 
 config MODEM_UBX
 	bool "Modem U-BLOX module"
-	select RING_BUFFER
 	select MODEM_PIPE
 	help
 	  Enable Modem U-BLOX module.

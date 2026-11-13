@@ -49,15 +49,14 @@
 #else
 #define MDM_CHAT_ARGV_BUFFER_SIZE 32
 #endif /* CONFIG_HL78XX_GNSS */
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
 
 #define NTN_POSITION_METHOD_IGSS         "IGSS"
 #define NTN_POSITION_METHOD_MANUAL       "MANUAL"
 #define NTN_POSITION_METHOD_TEXT_MAX_LEN sizeof(NTN_POSITION_METHOD_MANUAL)
 
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
-#define MDM_MAX_DATA_LENGTH CONFIG_MODEM_HL78XX_UART_BUFFER_SIZES
-
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
+#define MDM_MAX_DATA_LENGTH       CONFIG_MODEM_HL78XX_UART_BUFFER_SIZES
 #define MDM_MAX_SOCKETS           CONFIG_MODEM_HL78XX_NUM_SOCKETS
 #define MDM_MAX_PDP_CONTEXTS      CONFIG_MODEM_HL78XX_MAX_PDP_CONTEXTS
 #define MDM_BASE_SOCKET_NUM       1
@@ -65,6 +64,8 @@
 #define MDM_BAND_HEX_STR_LEN      (MDM_BAND_BITMAP_LEN_BYTES * 2 + 1)
 
 #define MDM_KBND_BITMAP_MAX_ARRAY_SIZE 64
+#define HL78XX_DYNAMIC_CMD_MAX_MATCHES 12U
+
 
 #define ADDRESS_FAMILY_IP         "IP"
 #define ADDRESS_FAMILY_IP4        "IPV4"
@@ -89,14 +90,6 @@
 #else
 #define MODEM_HL78XX_ADDRESS_FAMILY ADDRESS_FAMILY_IPV6
 #endif
-
-/* Modem Communication Patterns */
-#define EOF_PATTERN         "--EOF--Pattern--"
-#define TERMINATION_PATTERN "+++"
-#define CONNECT_STRING      "CONNECT"
-#define CME_ERROR_STRING    "+CME ERROR: "
-#define ERROR_STRING        "ERROR"
-#define OK_STRING           "OK"
 
 /* RAT (Radio Access Technology) commands */
 #define SET_RAT_M1_CMD_LEGACY    "AT+KSRAT=0"
@@ -129,8 +122,9 @@
 /* PDP Context commands */
 #define DEACTIVATE_PDP_CONTEXT             "AT+CGACT=0"
 #define ACTIVATE_PDP_CONTEXT               "AT+CGACT=1"
-/* LTE coverage check command */
+/* Registration-ready cell queries */
 #define CHECK_LTE_COVERAGE_CMD             "AT+KCELLMEAS=1"
+#define CHECK_GSM_CELL_INFO_CMD            "AT+KCELL=0"
 #define WAKE_LTE_LAYER_CMD                 "AT%PINGCMD=0,\"8.8.8.8\",1"
 
 /**
@@ -154,17 +148,23 @@
 		    (LOG_DBG(str, ##__VA_ARGS__)), \
 		    ((void)0))
 
+#define HL78XX_LOG_HEXDUMP_DBG(str, ...)                                                           \
+	COND_CODE_1(CONFIG_MODEM_HL78XX_LOG_CONTEXT_VERBOSE_DEBUG, \
+		    (LOG_HEXDUMP_DBG(str, ##__VA_ARGS__)), \
+		    ((void)0))
+
 /* clang-format on */
 
 /* HL78XX States */
 enum hl78xx_state {
 	MODEM_HL78XX_STATE_IDLE = 0,
 	MODEM_HL78XX_STATE_RESET_PULSE,
+	MODEM_HL78XX_STATE_SOFT_RESET,
 	MODEM_HL78XX_STATE_POWER_ON_PULSE,
 	MODEM_HL78XX_STATE_AWAIT_POWER_ON,
 	MODEM_HL78XX_STATE_SET_BAUDRATE,
 	MODEM_HL78XX_STATE_RUN_INIT_SCRIPT,
-	MODEM_HL78XX_STATE_RUN_INIT_FAIL_DIAGNOSTIC_SCRIPT,
+	MODEM_HL78XX_STATE_RECOVERY,
 	MODEM_HL78XX_STATE_RUN_RAT_CONFIG_SCRIPT,
 	MODEM_HL78XX_STATE_RUN_PMC_CONFIG_SCRIPT,
 	MODEM_HL78XX_STATE_RUN_ENABLE_GPRS_SCRIPT,
@@ -198,6 +198,7 @@ enum hl78xx_state {
 enum hl78xx_event {
 	MODEM_HL78XX_EVENT_RESUME = 0,
 	MODEM_HL78XX_EVENT_SUSPEND,
+	MODEM_HL78XX_EVENT_RESTART_REQUESTED,
 	MODEM_HL78XX_EVENT_SCRIPT_SUCCESS,
 	MODEM_HL78XX_EVENT_SCRIPT_FAILED,
 	MODEM_HL78XX_EVENT_SCRIPT_REQUIRE_RESTART,
@@ -209,9 +210,9 @@ enum hl78xx_event {
 	/* Modem unexpected restart event */
 	MODEM_HL78XX_EVENT_MDM_RESTART,
 	MODEM_HL78XX_EVENT_SOCKET_READY,
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
 	MODEM_HL78XX_EVENT_NTN_POSREQ,
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
 	MODEM_HL78XX_EVENT_PHONE_FUNCTIONALITY_CHANGED,
 #ifdef CONFIG_HL78XX_GNSS
 	MODEM_HL78XX_EVENT_GNSS_START_REQUESTED,
@@ -224,6 +225,7 @@ enum hl78xx_event {
 	/* Explicit GNSS mode switching events */
 	MODEM_HL78XX_EVENT_GNSS_MODE_ENTER_REQUESTED,
 	MODEM_HL78XX_EVENT_GNSS_MODE_EXIT_REQUESTED,
+	MODEM_HL78XX_EVENT_LTE_RESTORE_REQUESTED,
 #endif /* CONFIG_HL78XX_GNSS */
 #ifdef CONFIG_MODEM_HL78XX_LOW_POWER_MODE
 	MODEM_HL78XX_EVENT_DEVICE_ASLEEP,
@@ -243,6 +245,10 @@ enum hl78xx_event {
 	MODEM_HL78XX_EVENT_WDSI_FIRMWARE_INSTALL_FAILED,
 #endif /* CONFIG_MODEM_HL78XX_AIRVANTAGE */
 	MODEM_HL78XX_EVENT_AT_CMD_TIMEOUT,
+#if defined(CONFIG_MODEM_HL78XX_AUTORAT) && defined(CONFIG_MODEM_HL78XX_HAS_KSTATEV_URC)
+	/* RAT switched by AUTORAT; triggers reg-status URC reconfiguration. */
+	MODEM_HL78XX_EVENT_AUTORAT_RAT_CHANGED,
+#endif /* CONFIG_MODEM_HL78XX_AUTORAT && CONFIG_MODEM_HL78XX_HAS_KSTATEV_URC */
 	MODEM_HL78XX_EVENT_COUNT
 };
 
@@ -277,13 +283,6 @@ enum hl78xx_info_transfer_event {
 	EVENT_ALL_REGISTRATION_FAILED
 };
 
-struct kselacq_syntax {
-	bool mode;
-	enum hl78xx_cell_rat_mode rat1;
-	enum hl78xx_cell_rat_mode rat2;
-	enum hl78xx_cell_rat_mode rat3;
-};
-
 struct kband_syntax {
 	uint8_t rat;
 	/* Max 64 digits representation format is supported
@@ -308,7 +307,8 @@ struct hl78xx_psm_status {
 struct hl78xx_edrx_status {
 	enum hl78xx_edrx_event current;
 	enum hl78xx_edrx_event previous;
-	bool is_edrx_idle_requested;
+	bool is_requested;
+	bool ignore_feeding;
 };
 #endif /* CONFIG_MODEM_HL78XX_EDRX */
 
@@ -317,6 +317,13 @@ struct hl78xx_power_down_status {
 	enum power_down_event current;
 	enum power_down_event previous;
 	bool is_power_down_requested;
+	/** A power down has been announced and owns the state machine.
+	 *
+	 * Set when the power down work runs, cleared once the modem is off.
+	 * Paths that would otherwise start fresh network activity check this so
+	 * they do not compete with the shutdown for the command interface.
+	 */
+	bool shutdown_pending;
 };
 #endif /* CONFIG_MODEM_HL78XX_POWER_DOWN */
 
@@ -378,6 +385,7 @@ struct modem_buffers {
 	uint8_t chat_rx[CONFIG_MODEM_HL78XX_CHAT_BUFFER_SIZES];
 	uint8_t cmd_buffer[CONFIG_MODEM_HL78XX_COMMAND_BUFFER_SIZE];
 	size_t cmd_len;
+	struct modem_chat_match dynamic_matches[HL78XX_DYNAMIC_CMD_MAX_MATCHES];
 	uint8_t *delimiter;
 	uint8_t *filter;
 	uint8_t *argv[MDM_CHAT_ARGV_BUFFER_SIZE];
@@ -401,29 +409,64 @@ struct modem_identity {
 struct hl78xx_phone_functionality_work {
 	enum hl78xx_phone_functionality functionality;
 	bool in_progress;
+	/* True only while `functionality` reflects a value the modem itself
+	 * confirmed in this power session (a +CFUN response, or an OK to an
+	 * AT+CFUN command). Cleared at every power boundary: the modem boots
+	 * CFUN=1 unconfigured regardless of what was last commanded, and some
+	 * firmware persists CFUN=4 across CPWROFF, so a cached value from a
+	 * previous session is a guess either way. Consumers that shortcut on
+	 * `functionality` must check this first and re-verify when false.
+	 */
+	bool valid;
 };
-
-struct hl78xx_network_operator {
-	char operator[MDM_MODEL_LENGTH];
-	uint8_t format;
-};
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
 
 struct ntn_rat_state {
 	char pos_mode[NTN_POSITION_METHOD_TEXT_MAX_LEN];
 	bool is_dynamic;
 };
 
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
 
 struct hl78xx_modem_boot_status {
 	bool is_booted_previously;
+	bool init_sequence_completed;
 	enum hl78xx_module_status status;
 };
 
 struct hl78xx_gprs_status {
 	bool is_active;
 	int8_t cid;
+};
+
+#ifdef CONFIG_MODEM_HL78XX_12
+struct hl78xx_gsm_kcell_status {
+	bool has_serving_cell;
+	bool has_timing_advance;
+	uint8_t cell_count;
+	uint8_t cell_type;
+	uint16_t arfcn;
+	uint8_t bsic;
+	char plmn[7];
+	uint16_t lac;
+	uint32_t cell_id;
+	uint8_t rssi_raw;
+	int16_t rssi_dbm;
+	uint8_t timing_advance;
+};
+#endif /* CONFIG_MODEM_HL78XX_12 */
+
+struct hl78xx_signal_status {
+	int16_t rssi;
+	int16_t rsrp;
+	int16_t rsrq;
+	int16_t sinr;
+};
+
+struct hl78xx_band_status {
+	struct kband_syntax kbndcfg[HL78XX_RAT_COUNT];
+	/** Active band from AT+KBND? - rat and bitmap of the currently used band. */
+	struct kband_syntax active_band;
 };
 
 #ifdef CONFIG_MODEM_HL78XX_AIRVANTAGE
@@ -456,50 +499,116 @@ struct hl78xx_modem_uart_status {
 	uint8_t baudrate_detection_retry;
 #endif /* CONFIG_MODEM_HL78XX_AUTO_BAUDRATE */
 };
-struct modem_status {
-	struct registration_status registration;
-	int16_t rssi;
-	uint8_t ksrep;
-	int16_t rsrp;
-	int16_t rsrq;
-	uint16_t script_fail_counter;
-	int variant;
-	enum hl78xx_state state;
-	struct kband_syntax kbndcfg[HL78XX_RAT_COUNT];
-	struct hl78xx_gprs_status gprs[MDM_MAX_PDP_CONTEXTS];
-	struct hl78xx_modem_boot_status boot;
-	struct hl78xx_phone_functionality_work phone_functionality;
-	struct apn_state apn;
-	struct hl78xx_network_operator network_operator;
-#ifdef CONFIG_MODEM_HL78XX_AIRVANTAGE
-	struct hl78xx_wdsi_status wdsi;
-#endif /* CONFIG_MODEM_HL78XX_AIRVANTAGE */
-#ifdef CONFIG_MODEM_HL78XX_RAT_NBNTN
-	struct ntn_rat_state ntn_rat;
-#endif /* CONFIG_MODEM_HL78XX_RAT_NBNTN */
-	struct hl78xx_modem_uart_status uart;
+
+struct hl78xx_restart_status {
+	bool requested;
+	enum hl78xx_modem_restart_mode mode;
+	bool config_pending;
+};
+
+struct hl78xx_kcellmeas_status {
+	uint16_t timeout;
+	bool bootstrap_done;
+};
+
 #ifdef CONFIG_MODEM_HL78XX_LOW_POWER_MODE
-	/* Power Management Control */
-	struct ksleep_syntax pmc_sleep;
-	struct cpsms_syntax pmc_cpsms;
-	struct kedrxcfg_syntax pmc_kedrxcfg[2];
+struct hl78xx_low_power_status {
+	/** Power Management Control */
+	struct ksleep_syntax sleep;
+	struct cpsms_syntax cpsms;
+	struct kedrxcfg_syntax kedrxcfg[2];
+
 #ifdef CONFIG_MODEM_HL78XX_PSM
 	struct hl78xx_psm_status psmev;
 	bool awaiting_psm_confirmation;
 #endif /* CONFIG_MODEM_HL78XX_PSM */
+
 #ifdef CONFIG_MODEM_HL78XX_POWER_DOWN
 	struct hl78xx_power_down_status power_down;
 	bool ignore_power_down_feeding;
 #endif /* CONFIG_MODEM_HL78XX_POWER_DOWN */
+
 #ifdef CONFIG_MODEM_HL78XX_EDRX
 	struct hl78xx_edrx_status edrxev;
-	bool ignore_edrx_idle_feeding;
 #endif /* CONFIG_MODEM_HL78XX_EDRX */
-	bool lpm_restore_pending;
+
+	bool restore_pending;
+};
 #endif /* CONFIG_MODEM_HL78XX_LOW_POWER_MODE */
+
+#define HL78XX_SCRIPT_RESULT_BIT(_result) BIT(_result)
+
+struct hl78xx_data;
+struct hl78xx_script_recovery_rule;
+
+struct hl78xx_script_failure {
+	const struct hl78xx_script_recovery_rule *recovery_rule;
+	const struct modem_chat_script_chat *script_chat;
+	enum modem_chat_script_result result;
+	enum hl78xx_state origin_state;
+	bool valid;
+};
+
+typedef int (*hl78xx_script_recovery_action_t)(struct hl78xx_data *data,
+					       const struct hl78xx_script_failure *failure);
+
+struct hl78xx_script_recovery_rule {
+	enum hl78xx_state failed_state;
+	const char *failed_request;
+	const struct modem_chat_script_chat *failed_script_chat;
+	uint32_t result_mask;
+	hl78xx_script_recovery_action_t action;
+	/* State whose specified event confirms full recovery. */
+	enum hl78xx_state success_state;
+	enum hl78xx_event success_event;
+	/* State to resume after recovery action is completed */
+	enum hl78xx_state resume_state;
+	uint8_t max_attempts;
+};
+
+struct hl78xx_script_recovery {
+	const struct hl78xx_script_recovery_rule *attempted_rule;
+	uint8_t attempts;
+};
+
+struct modem_status {
+	struct registration_status registration;
+	struct hl78xx_network_info network_info;
+	struct hl78xx_cxreg_status cxreg;
+	struct hl78xx_signal_status signal;
+
+#ifdef CONFIG_MODEM_HL78XX_12
+	struct hl78xx_gsm_kcell_status gsm_kcell;
+#endif /* CONFIG_MODEM_HL78XX_12 */
+
+	uint8_t ksrep;
+	int variant;
+	enum hl78xx_state state;
+
+	struct hl78xx_band_status band;
+	struct hl78xx_gprs_status gprs[MDM_MAX_PDP_CONTEXTS];
+	struct hl78xx_modem_boot_status boot;
+	struct hl78xx_phone_functionality_work phone_functionality;
+	struct hl78xx_restart_status restart;
+	struct apn_state apn;
+
+#ifdef CONFIG_MODEM_HL78XX_AIRVANTAGE
+	struct hl78xx_wdsi_status wdsi;
+#endif /* CONFIG_MODEM_HL78XX_AIRVANTAGE */
+
+#ifdef CONFIG_MODEM_HL78XX_NTN_SUPPORT
+	struct ntn_rat_state ntn_rat;
+#endif /* CONFIG_MODEM_HL78XX_NTN_SUPPORT */
+
+	struct hl78xx_modem_uart_status uart;
+
+#ifdef CONFIG_MODEM_HL78XX_LOW_POWER_MODE
+	struct hl78xx_low_power_status lpm;
+#endif /* CONFIG_MODEM_HL78XX_LOW_POWER_MODE */
+
 	bool rrc_idle;
-	uint16_t kcellmeas_timeout;
-	bool kcellmeas_bootstrap_done;
+	struct hl78xx_kcellmeas_status kcellmeas;
+	bool at_cmd_ready_sent;
 };
 
 struct modem_gpio_callbacks {
@@ -516,6 +625,77 @@ struct modem_event_system {
 	struct k_mutex event_rb_lock;
 };
 
+enum hl78xx_at_cmd_terminal_result {
+	HL78XX_AT_CMD_TERMINAL_RESULT_NONE = 0,
+	HL78XX_AT_CMD_TERMINAL_RESULT_OK,
+	HL78XX_AT_CMD_TERMINAL_RESULT_ERROR,
+};
+
+enum hl78xx_at_cmd_error_type {
+	HL78XX_AT_CMD_ERROR_TYPE_NONE = 0,
+	HL78XX_AT_CMD_ERROR_TYPE_GENERIC,
+	HL78XX_AT_CMD_ERROR_TYPE_CME,
+	HL78XX_AT_CMD_ERROR_TYPE_CMS,
+};
+
+struct hl78xx_at_cmd_capture_ctx {
+	char *buf;
+	size_t len;
+	size_t used;
+	bool captured;
+	bool truncated;
+	enum hl78xx_at_cmd_terminal_result terminal_result;
+	enum hl78xx_at_cmd_error_type error_type;
+	int error_code;
+};
+
+struct hl78xx_semaphores {
+	struct k_sem script_stopped_sem_tx_int;
+	struct k_sem script_stopped_sem_rx_int;
+	struct k_sem suspended_sem;
+#ifdef CONFIG_MODEM_HL78XX_STAY_IN_BOOT_MODE_FOR_ROAMING
+	struct k_sem stay_in_boot_mode_sem;
+#endif /* CONFIG_MODEM_HL78XX_STAY_IN_BOOT_MODE_FOR_ROAMING */
+};
+
+struct hl78xx_work {
+	struct k_work_delayable timeout_work;
+#ifdef CONFIG_MODEM_HL78XX_POWER_DOWN
+	struct k_work_delayable hl78xx_pwr_dwn_work;
+	struct k_work_delayable power_down_shutdown_work;
+#endif /* CONFIG_MODEM_HL78XX_POWER_DOWN */
+#ifdef CONFIG_MODEM_HL78XX_LOW_POWER_MODE
+	struct k_work_delayable hl78xx_edrx_idle_work;
+	struct k_work_delayable hl78xx_vgpio_debounce_work;
+	struct k_work_delayable hl78xx_gpio6_debounce_work;
+#endif /* CONFIG_MODEM_HL78XX_LOW_POWER_MODE */
+#if defined(CONFIG_MODEM_HL78XX_RSSI_WORK)
+	struct k_work_delayable rssi_query_work;
+#endif /* CONFIG_MODEM_HL78XX_RSSI_WORK */
+};
+
+struct hl78xx_low_power_state {
+#ifdef CONFIG_MODEM_HL78XX_LOW_POWER_MODE
+	bool hl78xx_vgpio_pending_state;
+	bool hl78xx_gpio6_pending_state;
+#endif /* CONFIG_MODEM_HL78XX_LOW_POWER_MODE */
+};
+
+struct hl78xx_devices {
+	const struct device *hl78xx;
+
+	/** GNSS device */
+	const struct device *gnss;
+
+	/** Offload device */
+	const struct device *offload;
+};
+
+struct hl78xx_runtime_band {
+	hl78xx_runtime_band_provider_t provider;
+	void *provider_user_data;
+};
+
 struct hl78xx_data {
 	struct modem_pipe *uart_pipe;
 	struct modem_backend_uart uart_backend;
@@ -525,43 +705,39 @@ struct hl78xx_data {
 
 	struct k_mutex tx_lock;
 	struct k_mutex api_lock;
-	struct k_sem script_stopped_sem_tx_int;
-	struct k_sem script_stopped_sem_rx_int;
-	struct k_sem suspended_sem;
-#ifdef CONFIG_MODEM_HL78XX_STAY_IN_BOOT_MODE_FOR_ROAMING
-	struct k_sem stay_in_boot_mode_sem;
-#endif /* CONFIG_MODEM_HL78XX_STAY_IN_BOOT_MODE_FOR_ROAMING */
+	struct hl78xx_semaphores sems;
 
 	struct modem_buffers buffers;
 	struct modem_identity identity;
 	struct modem_status status;
 	struct modem_gpio_callbacks gpio_cbs;
 	struct modem_event_system events;
-	struct k_work_delayable timeout_work;
-#ifdef CONFIG_MODEM_HL78XX_POWER_DOWN
-	struct k_work_delayable hl78xx_pwr_dwn_work;
-#endif
-#ifdef CONFIG_MODEM_HL78XX_LOW_POWER_MODE
-	struct k_work_delayable hl78xx_edrx_idle_work;
-	struct k_work_delayable hl78xx_gpio6_debounce_work;
-	bool hl78xx_gpio6_pending_state;
-#endif
-	/* Track leftover socket data state previously stored as a TU-global.
+
+	struct hl78xx_work work;
+	struct hl78xx_low_power_state low_power;
+
+	/**
+	 * Track leftover socket data state previously stored as a TU-global.
 	 * Moving this into the per-modem data reduces global BSS and keeps
 	 * state colocated with the modem instance.
 	 */
 	atomic_t state_leftover;
-#if defined(CONFIG_MODEM_HL78XX_RSSI_WORK)
-	struct k_work_delayable rssi_query_work;
-#endif
 
-	const struct device *dev;
-	/* GNSS device */
-	const struct device *gnss_dev;
-	/* Offload device */
-	const struct device *offload_dev;
+	struct hl78xx_devices devices;
 
 	struct kselacq_syntax kselacq_data;
+	/**
+	 * When set, hl78xx_rat_cfg() must not re-apply the configured Auto-RAT
+	 * PRL over a deliberately cleared one. The application sets this while
+	 * the modem is being moved to NB-NTN, where the PRL is cleared on
+	 * purpose and must survive the restart that latches the RAT change.
+	 */
+	bool autorat_inhibit;
+	struct hl78xx_runtime_band runtime_band;
+	struct hl78xx_at_cmd_capture_ctx at_cmd_capture;
+
+	struct hl78xx_script_failure script_failure;
+	struct hl78xx_script_recovery script_recovery;
 };
 
 struct hl78xx_config {
@@ -595,6 +771,11 @@ struct hl78xx_config {
 static inline bool hl78xx_gpio_is_enabled(const struct gpio_dt_spec *gpio)
 {
 	return (gpio->port != NULL);
+}
+
+static inline bool hl78xx_is_config_restart_pending(const struct hl78xx_data *data)
+{
+	return (data != NULL) && data->status.restart.config_pending;
 }
 
 /* Forward-declare for variant ops */
@@ -662,6 +843,13 @@ struct hl78xx_variant_ops {
 	 * HL7812: Supplements +PSMEV URC; tracks eDRX/power-down.
 	 */
 	void (*gpio6_handler)(struct hl78xx_data *data, bool pin_state);
+
+	/**
+	 * @brief VGPIO debounce delay in milliseconds.
+	 *
+	 * Set to 0 to disable debounce and process VGPIO edges immediately.
+	 */
+	uint16_t vgpio_debounce_ms;
 
 	/**
 	 * @brief GPIO6 debounce delay in milliseconds.
@@ -757,16 +945,6 @@ struct hl78xx_variant_ops {
 	void (*check_lpm_state)(struct hl78xx_data *data, bool *in_lpm, bool *early_return);
 
 	/**
-	 * @brief Parse +CxREG ACT value into RAT mode for variant-specific URC formats.
-	 *
-	 * @param act_value ACT value parsed from +CxREG payload.
-	 * @param[out] rat_mode Parsed RAT mode if handled.
-	 * @return true when ACT parsing is supported by this variant.
-	 */
-	bool (*cxreg_try_parse_rat_mode)(struct hl78xx_data *data, int act_value,
-					 enum hl78xx_cell_rat_mode *rat_mode);
-
-	/**
 	 * @brief Handle data-ready semantics when +CEREG/+CREG indicates registration.
 	 *
 	 * Some variants use registration URCs as an early data-ready signal
@@ -775,9 +953,9 @@ struct hl78xx_variant_ops {
 	void (*on_registered_ready)(struct hl78xx_data *data);
 
 	/**
-	 * @brief Handle data-ready semantics when +KCELLMEAS indicates valid signal.
+	 * @brief Handle data-ready semantics when a cell-readiness indication arrives.
 	 *
-	 * Some variants release socket communications on this signal,
+	 * Some variants release socket communications on +KCELLMEAS/+KCELL,
 	 * while others complete restore later in carrier-on processing.
 	 */
 	void (*on_kcellmeas_ready)(struct hl78xx_data *data);
@@ -1121,6 +1299,42 @@ void hl78xx_enter_state(struct hl78xx_data *data, enum hl78xx_state state);
 void hl78xx_delegate_event(struct hl78xx_data *data, enum hl78xx_event evt);
 
 /**
+ * @brief Resume LTE service, running the config chain first if this session
+ *        has not been configured yet.
+ *
+ * Enters RUN_INIT_SCRIPT when init_sequence_completed is false (the chain ends
+ * by setting it and falling through to GPRS enable), or RUN_ENABLE_GPRS_SCRIPT
+ * directly when the session is already configured. Use this instead of
+ * entering RUN_ENABLE_GPRS_SCRIPT directly on any path that restores LTE after
+ * a detour (GNSS mode, airplane mode, carrier off): a session that booted
+ * straight into the detour has an unconfigured modem, and registration URCs
+ * from an unconfigured modem are deliberately discarded by hl78xx_on_cxreg().
+ *
+ * @param data Modem data structure.
+ */
+void hl78xx_enter_lte_restore_state(struct hl78xx_data *data);
+
+/**
+ * @brief Discard driver state that describes a modem session that has ended.
+ *
+ * Must be called at every hardware session boundary: cold power-on
+ * (AWAIT_POWER_ON entry), graceful power-down (INIT_POWER_OFF entry) and
+ * detected unexpected restart (+KSUP while already booted). The modem's RAM
+ * state is gone at these points, so any driver-side record of it — the cached
+ * phone functionality and the GNSS engine/search latches — is stale and must
+ * not survive into the next session. (Leaving them set is what made GNSS
+ * permanently unstartable: a gnss_start_status latched true could only be
+ * cleared by a +GNSSEV stop URC that a powered-off modem can never send.)
+ *
+ * Deliberately does NOT touch request/intent flags (gnss_mode_enter_pending):
+ * those record what the caller wants, not what the hardware was doing, and the
+ * boot path consumes them to serve the request in the new session.
+ *
+ * @param data Modem data structure.
+ */
+void hl78xx_reset_modem_session_state(struct hl78xx_data *data);
+
+/**
  * @brief notif_carrier_off - Brief description of the function.
  * @param dev Description of dev.
  */
@@ -1148,6 +1362,20 @@ int check_if_any_socket_connected(const struct device *dev);
 void hl78xx_start_timer(struct hl78xx_data *data, k_timeout_t timeout);
 
 /**
+ * @brief Reschedule a pending timeout work item.
+ * @param data pointer to hl78xx_data.
+ * @param timeout the time to wait before submitting the work item.
+ */
+void hl78xx_reschedule_timer(struct hl78xx_data *data, k_timeout_t timeout);
+
+/**
+ * @brief Get the remaining time for the timeout work item.
+ * @param data pointer to hl78xx_data.
+ * @return remaining time in milliseconds.
+ */
+uint32_t hl78xx_get_timer_remaining(struct hl78xx_data *data);
+
+/**
  * @brief Stop the timer.
  * @param data pointer to hl78xx_data.
  */
@@ -1165,7 +1393,7 @@ void event_dispatcher_dispatch(struct hl78xx_evt *notif);
 
 static inline bool hl78xx_psm_is_active(struct hl78xx_data *data)
 {
-	return data->status.psmev.current != HL78XX_PSM_EVENT_NONE;
+	return data->status.lpm.psmev.current != HL78XX_PSM_EVENT_NONE;
 }
 
 #endif /* CONFIG_MODEM_HL78XX_PSM */

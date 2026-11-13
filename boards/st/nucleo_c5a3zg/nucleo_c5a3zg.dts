@@ -10,6 +10,7 @@
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include "arduino_r3_connector.dtsi"
 #include "st_morpho_connector.dtsi"
+#include "m2_memory_connector.dtsi"
 
 / {
 	model = "STMicroelectronics STM32C5A3ZG-NUCLEO board";
@@ -21,6 +22,7 @@
 		zephyr,code-partition = &slot0_partition;
 		zephyr,shell-uart = &lpuart1;
 		zephyr,sram = &sram1;
+		zephyr,system-timer = &lptim1;
 		zephyr,flash = &flash0;
 	};
 
@@ -64,16 +66,17 @@
 	};
 };
 
-&adc1 {
+&adc12_common {
 	clocks = <&rcc STM32_CLOCK(AHB2, 10)>,
 		 <&rcc STM32_SRC_HSIK ADCDAC_SEL(3)>;
 	status = "okay";
 };
 
+&adc1 {
+	status = "okay";
+};
+
 &adc2 {
-	clocks = <&rcc STM32_CLOCK(AHB2, 10)>,
-		 <&rcc STM32_SRC_HSIK ADCDAC_SEL(3)>;
-	clock-names = "adcx", "adc_ker";
 	pinctrl-0 = <&adc2_in12_ph4 &adc2_in13_ph5>; /* Arduino A1 & A2 */
 	pinctrl-names = "default";
 	status = "okay";
@@ -129,6 +132,11 @@
 	status = "okay";
 };
 
+&clk48 {
+	clocks = <&rcc STM32_SRC_HSE CK48_SEL(3)>;
+	status = "okay";
+};
+
 &fdcan1 {
 	clocks = <&rcc STM32_CLOCK(APB1_2, 9)>,
 		 <&rcc STM32_SRC_PSIK FDCAN_SEL(2)>;
@@ -138,6 +146,14 @@
 };
 
 &crc {
+	status = "okay";
+};
+
+&hash {
+	status = "okay";
+};
+
+&aes {
 	status = "okay";
 };
 
@@ -176,12 +192,16 @@
 &i2c1 {
 	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 6 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 7 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 };
 
 &i2c2 {
-	pinctrl-0 = <&i2c2_scl_pb10 &i2c2_sda_pb4>;
+	pinctrl-0 = <&i2c2_scl_pf1 &i2c2_sda_pf0>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiof 1 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiof 0 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 };
 
@@ -201,6 +221,12 @@
 };
 
 &lpdma1 {
+	status = "okay";
+};
+
+&lptim1 {
+	clocks = <&rcc STM32_CLOCK(APB3, 11)>,
+		 <&rcc STM32_SRC_LSE LPTIM1_SEL(2)>;
 	status = "okay";
 };
 
@@ -249,8 +275,6 @@
 };
 
 &rng {
-	clocks = <&rcc STM32_CLOCK(AHB2, 18)>,
-		 <&rcc STM32_SRC_CK48 CK48_SEL(2)>;
 	status = "okay";
 };
 
@@ -268,6 +292,14 @@
 	status = "okay";
 };
 
+&xspi1 {
+	pinctrl-0 = <&xspi1_clk_pf10 &xspi1_nclk_pf11 &xspi1_dqs_pb2 &xspi1_ncs1_pe11
+		     &xspi1_io0_pf9 &xspi1_io1_pf8 &xspi1_io2_pf7 &xspi1_io3_pf6
+		     &xspi1_io4_pe7 &xspi1_io5_pe8 &xspi1_io6_pe9 &xspi1_io7_pe10>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
 &usart2 {
 	pinctrl-0 = <&usart2_tx_pd5 &usart2_rx_pd6>;
 	pinctrl-names = "default";
@@ -276,8 +308,6 @@
 };
 
 zephyr_udc0: &usb {
-	clocks = <&rcc STM32_CLOCK(APB2, 24)>,
-		 <&rcc STM32_SRC_CK48 CK48_SEL(2)>;
 	pinctrl-0 = <&usb_dm_pa11 &usb_dp_pa12>;
 	pinctrl-names = "default";
 	status = "okay";

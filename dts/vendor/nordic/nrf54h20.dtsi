@@ -51,6 +51,7 @@
 			riscv,isa-base = "rv32e";
 			riscv,isa-extensions = "e", "m", "c", "zicsr";
 			nordic,bus-width = <32>;
+			nordic,vpr-ready-event = <15>;
 
 			cpuppr_vevif_rx: mailbox {
 				compatible = "nordic,nrf-vevif-task-rx";
@@ -201,7 +202,7 @@
 		};
 
 		lfclk: lfclk {
-			compatible = "nordic,nrf-lfclk";
+			compatible = "nordic,nrfs-lfclk";
 			status = "disabled";
 			#clock-cells = <0>;
 			clock-frequency = <32768>;
@@ -262,6 +263,11 @@
 		current-limit-ua = <7500>;
 		zephyr,pm-device-runtime-auto;
 		#power-domain-cells = <0>;
+	};
+
+	usbhs_phy: usbhs_phy {
+		compatible = "nordic,nrf-usbhs-phy-type1";
+		status = "reserved";
 	};
 
 	soc {
@@ -681,6 +687,17 @@
 				ghwcfg1 = <0xaa555000>;
 				ghwcfg2 = <0x22abfc72>;
 				ghwcfg4 = <0x1e10aa60>;
+				/* 3050 locations available, GRXFSIZ is 548,
+				 * GNPTXFSIZ and DIEPTXFn are 512. The default
+				 * values (upper bounds) sum up above the limit.
+				 * Allow High-Bandwidth only on TxFIFO 1 and 2.
+				 * Use maximum possible for RxFIFO and allocate
+				 * everything remaining for TxFIFO 0.
+				 */
+				g-rx-fifo-size = <548>;
+				g-np-tx-fifo-size = <198>;
+				g-tx-fifo-size = <512 512 256 256 256 256 256>;
+				phy = <&usbhs_phy>;
 				status = "disabled";
 			};
 
@@ -901,6 +918,7 @@
 					status = "disabled";
 					#mbox-cells = <1>;
 					nordic,tasks = <16>;
+					nordic,vpr-ready-event = <15>;
 					nordic,tasks-mask = <0xfffffff0>;
 				};
 			};
@@ -1068,6 +1086,8 @@
 			adc: adc@982000 {
 				compatible = "nordic,nrf-saadc";
 				reg = <0x982000 0x1000>;
+				#address-cells = <1>;
+				#size-cells = <0>;
 				interrupts = <386 NRF_DEFAULT_IRQ_PRIORITY>;
 				status = "disabled";
 				#io-channel-cells = <1>;
@@ -1807,6 +1827,18 @@
 
 	temp_nrfs: temp {
 		compatible = "nordic,nrf-temp-nrfs";
+		status = "disabled";
+	};
+
+	cpuapp_gswdt: cpuapp_gswdt {
+		compatible = "nordic,nrf-gswdt";
+		mbox = <&cpuapp_cpusys_gswdt_mbox>;
+		status = "disabled";
+	};
+
+	cpurad_gswdt: cpurad_gswdt {
+		compatible = "nordic,nrf-gswdt";
+		mbox = <&cpurad_cpusys_gswdt_mbox>;
 		status = "disabled";
 	};
 };

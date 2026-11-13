@@ -42,10 +42,10 @@ enum adp5360_fuel_gauge_reg_address {
 	FUEL_GAUGE_ADP5360_REG_PGOOD_STATUS = 0x2Fu,
 };
 
-#define FUEL_GAUGE_ADP5360_SOC_SHIFT  4
-#define FUEL_GAUGE_ADP5360_VBAT_SHIFT 3
-#define FUEL_GAUGE_ADP5360_MV_TO_UV   1000
-#define FUEL_GAUGE_ADP5360_SOC_FULL   100
+#define FUEL_GAUGE_ADP5360_SOCACM_SHIFT 4
+#define FUEL_GAUGE_ADP5360_VBAT_SHIFT   3
+#define FUEL_GAUGE_ADP5360_MV_TO_UV     1000
+#define FUEL_GAUGE_ADP5360_SOC_FULL     100
 
 #define FUEL_GAUGE_ADP5360_V_SOC_MIN_VAL 2500
 #define FUEL_GAUGE_ADP5360_V_SOC_MAX_VAL 4540
@@ -133,18 +133,17 @@ static int fuel_gauge_adp5360_get_cycle_count(const struct device *dev,
 	const struct fuel_gauge_adp5360_config *config = dev->config;
 	const struct device *mfd_dev = config->mfd_adp5360;
 	int ret;
-	uint16_t buf;
+	uint16_t bat_socacm;
 
-	/* Read the cycle count value from the corresponding registers in the ADP5360 MFD */
+	/* Read the accumulated charge state from the corresponding registers in the ADP5360 MFD */
 	ret = mfd_adp5360_reg_burst_read(mfd_dev, FUEL_GAUGE_ADP5360_REG_BAT_SOC_ACM_H,
-					 (uint8_t *)&buf, 2);
+					 (uint8_t *)&bat_socacm, 2);
 	if (ret < 0) {
-		LOG_ERR("Failed to read cycle count from ADP5360 MFD: %d", ret);
+		LOG_ERR("Failed to read accumulated charge state from ADP5360 MFD: %d", ret);
 		return ret;
 	}
 
-	/* Register indicates 1/100ths of cycle count */
-	val->cycle_count = sys_be16_to_cpu(buf) >> FUEL_GAUGE_ADP5360_SOC_SHIFT;
+	val->cycle_count = (sys_be16_to_cpu(bat_socacm) >> FUEL_GAUGE_ADP5360_SOCACM_SHIFT) / 100;
 
 	return 0;
 }
@@ -166,8 +165,8 @@ static int fuel_gauge_adp5360_get_vbat(const struct device *dev, union fuel_gaug
 	/* Register Voltage readout is in millivolts,
 	 * multiply by 1000 to get it in terms of microvolts
 	 */
-	val->voltage = (sys_be16_to_cpu(buf) >> FUEL_GAUGE_ADP5360_VBAT_SHIFT) *
-		       FUEL_GAUGE_ADP5360_MV_TO_UV;
+	val->voltage_uv = (sys_be16_to_cpu(buf) >> FUEL_GAUGE_ADP5360_VBAT_SHIFT) *
+			  FUEL_GAUGE_ADP5360_MV_TO_UV;
 
 	return 0;
 }
@@ -228,7 +227,7 @@ static int fuel_gauge_adp5360_get_bat_soc(const struct device *dev, union fuel_g
 		buf = FUEL_GAUGE_ADP5360_SOC_FULL;
 	}
 
-	val->absolute_state_of_charge = buf;
+	val->absolute_state_of_charge_pct = buf;
 
 	return 0;
 }
@@ -254,16 +253,16 @@ static int fuel_gauge_adp5360_get_soc_alarm(const struct device *dev,
 
 	switch (soc_low_th_setting) {
 	case 0:
-		val->state_of_charge_alarm = FUEL_GAUGE_ADP5360_SOC_ALARM_6PCT;
+		val->state_of_charge_alarm_pct = FUEL_GAUGE_ADP5360_SOC_ALARM_6PCT;
 		break;
 	case 1:
-		val->state_of_charge_alarm = FUEL_GAUGE_ADP5360_SOC_ALARM_11PCT;
+		val->state_of_charge_alarm_pct = FUEL_GAUGE_ADP5360_SOC_ALARM_11PCT;
 		break;
 	case 2:
-		val->state_of_charge_alarm = FUEL_GAUGE_ADP5360_SOC_ALARM_21PCT;
+		val->state_of_charge_alarm_pct = FUEL_GAUGE_ADP5360_SOC_ALARM_21PCT;
 		break;
 	case 3:
-		val->state_of_charge_alarm = FUEL_GAUGE_ADP5360_SOC_ALARM_31PCT;
+		val->state_of_charge_alarm_pct = FUEL_GAUGE_ADP5360_SOC_ALARM_31PCT;
 		break;
 	default:
 		LOG_ERR("Invalid state of charge alarm setting read from ADP5360 MFD: %d",
@@ -302,15 +301,15 @@ static int fuel_gauge_adp5360_get_prop(const struct device *dev, fuel_gauge_prop
 	switch (prop) {
 	case FUEL_GAUGE_CYCLE_COUNT:
 		return fuel_gauge_adp5360_get_cycle_count(dev, val);
-	case FUEL_GAUGE_VOLTAGE:
+	case FUEL_GAUGE_VOLTAGE_UV:
 		return fuel_gauge_adp5360_get_vbat(dev, val);
 	case FUEL_GAUGE_STATUS:
 		return fuel_gauge_adp5360_get_status(dev, val);
 	case FUEL_GAUGE_DESIGN_CAPACITY:
 		return fuel_gauge_adp5360_get_capacity(dev, val);
-	case FUEL_GAUGE_ABSOLUTE_STATE_OF_CHARGE:
+	case FUEL_GAUGE_ABSOLUTE_STATE_OF_CHARGE_PCT:
 		return fuel_gauge_adp5360_get_bat_soc(dev, val);
-	case FUEL_GAUGE_STATE_OF_CHARGE_ALARM:
+	case FUEL_GAUGE_STATE_OF_CHARGE_ALARM_PCT:
 		return fuel_gauge_adp5360_get_soc_alarm(dev, val);
 	case FUEL_GAUGE_THERM_VOLTAGE_UV:
 		return fuel_gauge_adp5360_get_thr_uv(dev, val);
@@ -326,7 +325,7 @@ static int fuel_gauge_adp5360_set_soc_alarm(const struct device *dev, union fuel
 	int ret;
 	uint8_t buf;
 
-	switch (val.state_of_charge_alarm) {
+	switch (val.state_of_charge_alarm_pct) {
 	case 6:
 		buf = 0;
 		break;
@@ -340,7 +339,7 @@ static int fuel_gauge_adp5360_set_soc_alarm(const struct device *dev, union fuel
 		buf = 3;
 		break;
 	default:
-		LOG_ERR("Invalid state of charge alarm value: %d", val.state_of_charge_alarm);
+		LOG_ERR("Invalid state of charge alarm value: %d", val.state_of_charge_alarm_pct);
 		LOG_ERR("Valid values are: 6, 11, 21, 31");
 		return -EINVAL;
 	}
@@ -563,7 +562,7 @@ static int fuel_gauge_adp5360_set_v_soc_probe(const struct device *dev)
 
 	/* Write the v_soc values to the corresponding registers in the ADP5360 MFD */
 	ret = mfd_adp5360_reg_burst_write(mfd_dev, FUEL_GAUGE_ADP5360_REG_V_SOC_0, buf,
-					  ARRAY_SIZE(buf)-1);
+					  ARRAY_SIZE(buf) - 1);
 	if (ret < 0) {
 		LOG_ERR("Failed to write v_soc values to ADP5360 MFD: %d", ret);
 		return ret;
@@ -621,7 +620,7 @@ static int fuel_gauge_adp5360_set_prop(const struct device *dev, fuel_gauge_prop
 				       union fuel_gauge_prop_val val)
 {
 	switch (prop) {
-	case FUEL_GAUGE_STATE_OF_CHARGE_ALARM:
+	case FUEL_GAUGE_STATE_OF_CHARGE_ALARM_PCT:
 		return fuel_gauge_adp5360_set_soc_alarm(dev, val);
 	case FUEL_GAUGE_DESIGN_CAPACITY:
 		return fuel_gauge_adp5360_set_bat_cap(dev, val);

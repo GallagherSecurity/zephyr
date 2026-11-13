@@ -4,19 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
- /**
-  * @file
-  * @brief Header file for extended sensor API of PAC194x/PAC195x sensor
-  */
+/**
+ * @file
+ * @brief Header file for extended sensor API of PAC194x/PAC195x sensor
+ * @ingroup pac194x_interface
+ */
 
-#ifndef ZEPHYR_INCLUDE_DRIVERS_SENSORS_PAC194X_H
-#define ZEPHYR_INCLUDE_DRIVERS_SENSORS_PAC194X_H
+#ifndef ZEPHYR_INCLUDE_DRIVERS_SENSOR_PAC194X_H_
+#define ZEPHYR_INCLUDE_DRIVERS_SENSOR_PAC194X_H_
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #include <zephyr/drivers/sensor.h>
+
+/**
+ * @addtogroup pac194x_interface
+ * @{
+ */
 
 /** Additional attributes supported by the PAC194x/PAC195x */
 enum pac194x_sensor_attribute {
@@ -97,8 +103,10 @@ enum pac194x_sensor_channel {
 	PAC194X_CHAN_ACC_COUNT,
 };
 
+/** @} */
+
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* ZEPHYR_INCLUDE_DRIVERS_SENSORS_PAC194X_H */
+#endif /* ZEPHYR_INCLUDE_DRIVERS_SENSOR_PAC194X_H_ */

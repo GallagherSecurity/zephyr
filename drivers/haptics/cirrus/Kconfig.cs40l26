@@ -11,16 +11,6 @@ menuconfig HAPTICS_CS40L26
 
 if HAPTICS_CS40L26
 
-config HAPTICS_CS40L26_I2C
-	def_bool $(dt_compat_on_bus,$(DT_COMPAT_CIRRUS_CS40L26),i2c) || \
-		 $(dt_compat_on_bus,$(DT_COMPAT_CIRRUS_CS40L27),i2c)
-	select I2C
-
-config HAPTICS_CS40L26_SPI
-	def_bool $(dt_compat_on_bus,$(DT_COMPAT_CIRRUS_CS40L26),spi) || \
-		 $(dt_compat_on_bus,$(DT_COMPAT_CIRRUS_CS40L27),spi)
-	select SPI
-
 config HAPTICS_CS40L26_A1
 	def_bool $(dt_compat_on_bus,$(DT_COMPAT_CIRRUS_CS40L26),i2c) || \
 		 $(dt_compat_on_bus,$(DT_COMPAT_CIRRUS_CS40L26),spi)
@@ -32,14 +22,17 @@ config HAPTICS_CS40L27_B2
 config HAPTICS_CS40L26_RESET
 	def_bool $(dt_compat_any_has_prop,$(DT_COMPAT_CIRRUS_CS40L26),reset-gpios) || \
 		 $(dt_compat_any_has_prop,$(DT_COMPAT_CIRRUS_CS40L27),reset-gpios)
+	select GPIO
 
 config HAPTICS_CS40L26_INTERRUPT
 	def_bool $(dt_compat_any_has_prop,$(DT_COMPAT_CIRRUS_CS40L26),int-gpios) || \
 		 $(dt_compat_any_has_prop,$(DT_COMPAT_CIRRUS_CS40L27),int-gpios)
+	select GPIO
 
 config HAPTICS_CS40L26_FLASH
 	def_bool $(dt_compat_any_has_prop,$(DT_COMPAT_CIRRUS_CS40L26),flash-storage) || \
 		 $(dt_compat_any_has_prop,$(DT_COMPAT_CIRRUS_CS40L27),flash-storage)
+	select FLASH
 
 config HAPTICS_CS40L26_CALIBRATION
 	bool "Calibration"
@@ -60,20 +53,20 @@ config HAPTICS_CS40L26_DYNAMIC_F0
 	help
 	  Enable dynamic F0 compensation for haptic effects.
 
-config HAPTICS_CS40L26_PM_ACTIVE_TIMEOUT
+config HAPTICS_CS40L26_PM_ACTIVE_TIMEOUT_MS
 	int "Active Timeout"
-	default 8000
-	range 0 327680
+	default 0
+	range 0 10000
 	help
 	  After the device has finished playing an effect, wait the specified amount
-	  of time (in units of 1/32768 seconds) before entering the standby state.
+	  of time in milliseconds before entering the standby state.
 
-config HAPTICS_CS40L26_PM_STDBY_TIMEOUT
+config HAPTICS_CS40L26_PM_STDBY_TIMEOUT_MS
 	int "Standby Timeout"
-	default 160000
-	range 0 327680
+	default 100
+	range 0 10000
 	help
 	  When the device enters the standby state with hibernation enabled, wait the
-	  specified amount of time (in units of 1/32768 seconds) before entering hibernation.
+	  specified amount of time in milliseconds before entering hibernation.
 
 endif #HAPTICS_CS40L26

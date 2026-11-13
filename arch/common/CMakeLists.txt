@@ -78,6 +78,8 @@ if(CONFIG_GEN_ISR_TABLES)
   endif()
 endif()
 
+zephyr_linker_section_configure(SECTION /DISCARD/ INPUT ".note.GNU-stack")
+
 zephyr_linker_sources_ifdef(CONFIG_ARCH_HAS_RAMFUNC_SUPPORT
   RAM_SECTIONS
   ramfunc.ld
@@ -103,6 +105,10 @@ endif()
 zephyr_library_sources_ifdef(
   CONFIG_EXCEPTION_DUMP_HOOK
   exception.c
+)
+
+zephyr_library_sources(
+  instr_mem.c
 )
 
 # isr_tables is a normal CMake library and not a zephyr_library because it

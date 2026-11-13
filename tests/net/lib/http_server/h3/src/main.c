@@ -6,6 +6,7 @@
 #include "server_internal.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
@@ -21,6 +22,7 @@
 #define SERVER_IPV4_ADDR "127.0.0.1"
 #define SERVER_PORT 18443
 #define ALT_SVC_DISABLED_PORT 18444
+#define CLIENT_PORT_BASE 19000
 #define RECV_TIMEOUT_S 1
 #define SHORT_POLL_TIMEOUT_MS 150
 #define MAX_RESPONSE_SIZE 256
@@ -28,7 +30,11 @@
 
 #define H3_FRAME_DATA 0x00
 #define H3_FRAME_HEADERS 0x01
+#define H3_FRAME_CANCEL_PUSH 0x03
 #define H3_FRAME_SETTINGS 0x04
+#define H3_FRAME_PUSH_PROMISE 0x05
+#define H3_FRAME_GOAWAY 0x07
+#define H3_FRAME_MAX_PUSH_ID 0x0d
 
 #define H3_UNI_STREAM_CONTROL 0x00
 #define H3_UNI_STREAM_PUSH 0x01
@@ -38,10 +44,13 @@
 #define QPACK_STATIC_PATH_SLASH 1
 #define QPACK_STATIC_METHOD_GET 17
 #define QPACK_STATIC_METHOD_POST 20
+#define QPACK_STATIC_STATUS_200 25
+#define QPACK_STATIC_STATUS_425 70
 #define QPACK_STATIC_USER_AGENT 95
 
 #define TEST_STATIC_PAYLOAD "Hello, H3!"
 #define TEST_DYNAMIC_POST_PAYLOAD "Test dynamic POST"
+#define TEST_H3_0RTT_MAX_EARLY_DATA_SIZE 1024U
 
 static const sec_tag_t server_sec_tags[] = {
 	SERVER_CERTIFICATE_TAG,
@@ -58,19 +67,26 @@ static const char *const alpn_list[] = {
 
 static uint16_t test_http_service_port = SERVER_PORT;
 static uint16_t alt_svc_disabled_service_port = ALT_SVC_DISABLED_PORT;
+static uint16_t next_client_port = CLIENT_PORT_BASE;
 
 static const struct http_service_config test_http_service_cfg = {
 	.http_ver = HTTP_VERSION_1 | HTTP_VERSION_3,
-	.h3_alt_svc_policy = HTTP_H3_ALT_SVC_ENABLE,
+	.h3 = {
+		.alt_svc_policy = HTTP_H3_ALT_SVC_ENABLE,
+		.enable_session_tickets = true,
+		.max_early_data_size = TEST_H3_0RTT_MAX_EARLY_DATA_SIZE,
+	},
 };
 
 static const struct http_service_config alt_svc_disabled_service_cfg = {
 	.http_ver = HTTP_VERSION_1 | HTTP_VERSION_3,
-	.h3_alt_svc_policy = HTTP_H3_ALT_SVC_DISABLE,
+	.h3 = {
+		.alt_svc_policy = HTTP_H3_ALT_SVC_DISABLE,
+	},
 };
 
 HTTPS_SERVICE_DEFINE(test_http_service, SERVER_IPV4_ADDR,
-		     &test_http_service_port, 1, 1, NULL, NULL,
+		     &test_http_service_port, 2, 1, NULL, NULL,
 		     &test_http_service_cfg,
 		     server_sec_tags, sizeof(server_sec_tags));
 
@@ -98,6 +114,9 @@ static size_t dynamic_bytes_received;
 static bool dynamic_more_seen;
 static bool dynamic_final_seen;
 static bool dynamic_complete;
+/* Lets a test keep the server thread busy inside the dynamic callback */
+static int dynamic_cb_stall_ms;
+static volatile bool dynamic_cb_stalling;
 
 static int dynamic_cb(struct http_client_ctx *client,
 		      enum http_transaction_status status,
@@ -115,6 +134,12 @@ static int dynamic_cb(struct http_client_ctx *client,
 	if (status == HTTP_SERVER_TRANSACTION_COMPLETE) {
 		dynamic_complete = true;
 		return 0;
+	}
+
+	if (dynamic_cb_stall_ms > 0 && status == HTTP_SERVER_REQUEST_DATA_MORE) {
+		dynamic_cb_stalling = true;
+		k_msleep(dynamic_cb_stall_ms);
+		dynamic_cb_stalling = false;
 	}
 
 	if (request_ctx->data_len > 0) {
@@ -195,6 +220,7 @@ struct test_headers_clone {
 };
 
 static struct test_headers_clone request_headers_clone;
+static size_t header_capture_calls;
 
 static int header_capture_cb(struct http_client_ctx *client,
 			     enum http_transaction_status status,
@@ -213,6 +239,7 @@ static int header_capture_cb(struct http_client_ctx *client,
 	}
 
 	if (request_ctx->header_count != 0) {
+		header_capture_calls++;
 		memcpy(clone->buffer, client->header_capture_ctx.buffer,
 		       sizeof(clone->buffer));
 		clone->count = request_ctx->header_count;
@@ -346,6 +373,87 @@ static size_t h3_decode_varint(const uint8_t *buf, size_t len, uint64_t *value)
 	}
 
 	return encoded_len;
+}
+
+static size_t qpack_decode_prefixed_int(const uint8_t *buf, size_t len, uint8_t prefix_bits,
+					uint64_t *value)
+{
+	uint8_t prefix_max = (uint8_t)((1U << prefix_bits) - 1U);
+	size_t pos = 1;
+	uint64_t result;
+	uint32_t shift = 0U;
+
+	zassert_true(len > 0, "Missing QPACK integer");
+
+	result = buf[0] & prefix_max;
+	if (result < prefix_max) {
+		*value = result;
+		return 1;
+	}
+
+	while (pos < len) {
+		uint8_t byte = buf[pos++];
+
+		result += (uint64_t)(byte & 0x7fU) << shift;
+		if ((byte & 0x80U) == 0U) {
+			*value = result;
+			return pos;
+		}
+
+		shift += 7U;
+	}
+
+	zassert_unreachable("Truncated QPACK integer");
+	return 0;
+}
+
+static enum http_status h3_decode_response_status(const uint8_t *buf, size_t len)
+{
+	uint64_t ignored;
+	uint64_t status_index;
+	size_t pos = 0;
+
+	pos += qpack_decode_prefixed_int(buf + pos, len - pos, 8, &ignored);
+	pos += qpack_decode_prefixed_int(buf + pos, len - pos, 7, &ignored);
+
+	zassert_true(pos < len, "Missing response status field");
+
+	if ((buf[pos] & 0xf0U) == 0x50U) {
+		/* Literal field line with a static name reference, used for
+		 * the status codes that have no static table entry.
+		 */
+		uint64_t value_len;
+		unsigned int status = 0U;
+
+		pos += qpack_decode_prefixed_int(buf + pos, len - pos, 4, &ignored);
+		zassert_true(pos < len, "Missing response status value");
+		zassert_equal(buf[pos] & 0x80U, 0U, "Unexpected Huffman coded status");
+		pos += qpack_decode_prefixed_int(buf + pos, len - pos, 7, &value_len);
+		zassert_true(value_len == 3U && pos + value_len <= len,
+			     "Unexpected status value length %" PRIu64, value_len);
+
+		for (size_t i = 0; i < value_len; i++) {
+			zassert_true(buf[pos + i] >= '0' && buf[pos + i] <= '9',
+				     "Unexpected status character 0x%02x", buf[pos + i]);
+			status = status * 10U + (buf[pos + i] - '0');
+		}
+
+		return (enum http_status)status;
+	}
+
+	zassert_true((buf[pos] & 0xc0U) == 0xc0U,
+		     "Expected indexed static status field, got 0x%02x", buf[pos]);
+	pos += qpack_decode_prefixed_int(buf + pos, len - pos, 6, &status_index);
+
+	switch (status_index) {
+	case QPACK_STATIC_STATUS_200:
+		return HTTP_200_OK;
+	case QPACK_STATIC_STATUS_425:
+		return HTTP_425_TOO_EARLY;
+	default:
+		zassert_unreachable("Unexpected status index %" PRIu64, status_index);
+		return HTTP_500_INTERNAL_SERVER_ERROR;
+	}
 }
 
 static size_t build_headers_frame(uint8_t *buf,
@@ -512,14 +620,17 @@ static void setup_tls_credentials_once(void)
 	credentials_added = true;
 }
 
-static void connect_h3_client(void)
+static void connect_h3_client(const struct quic_session_state *session_state)
 {
+	struct net_sockaddr_in client_addr;
 	struct net_sockaddr_in server_addr;
 	int ret;
 
 	init_ipv4_addr(&server_addr, SERVER_IPV4_ADDR, SERVER_PORT);
+	init_ipv4_addr(&client_addr, SERVER_IPV4_ADDR, next_client_port++);
 
-	client_conn_fd = quic_connection_open((struct net_sockaddr *)&server_addr, NULL);
+	client_conn_fd = quic_connection_open((struct net_sockaddr *)&server_addr,
+					      (struct net_sockaddr *)&client_addr);
 	zassert_true(client_conn_fd >= 0, "Failed to open client QUIC connection (%d)",
 		     client_conn_fd);
 
@@ -530,6 +641,27 @@ static void connect_h3_client(void)
 	ret = zsock_setsockopt(client_conn_fd, ZSOCK_SOL_TLS, ZSOCK_TLS_ALPN_LIST,
 			       alpn_list, sizeof(alpn_list));
 	zassert_ok(ret, "Failed to set client ALPN (%d)", errno);
+
+	if (session_state != NULL) {
+		struct quic_session_state imported_state;
+		net_socklen_t optlen;
+
+		ret = zsock_setsockopt(client_conn_fd, ZSOCK_SOL_QUIC,
+				       ZSOCK_QUIC_SO_SESSION_STATE,
+				       session_state, sizeof(*session_state));
+		zassert_ok(ret, "Failed to import client session state (%d)", errno);
+
+		memset(&imported_state, 0, sizeof(imported_state));
+		optlen = sizeof(imported_state);
+		ret = zsock_getsockopt(client_conn_fd, ZSOCK_SOL_QUIC,
+				       ZSOCK_QUIC_SO_SESSION_STATE,
+				       &imported_state, &optlen);
+		zassert_ok(ret, "Failed to read imported client session state (%d)", errno);
+		zassert_equal(optlen, sizeof(imported_state),
+			      "Unexpected imported H3 session state size %u", optlen);
+		zassert_mem_equal(session_state, &imported_state, sizeof(imported_state),
+				  "Imported H3 session state mismatch");
+	}
 }
 
 static int connect_https_client(uint16_t port)
@@ -716,12 +848,9 @@ static void accept_server_uni_streams(bool *seen_control,
 	*seen_qpack_decoder = true;
 }
 
-static void start_h3_session(bool split_control_stream)
+static void send_client_control_stream(bool split_control_stream)
 {
 	uint8_t control_buf[8];
-	bool seen_control = false;
-	bool seen_qpack_encoder = false;
-	bool seen_qpack_decoder = false;
 	size_t control_len;
 	int control_fd;
 
@@ -736,7 +865,15 @@ static void start_h3_session(bool split_control_stream)
 	} else {
 		send_all(control_fd, control_buf, control_len);
 	}
+}
 
+static void start_h3_session(bool split_control_stream)
+{
+	bool seen_control = false;
+	bool seen_qpack_encoder = false;
+	bool seen_qpack_decoder = false;
+
+	send_client_control_stream(split_control_stream);
 	accept_server_uni_streams(&seen_control, &seen_qpack_encoder,
 				    &seen_qpack_decoder);
 
@@ -798,6 +935,34 @@ static void expect_headers_only_response(int stream_fd)
 	offset += consumed;
 	zassert_true(frame_len > 0, "Empty HEADERS payload");
 	zassert_true(offset + frame_len <= response_len, "HEADERS frame exceeds buffer");
+	offset += frame_len;
+
+	zassert_equal(offset, response_len, "Unexpected extra response bytes");
+}
+
+static void expect_headers_only_status_response(int stream_fd, enum http_status expected_status)
+{
+	uint8_t response[MAX_RESPONSE_SIZE];
+	size_t offset = 0;
+	size_t response_len;
+	uint64_t frame_type;
+	uint64_t frame_len;
+	size_t consumed;
+
+	response_len = read_stream_to_eof(stream_fd, response, sizeof(response));
+	zassert_true(response_len > 0, "Empty H3 response");
+
+	consumed = h3_decode_varint(response + offset, response_len - offset, &frame_type);
+	offset += consumed;
+	zassert_equal(frame_type, H3_FRAME_HEADERS, "Expected HEADERS frame");
+
+	consumed = h3_decode_varint(response + offset, response_len - offset, &frame_len);
+	offset += consumed;
+	zassert_true(frame_len > 0, "Empty HEADERS payload");
+	zassert_true(offset + frame_len <= response_len, "HEADERS frame exceeds buffer");
+	zassert_equal(h3_decode_response_status(response + offset, frame_len),
+		      expected_status,
+		      "Unexpected HTTP/3 response status");
 	offset += frame_len;
 
 	zassert_equal(offset, response_len, "Unexpected extra response bytes");
@@ -904,24 +1069,31 @@ static void http_server_h3_before(void *fixture)
 {
 	ARG_UNUSED(fixture);
 
+	/* If a previous test failed in before(), after() is skipped. */
+	if (client_conn_fd >= 0) {
+		(void)quic_connection_close(client_conn_fd);
+		client_conn_fd = -1;
+	}
+
 	memset(dynamic_payload, 0, sizeof(dynamic_payload));
 	dynamic_bytes_received = 0;
 	dynamic_more_seen = false;
 	dynamic_final_seen = false;
 	dynamic_complete = false;
+	dynamic_cb_stall_ms = 0;
+	dynamic_cb_stalling = false;
 	memset(&request_headers_clone, 0, sizeof(request_headers_clone));
+	header_capture_calls = 0;
 	tracked_stream_count = 0;
 	for (size_t i = 0; i < ARRAY_SIZE(tracked_stream_fds); i++) {
 		tracked_stream_fds[i] = -1;
 	}
 
-	connect_h3_client();
+	connect_h3_client(NULL);
 }
 
-static void http_server_h3_after(void *fixture)
+static void close_h3_client(void)
 {
-	ARG_UNUSED(fixture);
-
 	for (size_t i = 0; i < tracked_stream_count; i++) {
 		if (tracked_stream_fds[i] < 0) {
 			continue;
@@ -938,6 +1110,42 @@ static void http_server_h3_after(void *fixture)
 	}
 
 	k_msleep(100);
+}
+
+static void wait_for_client_session_state(struct quic_session_state *session_state)
+{
+	net_socklen_t optlen;
+	int ret = -1;
+
+	memset(session_state, 0, sizeof(*session_state));
+
+	for (int attempt = 0; attempt < 50; attempt++) {
+		optlen = sizeof(*session_state);
+		ret = zsock_getsockopt(client_conn_fd, ZSOCK_SOL_QUIC,
+				       ZSOCK_QUIC_SO_SESSION_STATE,
+				       session_state, &optlen);
+		if (ret == 0 && session_state->ticket_len > 0U &&
+		    session_state->psk_len > 0U &&
+		    session_state->transport_params.valid) {
+			break;
+		}
+
+		k_sleep(K_MSEC(20));
+	}
+
+	zassert_ok(ret, "Failed to export client session state (%d)", errno);
+	zassert_equal(optlen, sizeof(*session_state), "Unexpected session state size %u", optlen);
+	zassert_true(session_state->ticket_len > 0U, "Expected a non-empty H3 session ticket");
+	zassert_true(session_state->psk_len > 0U, "Expected a non-empty H3 resumption PSK");
+	zassert_true(session_state->transport_params.valid,
+		     "Expected remembered transport parameters in H3 session state");
+}
+
+static void http_server_h3_after(void *fixture)
+{
+	ARG_UNUSED(fixture);
+
+	close_h3_client();
 }
 
 static void http_server_h3_teardown(void *fixture)
@@ -1150,6 +1358,133 @@ ZTEST(server_h3_tests, test_h3_reuses_connection_for_multiple_get_streams)
 	}
 }
 
+/* More rounds than the server has QUIC contexts, streams or clients, so
+ * that anything left behind by a round stops a later one.
+ */
+#define REJECTED_UNI_STREAM_ROUNDS 8
+#define SERVER_STALL_MS 200
+
+/* Open a unidirectional stream and send its first bytes (or just end it
+ * when there are none) while the server thread is kept busy in the dynamic
+ * resource callback. The server then finds the stream and its data waiting
+ * together, and has to judge the stream at the time it accepts it.
+ * Returns the fd of the unidirectional stream.
+ */
+static int send_uni_stream_to_busy_server(const uint8_t *buf, size_t len)
+{
+	static const uint8_t payload[] = "x";
+	uint8_t headers[32];
+	uint8_t data_frame[16];
+	size_t headers_len;
+	size_t data_len;
+	int post_fd;
+	int uni_fd;
+	int ret;
+
+	dynamic_cb_stall_ms = SERVER_STALL_MS;
+
+	post_fd = open_client_stream(QUIC_STREAM_BIDIRECTIONAL);
+	headers_len = build_headers_frame(headers, HTTP_POST, "/dynamic");
+	send_all(post_fd, headers, headers_len);
+	data_len = build_data_frame(data_frame, payload, sizeof(payload) - 1);
+	send_all(post_fd, data_frame, data_len);
+
+	zassert_true(WAIT_FOR(dynamic_cb_stalling, RECV_TIMEOUT_S * USEC_PER_SEC, k_msleep(1)),
+		     "Server did not enter the dynamic callback");
+
+	uni_fd = open_client_stream(QUIC_STREAM_UNIDIRECTIONAL);
+	if (len > 0) {
+		send_all(uni_fd, buf, len);
+	} else {
+		ret = zsock_shutdown(uni_fd, ZSOCK_SHUT_WR);
+		zassert_ok(ret, "Failed to end the unidirectional stream (%d)", errno);
+	}
+
+	zassert_true(dynamic_cb_stalling, "Server was not busy while the stream was sent");
+	dynamic_cb_stall_ms = 0;
+
+	return uni_fd;
+}
+
+ZTEST(server_h3_tests, test_h3_duplicate_control_stream_releases_everything)
+{
+	uint8_t control_buf[8];
+	size_t control_len;
+
+	control_len = build_control_settings_stream(control_buf);
+
+	for (int i = 0; i < REJECTED_UNI_STREAM_ROUNDS; i++) {
+		struct zsock_pollfd pfd;
+		int ret;
+
+		if (i > 0) {
+			connect_h3_client(NULL);
+		}
+
+		start_h3_session(false);
+
+		/* A second control stream is a connection error */
+		(void)send_uni_stream_to_busy_server(control_buf, control_len);
+
+		pfd.fd = client_conn_fd;
+		pfd.events = ZSOCK_POLLIN;
+		pfd.revents = 0;
+		ret = zsock_poll(&pfd, 1, RECV_TIMEOUT_S * MSEC_PER_SEC);
+		zassert_true(ret > 0 && (pfd.revents & ZSOCK_POLLHUP) != 0,
+			     "Round %d: connection not closed on duplicate control stream (0x%x)",
+			     i, pfd.revents);
+
+		close_h3_client();
+	}
+
+	/* Nothing was left behind: a new connection gets the full service */
+	connect_h3_client(NULL);
+	start_h3_session(false);
+
+	for (int i = 0; i < 3; i++) {
+		send_get_and_expect_static(false);
+	}
+}
+
+ZTEST(server_h3_tests, test_h3_uni_stream_closed_before_type_is_tolerated)
+{
+	for (int i = 0; i < REJECTED_UNI_STREAM_ROUNDS; i++) {
+		int uni_fd;
+		int ret;
+
+		if (i > 0) {
+			connect_h3_client(NULL);
+		}
+
+		start_h3_session(false);
+
+		/* A unidirectional stream that ends before its stream type was
+		 * sent must be tolerated: the connection keeps working.
+		 */
+		uni_fd = send_uni_stream_to_busy_server(NULL, 0);
+		k_msleep(2 * SERVER_STALL_MS);
+
+		/* Both ends run in this process and share one fd table, so
+		 * give the fd back before the next request needs two more.
+		 */
+		ret = zsock_close(uni_fd);
+		zassert_ok(ret, "Round %d: failed to close the stream (%d)", i, errno);
+		untrack_stream_fd(uni_fd);
+
+		send_get_and_expect_static(false);
+
+		close_h3_client();
+	}
+
+	/* Nothing was left behind: a new connection gets the full service */
+	connect_h3_client(NULL);
+	start_h3_session(false);
+
+	for (int i = 0; i < 3; i++) {
+		send_get_and_expect_static(false);
+	}
+}
+
 ZTEST(server_h3_tests, test_h3_multiple_data_callbacks_send_headers_once)
 {
 	static const uint8_t payload_a[] = "chunk-a";
@@ -1181,6 +1516,138 @@ ZTEST(server_h3_tests, test_h3_multiple_data_callbacks_send_headers_once)
 	ret = zsock_close(stream_fd);
 	zassert_ok(ret, "Failed to close streaming POST stream (%d)", errno);
 	untrack_stream_fd(stream_fd);
+}
+
+/* Open the client control stream and send the given bytes after the stream
+ * type. Returns the control stream.
+ */
+static int send_control_stream_data(const uint8_t *data, size_t len)
+{
+	static const uint8_t stream_type[] = { H3_UNI_STREAM_CONTROL };
+	int control_fd;
+
+	control_fd = open_client_stream(QUIC_STREAM_UNIDIRECTIONAL);
+	send_all(control_fd, stream_type, sizeof(stream_type));
+	send_all(control_fd, data, len);
+
+	return control_fd;
+}
+
+/* As above, and accept the streams the server opens */
+static int start_h3_session_with_control_data(const uint8_t *data, size_t len)
+{
+	bool seen[3];
+	int control_fd;
+
+	control_fd = send_control_stream_data(data, len);
+	accept_server_uni_streams(&seen[0], &seen[1], &seen[2]);
+
+	return control_fd;
+}
+
+/* The server gave up on the connection and still serves a new one */
+static void expect_connection_closed_and_server_alive(void)
+{
+	int64_t end = k_uptime_get() + RECV_TIMEOUT_S * MSEC_PER_SEC;
+	struct zsock_pollfd pfd = {
+		.fd = client_conn_fd,
+		.events = ZSOCK_POLLIN,
+	};
+
+	/* Streams the server opened earlier may still be waiting to be
+	 * accepted and make the socket readable, so keep looking until the
+	 * hang-up shows.
+	 */
+	do {
+		pfd.revents = 0;
+		(void)zsock_poll(&pfd, 1, 50);
+		if ((pfd.revents & ZSOCK_POLLHUP) != 0) {
+			break;
+		}
+
+		k_msleep(10);
+	} while (k_uptime_get() < end);
+
+	zassert_true((pfd.revents & ZSOCK_POLLHUP) != 0,
+		     "Connection was not closed (0x%x)", pfd.revents);
+
+	close_h3_client();
+
+	connect_h3_client(NULL);
+	start_h3_session(false);
+	send_get_and_expect_static(false);
+}
+
+/* End the sending side of a client stream, the peer sees the stream FIN */
+static void end_client_stream(int fd)
+{
+	int ret;
+
+	ret = zsock_shutdown(fd, ZSOCK_SHUT_WR);
+	zassert_ok(ret, "Failed to end stream %d (%d)", fd, errno);
+}
+
+ZTEST(server_h3_tests, test_h3_closed_control_stream_closes_connection)
+{
+	static const uint8_t settings[] = { H3_FRAME_SETTINGS, 0x00 };
+	int control_fd;
+
+	control_fd = start_h3_session_with_control_data(settings, sizeof(settings));
+	send_get_and_expect_static(false);
+
+	end_client_stream(control_fd);
+
+	expect_connection_closed_and_server_alive();
+}
+
+ZTEST(server_h3_tests, test_h3_closed_qpack_stream_closes_connection)
+{
+	static const uint8_t stream_type[] = { H3_UNI_STREAM_QPACK_ENCODER };
+	int qpack_fd;
+
+	start_h3_session(false);
+
+	qpack_fd = open_client_stream(QUIC_STREAM_UNIDIRECTIONAL);
+	send_all(qpack_fd, stream_type, sizeof(stream_type));
+	send_get_and_expect_static(false);
+
+	end_client_stream(qpack_fd);
+
+	expect_connection_closed_and_server_alive();
+}
+
+ZTEST(server_h3_tests, test_h3_malformed_settings_closes_connection)
+{
+	/* A setting identifier without its value */
+	static const uint8_t settings[] = { H3_FRAME_SETTINGS, 0x01, 0x01 };
+
+	(void)send_control_stream_data(settings, sizeof(settings));
+
+	expect_connection_closed_and_server_alive();
+}
+
+ZTEST(server_h3_tests, test_h3_client_goaway_keeps_connection)
+{
+	static const uint8_t settings_and_goaway[] = {
+		H3_FRAME_SETTINGS, 0x00,
+		H3_FRAME_GOAWAY, 0x01, 0x00,
+	};
+	int control_fd;
+
+	control_fd = start_h3_session_with_control_data(settings_and_goaway,
+							sizeof(settings_and_goaway));
+
+	/* Requests are still served */
+	for (int i = 0; i < 2; i++) {
+		send_get_and_expect_static(false);
+	}
+
+	/* The server still follows the control stream: it notices when the
+	 * stream ends, which is a connection error.
+	 */
+	end_client_stream(control_fd);
+
+	expect_connection_closed_and_server_alive();
 }
 
 ZTEST(server_h3_tests, test_h3_get_captures_request_headers)
@@ -1266,6 +1733,173 @@ ZTEST(server_h3_tests, test_h3_post_captures_request_headers_on_first_data_callb
 	untrack_stream_fd(stream_fd);
 }
 
+ZTEST(server_h3_tests, test_h3_resumed_early_get_reaches_callback)
+{
+	struct quic_session_state session_state;
+	uint8_t headers[160];
+	size_t headers_len;
+	int stream_fd;
+	int ret;
+
+	start_h3_session(false);
+	send_get_and_expect_static(false);
+	wait_for_client_session_state(&session_state);
+
+	close_h3_client();
+	connect_h3_client(&session_state);
+	send_client_control_stream(false);
+
+	stream_fd = open_client_stream(QUIC_STREAM_BIDIRECTIONAL);
+	headers_len = build_header_capture_headers_frame(headers, sizeof(headers),
+							 HTTP_GET, "/header_capture",
+							 "h3-0rtt", "early-get");
+	send_all(stream_fd, headers, headers_len);
+
+	expect_headers_only_status_response(stream_fd, HTTP_200_OK);
+	zassert_true(header_capture_calls > 0U,
+		     "Expected the header-capture callback to run for accepted 0-RTT GET");
+
+	ret = zsock_close(stream_fd);
+	zassert_ok(ret, "Failed to close early GET stream (%d)", errno);
+	untrack_stream_fd(stream_fd);
+}
+
+ZTEST(server_h3_tests, test_h3_resumed_early_post_is_rejected_with_425)
+{
+	struct quic_session_state session_state;
+	uint8_t headers[64];
+	size_t headers_len;
+	int stream_fd;
+	int ret;
+
+	start_h3_session(false);
+	send_get_and_expect_static(false);
+	wait_for_client_session_state(&session_state);
+
+	close_h3_client();
+	connect_h3_client(&session_state);
+	send_client_control_stream(false);
+
+	stream_fd = open_client_stream(QUIC_STREAM_BIDIRECTIONAL);
+	headers_len = build_headers_frame(headers, HTTP_POST, "/dynamic");
+	send_all(stream_fd, headers, headers_len);
+
+	expect_headers_only_status_response(stream_fd, HTTP_425_TOO_EARLY);
+	zassert_equal(dynamic_bytes_received, 0U,
+		      "Rejected early POST must not deliver request body data");
+	zassert_false(dynamic_more_seen, "Rejected early POST must not enter DATA_MORE");
+	zassert_false(dynamic_final_seen, "Rejected early POST must not enter DATA_FINAL");
+	zassert_false(dynamic_complete, "Rejected early POST must not complete dynamically");
+
+	ret = zsock_close(stream_fd);
+	zassert_ok(ret, "Failed to close rejected early POST stream (%d)", errno);
+	untrack_stream_fd(stream_fd);
+}
+
+ZTEST(server_h3_tests, test_h3_409_closes_stream_not_connection)
+{
+	static const char http1_request[] =
+		"POST /dynamic HTTP/1.1\r\n"
+		"Host: localhost\r\n"
+		"Content-Length: 8\r\n"
+		"\r\n"
+		"half";
+	static const char http1_rest[] = "rest";
+	static const uint8_t refused_body[] = "refused!";
+	uint8_t request[96];
+	size_t request_len;
+	int https_fd;
+	int stream_fd;
+	int ret;
+
+	start_h3_session(false);
+
+	/* An HTTP/1.1 client holds the dynamic resource for as long as its
+	 * request body is incomplete.
+	 */
+	https_fd = connect_https_client(SERVER_PORT);
+	send_all(https_fd, (const uint8_t *)http1_request, sizeof(http1_request) - 1);
+	zassert_true(WAIT_FOR(dynamic_more_seen, RECV_TIMEOUT_S * USEC_PER_SEC, k_msleep(10)),
+		     "HTTP/1.1 client did not take the dynamic resource");
+
+	/* The HTTP/3 request for the held resource is refused with 409. Its
+	 * headers and its body arrive together, as for any small POST.
+	 */
+	stream_fd = open_client_stream(QUIC_STREAM_BIDIRECTIONAL);
+	request_len = build_headers_frame(request, HTTP_POST, "/dynamic");
+	request_len += build_data_frame(request + request_len, refused_body,
+					sizeof(refused_body) - 1);
+	send_all(stream_fd, request, request_len);
+	expect_headers_only_status_response(stream_fd, HTTP_409_CONFLICT);
+
+	/* Neither the body of the refused request nor the end of its stream
+	 * may reach the callback, which is serving the holder.
+	 */
+	shutdown_stream_send(stream_fd);
+	k_msleep(100);
+	zassert_equal(dynamic_bytes_received, 4U,
+		      "Body of the refused request was passed to the callback (%zu bytes)",
+		      dynamic_bytes_received);
+	zassert_false(dynamic_final_seen, "Refused request ended the holder's request");
+
+	ret = zsock_close(stream_fd);
+	zassert_ok(ret, "Failed to close refused POST stream (%d)", errno);
+	untrack_stream_fd(stream_fd);
+
+	/* Only that request stream is finished: the HTTP/3 connection keeps
+	 * serving requests.
+	 */
+	send_get_and_expect_static(false);
+
+	/* The holder was not disturbed and can finish its request. */
+	zassert_false(dynamic_complete, "Holder transaction ended by the refused request");
+	send_all(https_fd, (const uint8_t *)http1_rest, sizeof(http1_rest) - 1);
+	zassert_true(WAIT_FOR(dynamic_complete, RECV_TIMEOUT_S * USEC_PER_SEC, k_msleep(10)),
+		     "HTTP/1.1 client could not finish its request");
+	zassert_equal(dynamic_bytes_received, 8U, "Unexpected dynamic payload length");
+
+	ret = zsock_close(https_fd);
+	zassert_ok(ret, "Failed to close HTTPS client socket (%d)", errno);
+}
+
+ZTEST(server_h3_tests, test_h3_405_does_not_pass_the_body_on)
+{
+	static const uint8_t refused_body[] = "refused!";
+	uint8_t request[96];
+	size_t request_len;
+	int stream_fd;
+	int ret;
+
+	start_h3_session(false);
+
+	/* The dynamic resource only takes POST. A GET with a body, sent in
+	 * one go, is refused, and its body must not reach the callback.
+	 */
+	stream_fd = open_client_stream(QUIC_STREAM_BIDIRECTIONAL);
+	request_len = build_headers_frame(request, HTTP_GET, "/dynamic");
+	request_len += build_data_frame(request + request_len, refused_body,
+					sizeof(refused_body) - 1);
+	send_all(stream_fd, request, request_len);
+	expect_headers_only_status_response(stream_fd, HTTP_405_METHOD_NOT_ALLOWED);
+
+	shutdown_stream_send(stream_fd);
+	k_msleep(100);
+
+	zassert_equal(dynamic_bytes_received, 0U,
+		      "Body of the refused request was passed to the callback (%zu bytes)",
+		      dynamic_bytes_received);
+	zassert_false(dynamic_more_seen, "Callback was called for the refused request");
+	zassert_false(dynamic_final_seen, "Callback was called for the refused request");
+	zassert_false(dynamic_complete, "Callback was called for the refused request");
+
+	ret = zsock_close(stream_fd);
+	zassert_ok(ret, "Failed to close refused stream (%d)", errno);
+	untrack_stream_fd(stream_fd);
+
+	/* The connection is not affected */
+	send_get_and_expect_static(false);
+}
+
 ZTEST(server_h3_function_tests, test_qpack_encode_int)
 {
 	uint8_t buf[4];
@@ -1296,11 +1930,193 @@ ZTEST(server_h3_function_tests, test_qpack_encode_int)
 	zassert_equal(ret, -ENOSPC, "Expected ENOSPC for empty buffer");
 }
 
+/*
+ * Regression tests for the QPACK integer / field-length bounds in the HTTP/3
+ * request header parser. These feed malformed header blocks straight into the
+ * parser functions and check that they are rejected rather than driving an
+ * out-of-bounds read in the Huffman decoder. Run under CONFIG_ASAN for the
+ * strongest signal.
+ */
+
+/* Longest integer the decoder must accept: a saturated 7-bit prefix followed
+ * by nine continuation bytes (63 bits of payload, shift 0..56).
+ */
+static const uint8_t qpack_int_longest_valid[] = {
+	0x7f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01,
+};
+
+/* One continuation byte too many (shift would reach 63): the accumulator
+ * cannot hold it, so the decoder must reject the integer instead of wrapping.
+ */
+static const uint8_t qpack_int_too_long[] = {
+	0x7f, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01,
+};
+
+ZTEST(server_h3_function_tests, test_qpack_decode_int_boundary)
+{
+	uint64_t value;
+	int ret;
+
+	ret = qpack_decode_int(qpack_int_longest_valid,
+			       sizeof(qpack_int_longest_valid), 7, &value);
+	zassert_equal(ret, sizeof(qpack_int_longest_valid),
+		      "Longest valid integer was not fully consumed (%d)", ret);
+	zassert_equal(value, 0x7fULL + (0x1ULL << 56),
+		      "Longest valid integer decoded to 0x%llx",
+		      (unsigned long long)value);
+
+	ret = qpack_decode_int(qpack_int_too_long, sizeof(qpack_int_too_long),
+			       7, &value);
+	zassert_true(ret < 0,
+		     "Over-long integer accepted (ret %d), value would wrap", ret);
+}
+
+/* A well-formed block prefix (Required Insert Count 0, Delta Base 0) followed
+ * by a literal field line with a static name reference whose Huffman-coded
+ * value carries an over-long length integer. Without the bound the length
+ * decodes to 2^64 - 1, pos + len wraps below buflen and the Huffman decoder
+ * reads past the end of this block.
+ */
+static const uint8_t qpack_block_value_len_wrap[] = {
+	0x00,                   /* Required Insert Count = 0 */
+	0x00,                   /* Delta Base = 0 */
+	0x50,                   /* literal, static name reference, index 0 */
+	0xff,                   /* value: H = 1, 7-bit length prefix saturated */
+	0x80, 0xff, 0xff, 0xff, /* ten continuation bytes: 127 + 2^64 - 128 */
+	0xff, 0xff, 0xff, 0xff, /* wraps to 2^64 - 1, which passes the */
+	0xff, 0x01,             /* pos + len <= buflen check */
+};
+
+ZTEST(server_h3_function_tests, test_h3_qpack_value_len_no_overread)
+{
+	static struct http_client_ctx client;
+	int ret;
+
+	memset(&client, 0, sizeof(client));
+	client.fd = -1;
+
+	ret = h3_parse_qpack_headers(&client, qpack_block_value_len_wrap,
+				     sizeof(qpack_block_value_len_wrap));
+	zassert_true(ret < 0,
+		     "Parser accepted an over-long value length (ret %d)", ret);
+}
+
+/* Same block prefix, but the field line ends immediately after the name index,
+ * so there is no byte left to read the value's Huffman flag from.
+ */
+static const uint8_t qpack_block_truncated_after_name_ref[] = {
+	0x00, /* Required Insert Count = 0 */
+	0x00, /* Delta Base = 0 */
+	0x50, /* literal, static name reference, index 0, nothing follows */
+};
+
+ZTEST(server_h3_function_tests, test_h3_qpack_truncated_after_name_ref)
+{
+	static struct http_client_ctx client;
+	int ret;
+
+	memset(&client, 0, sizeof(client));
+	client.fd = -1;
+
+	ret = h3_parse_qpack_headers(&client, qpack_block_truncated_after_name_ref,
+				     sizeof(qpack_block_truncated_after_name_ref));
+	zassert_true(ret < 0,
+		     "Parser read past a field line truncated after the name reference (ret %d)",
+		     ret);
+}
+
 ZTEST(server_h3_tests, test_http1_alt_svc_is_service_scoped)
 {
 	expect_http1_alt_svc_response(SERVER_PORT, true, SERVER_PORT,
 				      ALT_SVC_DISABLED_PORT);
 	expect_http1_alt_svc_response(ALT_SVC_DISABLED_PORT, false, 0U, 0U);
+}
+
+/* Send a frame that is not allowed on a request stream and check that the
+ * server answers with a connection error and keeps running.
+ */
+static void expect_request_stream_frame_closes_connection(const uint8_t *frame,
+							  size_t frame_len)
+{
+	struct zsock_pollfd pfd;
+	uint8_t buf[8];
+	int stream_fd;
+	int ret;
+
+	start_h3_session(false);
+
+	stream_fd = open_client_stream(QUIC_STREAM_BIDIRECTIONAL);
+	send_all(stream_fd, frame, frame_len);
+
+	/* The connection error closes the stream: the fd becomes readable
+	 * and recv() reports end of stream rather than response data.
+	 */
+	pfd.fd = stream_fd;
+	pfd.events = ZSOCK_POLLIN | ZSOCK_POLLHUP;
+	pfd.revents = 0;
+	ret = zsock_poll(&pfd, 1, RECV_TIMEOUT_S * MSEC_PER_SEC);
+	zassert_true(ret > 0, "Stream not closed after frame 0x%02x on request stream", frame[0]);
+
+	ret = zsock_recv(stream_fd, buf, sizeof(buf), 0);
+	zassert_true(ret <= 0, "Unexpected response data after frame 0x%02x (%d)", frame[0], ret);
+
+	/* The whole connection must be closed, not only the request stream:
+	 * the connection socket reports that the peer hung up.
+	 */
+	pfd.fd = client_conn_fd;
+	pfd.events = ZSOCK_POLLIN;
+	pfd.revents = 0;
+	ret = zsock_poll(&pfd, 1, RECV_TIMEOUT_S * MSEC_PER_SEC);
+	zassert_true(ret > 0, "Connection not closed after frame 0x%02x on request stream",
+		     frame[0]);
+	zassert_true((pfd.revents & ZSOCK_POLLHUP) != 0,
+		     "Connection still open after frame 0x%02x on request stream (0x%x)",
+		     frame[0], pfd.revents);
+
+	/* Tear down this connection and confirm the server survived by
+	 * serving a fresh connection.
+	 */
+	close_h3_client();
+	k_msleep(100);
+
+	connect_h3_client(NULL);
+	start_h3_session(false);
+	send_get_and_expect_static(false);
+}
+
+ZTEST(server_h3_tests, test_h3_goaway_on_request_stream_is_connection_error)
+{
+	static const uint8_t frame[] = { H3_FRAME_GOAWAY, 0x01, 0x00 };
+
+	expect_request_stream_frame_closes_connection(frame, sizeof(frame));
+}
+
+ZTEST(server_h3_tests, test_h3_settings_on_request_stream_is_connection_error)
+{
+	static const uint8_t frame[] = { H3_FRAME_SETTINGS, 0x00 };
+
+	expect_request_stream_frame_closes_connection(frame, sizeof(frame));
+}
+
+ZTEST(server_h3_tests, test_h3_cancel_push_on_request_stream_is_connection_error)
+{
+	static const uint8_t frame[] = { H3_FRAME_CANCEL_PUSH, 0x01, 0x00 };
+
+	expect_request_stream_frame_closes_connection(frame, sizeof(frame));
+}
+
+ZTEST(server_h3_tests, test_h3_max_push_id_on_request_stream_is_connection_error)
+{
+	static const uint8_t frame[] = { H3_FRAME_MAX_PUSH_ID, 0x01, 0x00 };
+
+	expect_request_stream_frame_closes_connection(frame, sizeof(frame));
+}
+
+ZTEST(server_h3_tests, test_h3_push_promise_on_request_stream_is_connection_error)
+{
+	static const uint8_t frame[] = { H3_FRAME_PUSH_PROMISE, 0x01, 0x00 };
+
+	expect_request_stream_frame_closes_connection(frame, sizeof(frame));
 }
 
 ZTEST_SUITE(server_h3_function_tests, NULL, NULL, NULL, NULL, NULL);

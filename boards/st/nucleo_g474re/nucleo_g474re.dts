@@ -22,6 +22,7 @@
 		zephyr,flash = &flash0;
 		zephyr,canbus = &fdcan1;
 		zephyr,code-partition = &slot0_partition;
+		zephyr,system-timer = &lptim1;
 	};
 
 	leds: leds {
@@ -113,9 +114,9 @@
 &i2c1 {
 	pinctrl-0 = <&i2c1_scl_pb8 &i2c1_sda_pb9>;
 	pinctrl-names = "default";
-	status = "okay";
 	scl-gpios = <&gpiob 8 GPIO_ACTIVE_HIGH>;
 	sda-gpios = <&gpiob 9 GPIO_ACTIVE_HIGH>;
+	status = "okay";
 };
 
 &spi1 {
@@ -161,7 +162,7 @@
 	};
 };
 
-stm32_lp_tick_source: &lptim1 {
+&lptim1 {
 	clocks = <&rcc STM32_CLOCK(APB1, 31)>,
 		 <&rcc STM32_SRC_LSI LPTIM1_SEL(1)>;
 	status = "okay";
@@ -213,11 +214,15 @@ stm32_lp_tick_source: &lptim1 {
 	status = "okay";
 };
 
+&adc12_common {
+	st,adc-clock-source = "SYNC";
+	st,adc-prescaler = <4>;
+	status = "okay";
+};
+
 &adc1 {
 	pinctrl-0 = <&adc1_in1_pa0>;
 	pinctrl-names = "default";
-	st,adc-clock-source = "SYNC";
-	st,adc-prescaler = <4>;
 	status = "okay";
 };
 

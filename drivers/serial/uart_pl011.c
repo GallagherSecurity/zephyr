@@ -231,8 +231,18 @@ static void pl011_poll_out(const struct device *dev,
 
 static int pl011_err_check(const struct device *dev)
 {
-	uint32_t rsr = get_uart(dev)->rsr;
 	int errors = 0;
+	uint32_t rsr;
+
+	/* Clear the latched error status first, then re-read.
+	 * RSR latches errors from the most recent DR read.
+	 * Writing any value to ECR (same address, write side) clears
+	 * all error flags.  We clear first so that after this call
+	 * returns, RSR is clean and ready to latch errors from the
+	 * next DR read.
+	 */
+	rsr = get_uart(dev)->rsr;
+	get_uart(dev)->rsr = 0;
 
 	if (rsr & PL011_RSR_ECR_OE) {
 		errors |= UART_ERROR_OVERRUN;
@@ -512,7 +522,10 @@ static void pl011_irq_err_disable(const struct device *dev)
 
 static int pl011_irq_is_pending(const struct device *dev)
 {
-	return pl011_irq_rx_ready(dev) || pl011_irq_tx_ready(dev);
+	volatile struct pl011_regs *uart = get_uart(dev);
+
+	return pl011_irq_rx_ready(dev) || pl011_irq_tx_ready(dev) ||
+	       (uart->mis & PL011_IMSC_ERROR_MASK);
 }
 
 static void pl011_irq_callback_set(const struct device *dev,
@@ -712,6 +725,14 @@ void pl011_isr(const struct device *dev)
 		uart->imsc &= ~PL011_IMSC_CTSMIM;
 	}
 
+	/* Clear error interrupts (OE, BE, PE, FE) so they don't
+	 * re-fire endlessly.  The error status is still available
+	 * via uart_err_check() which reads RSR.
+	 */
+	if (uart->mis & PL011_IMSC_ERROR_MASK) {
+		uart->icr = uart->mis & PL011_IMSC_ERROR_MASK;
+	}
+
 	/* Verify if the callback has been registered */
 	if (data->irq_cb) {
 		K_SPINLOCK(&data->irq_cb_lock) {
@@ -749,7 +770,7 @@ void pl011_isr(const struct device *dev)
 		};									\
 	))										\
 											\
-	static struct pl011_config pl011_cfg_port_##n = {				\
+	static const struct pl011_config pl011_cfg_port_##n = {				\
 		DEVICE_MMIO_ROM_INIT(DT_DRV_INST(n)),					\
 		CLOCK_INIT(n)                                                           \
 		PINCTRL_INIT(n)	                                                        \
@@ -799,7 +820,7 @@ DT_INST_FOREACH_STATUS_OKAY(PL011_INIT)
 		};                                                                                 \
 	))                                                                                         \
 	                                                                                           \
-	static struct pl011_config pl011_cfg_sbsa_##n = {                                          \
+	static const struct pl011_config pl011_cfg_sbsa_##n = {                                    \
 		DEVICE_MMIO_ROM_INIT(DT_DRV_INST(n)),                                              \
 		IF_ENABLED(PL011_NODE_USE_IRQ(n),                                                  \
 			   (.irq_config_func = pl011_irq_config_func_sbsa_##n,))		   \

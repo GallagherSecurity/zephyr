@@ -53,7 +53,7 @@ enum peci_command_code {
 	PECI_CMD_WR_PCI_CFG0         = 0x65,
 	PECI_CMD_WR_PCI_CFG1         = 0x66,
 	PECI_CMD_RD_PKG_CFG0         = 0xA1,
-	PECI_CMD_RD_PKG_CFG1         = 0xA,
+	PECI_CMD_RD_PKG_CFG1         = 0xA2,
 	PECI_CMD_WR_PKG_CFG0         = 0xA5,
 	PECI_CMD_WR_PKG_CFG1         = 0xA6,
 	PECI_CMD_RD_IAMSR0           = 0xB1,
@@ -244,27 +244,49 @@ struct peci_msg {
 };
 
 /**
- * @cond INTERNAL_HIDDEN
- *
- * PECI driver API definition and system call entry points
- *
- * (Internal use only.)
+ * @def_driverbackendgroup{PECI,peci_interface}
+ * @{
+ */
+
+/**
+ * @brief Callback API to configure the PECI interface.
+ * See peci_config() for argument description.
  */
 typedef int (*peci_config_t)(const struct device *dev, uint32_t bitrate);
+
+/**
+ * @brief Callback API to perform a PECI transaction.
+ * See peci_transfer() for argument description.
+ */
 typedef int (*peci_transfer_t)(const struct device *dev, struct peci_msg *msg);
+
+/**
+ * @brief Callback API to disable the PECI interface.
+ * See peci_disable() for argument description.
+ */
 typedef int (*peci_disable_t)(const struct device *dev);
+
+/**
+ * @brief Callback API to enable the PECI interface.
+ * See peci_enable() for argument description.
+ */
 typedef int (*peci_enable_t)(const struct device *dev);
 
+/**
+ * @driver_ops{PECI}
+ */
 __subsystem struct peci_driver_api {
+	/** @driver_ops_mandatory @copybrief peci_config */
 	peci_config_t config;
+	/** @driver_ops_mandatory @copybrief peci_disable */
 	peci_disable_t disable;
+	/** @driver_ops_mandatory @copybrief peci_enable */
 	peci_enable_t enable;
+	/** @driver_ops_mandatory @copybrief peci_transfer */
 	peci_transfer_t transfer;
 };
 
-/**
- * @endcond
- */
+/** @} */
 
 /**
  * @brief Configures the PECI interface.
@@ -272,8 +294,7 @@ __subsystem struct peci_driver_api {
  * @param dev Pointer to the device structure for the driver instance.
  * @param bitrate the selected bitrate expressed in Kbps.
  *
- * @retval 0 If successful.
- * @retval <0 Negative errno code if failure.
+ * @return 0 on success, negative errno value on failure.
  */
 __syscall int peci_config(const struct device *dev, uint32_t bitrate);
 
@@ -288,8 +309,7 @@ static inline int z_impl_peci_config(const struct device *dev,
  *
  * @param dev Pointer to the device structure for the driver instance.
  *
- * @retval 0 If successful.
- * @retval <0 Negative errno code if failure.
+ * @return 0 on success, negative errno value on failure.
  */
 __syscall int peci_enable(const struct device *dev);
 
@@ -303,8 +323,7 @@ static inline int z_impl_peci_enable(const struct device *dev)
  *
  * @param dev Pointer to the device structure for the driver instance.
  *
- * @retval 0 If successful.
- * @retval <0 Negative errno code if failure.
+ * @return 0 on success, negative errno value on failure.
  */
 __syscall int peci_disable(const struct device *dev);
 
@@ -319,8 +338,7 @@ static inline int z_impl_peci_disable(const struct device *dev)
  * @param dev Pointer to the device structure for the driver instance.
  * @param msg Structure representing a PECI transaction.
  *
- * @retval 0 If successful.
- * @retval <0 Negative errno code if failure.
+ * @return 0 on success, negative errno value on failure.
  */
 
 __syscall int peci_transfer(const struct device *dev, struct peci_msg *msg);

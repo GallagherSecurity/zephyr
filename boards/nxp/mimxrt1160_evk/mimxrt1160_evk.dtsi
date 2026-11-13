@@ -5,7 +5,7 @@
  */
 
 #include "mimxrt1160_evk-pinctrl.dtsi"
-#include <nxp/imxrt/nxp_rt1160.dtsi>
+#include <nxp/imxrt/imxrt11xx/nxp_rt1160.dtsi>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
 / {
@@ -32,7 +32,7 @@
 
 		user_button: button-1 {
 			label = "User SW7";
-			gpios = <&gpio13 0 GPIO_ACTIVE_HIGH>;
+			gpios = <&gpio13 0 GPIO_ACTIVE_LOW>;
 			zephyr,code = <INPUT_KEY_0>;
 		};
 	};

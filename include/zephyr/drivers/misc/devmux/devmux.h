@@ -10,8 +10,8 @@
  * @ingroup demux_interface
  */
 
-#ifndef INCLUDE_ZEPHYR_DRIVERS_MISC_DEVMUX_H_
-#define INCLUDE_ZEPHYR_DRIVERS_MISC_DEVMUX_H_
+#ifndef ZEPHYR_INCLUDE_DRIVERS_MISC_DEVMUX_DEVMUX_H_
+#define ZEPHYR_INCLUDE_DRIVERS_MISC_DEVMUX_DEVMUX_H_
 
 #include <stdint.h>
 
@@ -55,6 +55,20 @@ extern "C" {
  */
 
 /**
+ * @driver_ops{DEVMUX}
+ */
+__subsystem struct devmux_driver_api {
+	/**
+	 * @driver_ops_mandatory Callback API to get the current selection of a devmux device.
+	 */
+	int (*select_get)(const struct device *dev);
+	/**
+	 * @driver_ops_mandatory Callback API to set the selection of a devmux device.
+	 */
+	int (*select_set)(struct device *dev, size_t index);
+};
+
+/**
  * @brief Get the current selection of a devmux device.
  *
  * Return the index of the currently selected device.
@@ -88,4 +102,4 @@ __syscall int devmux_select_set(struct device *dev, size_t index);
 
 #include <zephyr/syscalls/devmux.h>
 
-#endif /* INCLUDE_ZEPHYR_DRIVERS_MISC_DEVMUX_H_ */
+#endif /* ZEPHYR_INCLUDE_DRIVERS_MISC_DEVMUX_DEVMUX_H_ */

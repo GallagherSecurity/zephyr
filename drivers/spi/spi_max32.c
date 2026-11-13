@@ -20,6 +20,8 @@
 #include <zephyr/rtio/rtio.h>
 #include <zephyr/sys/__assert.h>
 #include <zephyr/sys/util.h>
+#include <zephyr/pm/device.h>
+#include <zephyr/pm/policy.h>
 
 #include <wrap_max32_spi.h>
 
@@ -56,7 +58,8 @@ struct max32_spi_data {
 	struct spi_context ctx;
 	const struct device *dev;
 	mxc_spi_req_t req;
-	uint8_t dummy[2];
+	uint8_t tx_dummy[2];
+	uint8_t rx_dummy[2];
 
 #ifdef CONFIG_SPI_MAX32_DMA
 	volatile uint8_t dma_stat;
@@ -72,6 +75,7 @@ struct max32_spi_data {
 #ifdef CONFIG_SPI_RTIO
 	struct spi_rtio *rtio_ctx;
 #endif
+	bool pm_policy_state_lock;
 };
 
 #ifdef CONFIG_SPI_MAX32_DMA
@@ -85,6 +89,30 @@ struct max32_spi_data {
 static void spi_max32_callback(mxc_spi_req_t *req, int error);
 #endif /* CONFIG_SPI_MAX32_INTERRUPT */
 
+static void spi_max32_pm_policy_state_lock_get(const struct device *dev)
+{
+	if (IS_ENABLED(CONFIG_PM_POLICY_DEVICE_CONSTRAINTS)) {
+		struct max32_spi_data *data = dev->data;
+
+		if (!data->pm_policy_state_lock) {
+			data->pm_policy_state_lock = true;
+			pm_policy_device_power_lock_get(dev);
+		}
+	}
+}
+
+static void spi_max32_pm_policy_state_lock_put(const struct device *dev)
+{
+	if (IS_ENABLED(CONFIG_PM_POLICY_DEVICE_CONSTRAINTS)) {
+		struct max32_spi_data *data = dev->data;
+
+		if (data->pm_policy_state_lock) {
+			data->pm_policy_state_lock = false;
+			pm_policy_device_power_lock_put(dev);
+		}
+	}
+}
+
 static int spi_configure(const struct device *dev, const struct spi_config *config)
 {
 	int ret = 0;
@@ -92,23 +120,21 @@ static int spi_configure(const struct device *dev, const struct spi_config *conf
 	mxc_spi_regs_t *regs = cfg->regs;
 	struct max32_spi_data *data = dev->data;
 
-#ifndef CONFIG_SPI_RTIO
+#if !(defined(CONFIG_SPI_RTIO) || defined(CONFIG_PM_S2RAM))
 	if (spi_context_configured(&data->ctx, config)) {
 		return 0;
 	}
-#endif
+#endif /* !((CONFIG_SPI_RTIO) || (CONFIG_PM_S2RAM)) */
 
-	if (SPI_OP_MODE_GET(config->operation) & SPI_OP_MODE_SLAVE) {
-		return -ENOTSUP;
-	}
 
-	int master_mode = 1;
+	int controller_mode = !(SPI_OP_MODE_GET(config->operation) & SPI_OP_MODE_PERIPHERAL);
 	int quad_mode = 0;
-	int num_slaves = 1;
+	int num_peripherals = 1;
 	int ss_polarity = (config->operation & SPI_CS_ACTIVE_HIGH) ? 1 : 0;
 	unsigned int spi_speed = (unsigned int)config->frequency;
 
-	ret = Wrap_MXC_SPI_Init(regs, master_mode, quad_mode, num_slaves, ss_polarity, spi_speed);
+	ret = Wrap_MXC_SPI_Init(regs, controller_mode, quad_mode, num_peripherals, ss_polarity,
+				spi_speed);
 	if (ret) {
 		return -EINVAL;
 	}
@@ -134,25 +160,35 @@ static int spi_configure(const struct device *dev, const struct spi_config *conf
 		return -ENOTSUP;
 	}
 
-#if defined(CONFIG_SPI_EXTENDED_MODES)
-	switch (config->operation & SPI_LINES_MASK) {
-	case SPI_LINES_QUAD:
-		ret = MXC_SPI_SetWidth(regs, SPI_WIDTH_QUAD);
-		break;
-	case SPI_LINES_DUAL:
-		ret = MXC_SPI_SetWidth(regs, SPI_WIDTH_DUAL);
-		break;
-	case SPI_LINES_OCTAL:
-		ret = -ENOTSUP;
-		break;
-	case SPI_LINES_SINGLE:
-	default:
-		ret = MXC_SPI_SetWidth(regs, SPI_WIDTH_STANDARD);
-		break;
+	if (config->operation & SPI_HALF_DUPLEX) {
+		ret = MXC_SPI_SetWidth(regs, SPI_WIDTH_3WIRE);
+		if (ret) {
+			LOG_ERR("Failed to set half duplex mode (%d)", ret);
+			return -EINVAL;
+		}
 	}
+#if defined(CONFIG_SPI_EXTENDED_MODES)
+	else {
+		switch (config->operation & SPI_LINES_MASK) {
+		case SPI_LINES_QUAD:
+			ret = MXC_SPI_SetWidth(regs, SPI_WIDTH_QUAD);
+			break;
+		case SPI_LINES_DUAL:
+			ret = MXC_SPI_SetWidth(regs, SPI_WIDTH_DUAL);
+			break;
+		case SPI_LINES_OCTAL:
+			ret = -ENOTSUP;
+			break;
+		case SPI_LINES_SINGLE:
+		default:
+			ret = MXC_SPI_SetWidth(regs, SPI_WIDTH_STANDARD);
+			break;
+		}
 
-	if (ret) {
-		return -EINVAL;
+		if (ret) {
+			LOG_ERR("Failed to set data width (%d)", ret);
+			return -EINVAL;
+		}
 	}
 #endif
 
@@ -160,6 +196,17 @@ static int spi_configure(const struct device *dev, const struct spi_config *conf
 
 	return ret;
 }
+
+#ifdef CONFIG_SPI_MAX32_DMA
+
+static inline bool spi_max32_has_dma_channels(const struct device *dev)
+{
+	const struct max32_spi_config *cfg = dev->config;
+
+	return cfg->tx_dma.channel != 0xFF && cfg->rx_dma.channel != 0xFF;
+}
+
+#endif
 
 static inline int spi_max32_get_dfs_shift(const struct spi_context *ctx)
 {
@@ -209,6 +256,10 @@ static void spi_cs_assert(const struct device *dev)
 	struct max32_spi_data *data = dev->data;
 	struct spi_context *ctx = &data->ctx;
 
+	if (spi_context_is_peripheral(ctx)) {
+		return;
+	}
+
 	if (spi_cs_is_gpio(ctx->config)) {
 		MXC_SPI_HWSSControl(cfg->regs, false);
 		spi_context_cs_control(ctx, true);
@@ -224,6 +275,10 @@ static void spi_cs_deassert(const struct device *dev)
 	const struct max32_spi_config *cfg = dev->config;
 	struct max32_spi_data *data = dev->data;
 	struct spi_context *ctx = &data->ctx;
+
+	if (spi_context_is_peripheral(ctx)) {
+		return;
+	}
 
 	if (spi_cs_is_gpio(ctx->config)) {
 		spi_context_cs_control(ctx, false);
@@ -251,8 +306,9 @@ static int spi_max32_transceive_sync(mxc_spi_regs_t *spi, struct max32_spi_data 
 		remain = tx_len - req->txCnt;
 		if (remain > 0) {
 			if (!data->req.txData) {
-				req->txCnt += MXC_SPI_WriteTXFIFO(spi, data->dummy,
-								  MIN(remain, sizeof(data->dummy)));
+				req->txCnt += MXC_SPI_WriteTXFIFO(spi, data->tx_dummy,
+								  MIN(remain,
+								      sizeof(data->tx_dummy)));
 			} else {
 				req->txCnt +=
 					MXC_SPI_WriteTXFIFO(spi, &req->txData[req->txCnt], remain);
@@ -306,11 +362,7 @@ static int spi_max32_transceive(const struct device *dev)
 	uint8_t dfs_shift;
 
 	dfs_shift = spi_max32_get_dfs_shift(ctx);
-
 	len = spi_context_max_continuous_chunk(ctx);
-
-	/* Make sure dummy is zero'd in case it's re-used as a TX buffer in a later request. */
-	memset(data->dummy, 0, sizeof(data->dummy));
 
 #ifdef CONFIG_SPI_RTIO
 	switch (sqe->op) {
@@ -321,7 +373,7 @@ static int spi_max32_transceive(const struct device *dev)
 		if (data->req.rxData == NULL &&
 		    (COND_CODE_1(IS_ENABLED(CONFIG_SPI_MAX32_DMA),
 				 (cfg->rx_dma.channel == 0xFF), (true)))) {
-			data->req.rxData = data->dummy;
+			data->req.rxData = data->rx_dummy;
 			data->req.rxLen = 0;
 		}
 		data->req.txData = NULL;
@@ -330,14 +382,14 @@ static int spi_max32_transceive(const struct device *dev)
 	case RTIO_OP_TX:
 		len = sqe->tx.buf_len;
 		data->req.rxLen = 0;
-		data->req.rxData = data->dummy;
+		data->req.rxData = data->rx_dummy;
 		data->req.txData = (uint8_t *)sqe->tx.buf;
 		data->req.txLen = len;
 		break;
 	case RTIO_OP_TINY_TX:
 		len = sqe->tiny_tx.buf_len;
 		data->req.txData = (uint8_t *)sqe->tiny_tx.buf;
-		data->req.rxData = data->dummy;
+		data->req.rxData = data->rx_dummy;
 		data->req.txLen = len;
 		data->req.rxLen = 0;
 		break;
@@ -350,7 +402,7 @@ static int spi_max32_transceive(const struct device *dev)
 		if (data->req.rxData == NULL &&
 		    (COND_CODE_1(IS_ENABLED(CONFIG_SPI_MAX32_DMA),
 				 (cfg->rx_dma.channel == 0xFF), (true)))) {
-			data->req.rxData = data->dummy;
+			data->req.rxData = data->rx_dummy;
 			data->req.rxLen = 0;
 		}
 		break;
@@ -359,14 +411,15 @@ static int spi_max32_transceive(const struct device *dev)
 	}
 #else
 	if ((ctx->config->operation & SPI_HALF_DUPLEX)
+	    || (SPI_OP_MODE_GET(data->ctx.config->operation) & SPI_OP_MODE_PERIPHERAL)
 #if defined(CONFIG_SPI_EXTENDED_MODES)
-		|| (ctx->config->operation & SPI_LINES_DUAL)
-		|| (ctx->config->operation & SPI_LINES_QUAD)
-		|| (ctx->config->operation & SPI_LINES_OCTAL)
+	    || (ctx->config->operation & SPI_LINES_DUAL)
+	    || (ctx->config->operation & SPI_LINES_QUAD)
+	    || (ctx->config->operation & SPI_LINES_OCTAL)
 #endif
 		) {
 		/* Half duplex mode, tx should be set only if no rx */
-		data->req.txLen = ctx->tx_buf ? len : 0;
+		data->req.txLen = ctx->tx_buf ? ctx->tx_len : 0;
 	} else {
 		/* Full duplex mode, tx and rx can be set independently */
 		data->req.txLen = len;
@@ -379,7 +432,7 @@ static int spi_max32_transceive(const struct device *dev)
 		/* Pass a dummy buffer to HAL if receive buffer is NULL, otherwise
 		 * corrupt data is read during subsequent transactions.
 		 */
-		data->req.rxData = data->dummy;
+		data->req.rxData = data->rx_dummy;
 		data->req.rxLen = 0;
 
 		if (!data->req.txData && !data->req.txLen) {
@@ -395,7 +448,7 @@ static int spi_max32_transceive(const struct device *dev)
 	}
 #endif
 	data->req.spi = cfg->regs;
-	data->req.ssIdx = ctx->config->slave;
+	data->req.ssIdx = ctx->config->peripheral;
 	data->req.ssDeassert = 0;
 	data->req.txCnt = 0;
 	data->req.rxCnt = 0;
@@ -403,7 +456,7 @@ static int spi_max32_transceive(const struct device *dev)
 #if defined(CONFIG_SPI_MAX32_DMA) && defined(CONFIG_SPI_MAX32_RTIO)
 	struct dma_status status;
 
-	if (cfg->tx_dma.channel != 0xFF && cfg->rx_dma.channel != 0xFF) {
+	if (spi_max32_has_dma_channels(dev)) {
 		MXC_SPI_ClearTXFIFO(cfg->regs);
 		MXC_SPI_ClearRXFIFO(cfg->regs);
 
@@ -431,7 +484,7 @@ static int spi_max32_transceive(const struct device *dev)
 			return -ENOTSUP;
 		}
 
-		MXC_SPI_SetSlave(cfg->regs, ctx->config->slave);
+		MXC_SPI_SetSlave(cfg->regs, ctx->config->peripheral);
 
 		ret = spi_max32_rx_dma_setup(dev, data->req.rxData, data->req.rxLen,
 					     data->req.rxLen >> dfs_shift, dfs_shift);
@@ -461,20 +514,26 @@ dma_rtio_exit:
 #endif
 
 #if defined(CONFIG_SPI_MAX32_INTERRUPT)
-	MXC_SPI_SetTXThreshold(cfg->regs, 1 << dfs_shift);
+	MXC_SPI_ClearTXFIFO(cfg->regs);
+	MXC_SPI_ClearRXFIFO(cfg->regs);
+
 	if (data->req.rxLen) {
 		MXC_SPI_SetRXThreshold(cfg->regs, 2 << dfs_shift);
 		MXC_SPI_EnableInt(cfg->regs, ADI_MAX32_SPI_INT_EN_RX_THD);
 	}
-	MXC_SPI_EnableInt(cfg->regs, ADI_MAX32_SPI_INT_EN_TX_THD | ADI_MAX32_SPI_INT_EN_MST_DONE);
 
-	MXC_SPI_ClearTXFIFO(cfg->regs);
-	MXC_SPI_ClearRXFIFO(cfg->regs);
-	if (!data->req.txData) {
-		data->req.txCnt =
-			MXC_SPI_WriteTXFIFO(cfg->regs, data->dummy, MIN(len, sizeof(data->dummy)));
-	} else {
-		data->req.txCnt = MXC_SPI_WriteTXFIFO(cfg->regs, data->req.txData, len);
+	MXC_SPI_EnableInt(cfg->regs, ADI_MAX32_SPI_INT_EN_MST_DONE);
+
+	if (data->req.txLen) {
+		MXC_SPI_SetTXThreshold(cfg->regs, 1 << dfs_shift);
+		MXC_SPI_EnableInt(cfg->regs, ADI_MAX32_SPI_INT_EN_TX_THD);
+		if (!data->req.txData) {
+			data->req.txCnt = MXC_SPI_WriteTXFIFO(cfg->regs, data->tx_dummy,
+							      MIN(len, sizeof(data->tx_dummy)));
+		} else {
+			data->req.txCnt = MXC_SPI_WriteTXFIFO(cfg->regs,
+							      data->req.txData, data->req.txLen);
+		}
 	}
 
 	MXC_SPI_StartTransmission(cfg->regs);
@@ -505,11 +564,20 @@ static int transceive(const struct device *dev, const struct spi_config *config,
 	}
 #endif
 
+#ifdef CONFIG_SPI_PERIPHERAL
+	if ((SPI_OP_MODE_GET(config->operation) & SPI_OP_MODE_PERIPHERAL) &&
+	    ((tx_bufs && tx_bufs->count > 1) || (rx_bufs && rx_bufs->count > 1))) {
+		return -ENOTSUP;
+	}
+#endif
+
 	spi_context_lock(ctx, async, cb, userdata, config);
 
 #ifndef CONFIG_SPI_RTIO
+	spi_max32_pm_policy_state_lock_get(dev);
 	ret = spi_configure(dev, config);
 	if (ret != 0) {
+		spi_max32_pm_policy_state_lock_put(dev);
 		spi_context_release(ctx, ret);
 		return ret;
 	}
@@ -561,7 +629,15 @@ static int transceive(const struct device *dev, const struct spi_config *config,
 	}
 
 #endif
+
+#ifndef CONFIG_SPI_RTIO
+	if (!async) {
+		spi_max32_pm_policy_state_lock_put(dev);
+	}
+#endif /* CONFIG_SPI_RTIO */
+
 	spi_context_release(ctx, ret);
+
 	return ret;
 }
 
@@ -570,6 +646,12 @@ static void spi_max32_iodev_complete(const struct device *dev, int status);
 #endif
 
 #ifdef CONFIG_SPI_MAX32_DMA
+
+static inline bool spi_max32_dma_is_half_duplex_op(spi_operation_t operation)
+{
+	return (operation & SPI_HALF_DUPLEX) || (operation & SPI_LINES_MASK) != SPI_LINES_SINGLE;
+}
+
 static void spi_max32_dma_callback(const struct device *dev, void *arg, uint32_t channel,
 				   int status)
 {
@@ -629,7 +711,9 @@ static void spi_max32_dma_callback(const struct device *dev, void *arg, uint32_t
 	uint32_t len;
 	uint8_t dfs = spi_max32_get_dfs_shift(ctx) ? 2 : 1;
 
-	if ((data->dma_stat & SPI_MAX32_DMA_DONE_FLAG) == SPI_MAX32_DMA_DONE_FLAG) {
+	if ((data->dma_stat & SPI_MAX32_DMA_DONE_FLAG) == SPI_MAX32_DMA_DONE_FLAG ||
+	    (spi_max32_dma_is_half_duplex_op(ctx->config->operation) && data->dma_stat) ||
+	    (!ctx->rx_len && (data->dma_stat & SPI_MAX32_DMA_RX_DONE_FLAG))) {
 		len = spi_context_max_continuous_chunk(ctx);
 		spi_context_update_tx(ctx, dfs, len);
 		spi_context_update_rx(ctx, dfs, len);
@@ -667,7 +751,7 @@ static int spi_max32_tx_dma_load(const struct device *dev, const uint8_t *buf, u
 	dma_cfg.dma_slot = config->tx_dma.slot;
 	dma_cfg.block_count = 1;
 	dma_cfg.source_data_size = 1U << dfs_shift;
-	dma_cfg.source_burst_length = 1U << dfs_shift;
+	dma_cfg.source_burst_length = dfs_shift ? 4 : 3;
 	dma_cfg.dest_data_size = 1U << dfs_shift;
 	dma_cfg.head_block = &dma_blk;
 	dma_blk.block_size = len;
@@ -676,7 +760,7 @@ static int spi_max32_tx_dma_load(const struct device *dev, const uint8_t *buf, u
 		dma_blk.source_address = (uint32_t)buf;
 	} else {
 		dma_blk.source_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
-		dma_blk.source_address = (uint32_t)data->dummy;
+		dma_blk.source_address = (uint32_t)data->tx_dummy;
 	}
 
 	ret = dma_config(config->tx_dma.dev, config->tx_dma.channel, &dma_cfg);
@@ -694,14 +778,20 @@ static int spi_max32_tx_dma_setup(const struct device *dev, const uint8_t *buf, 
 	struct max32_spi_data *data = dev->data;
 	mxc_spi_regs_t *spi = cfg->regs;
 
+	data->dma_stat = 0;
+
+	if (!len) {
+		spi->ctrl1 &= ~MXC_F_SPI_CTRL1_TX_NUM_CHAR;
+		spi->dma &= ~MXC_F_SPI_DMA_TX_FIFO_EN;
+		return 0;
+	}
+
 	MXC_SETFIELD(spi->ctrl1, MXC_F_SPI_CTRL1_TX_NUM_CHAR,
 		     word_count << MXC_F_SPI_CTRL1_TX_NUM_CHAR_POS);
 	spi->dma |= ADI_MAX32_SPI_DMA_TX_FIFO_CLEAR;
 	spi->dma |= MXC_F_SPI_DMA_TX_FIFO_EN;
 	spi->dma |= ADI_MAX32_SPI_DMA_TX_DMA_EN;
-	MXC_SPI_SetTXThreshold(spi, 2);
-
-	data->dma_stat = 0;
+	MXC_SPI_SetTXThreshold(spi, dfs_shift ? 3 : 2);
 
 	return spi_max32_tx_dma_load(dev, buf, len, dfs_shift);
 }
@@ -730,7 +820,7 @@ static int spi_max32_rx_dma_load(const struct device *dev, const uint8_t *buf, u
 		dma_blk.dest_address = (uint32_t)buf;
 	} else {
 		dma_blk.dest_addr_adj = DMA_ADDR_ADJ_NO_CHANGE;
-		dma_blk.dest_address = (uint32_t)data->dummy;
+		dma_blk.dest_address = (uint32_t)data->rx_dummy;
 	}
 	ret = dma_config(config->rx_dma.dev, config->rx_dma.channel, &dma_cfg);
 	if (ret < 0) {
@@ -744,13 +834,22 @@ static int spi_max32_rx_dma_setup(const struct device *dev, const uint8_t *buf, 
 				  uint32_t word_count, uint8_t dfs_shift)
 {
 	const struct max32_spi_config *cfg = dev->config;
+	struct max32_spi_data *data = dev->data;
 	mxc_spi_regs_t *spi = cfg->regs;
+
+	data->dma_stat = 0;
+
+	if (!len) {
+		spi->ctrl1 &= ~MXC_F_SPI_CTRL1_RX_NUM_CHAR;
+		spi->dma &= ~MXC_F_SPI_DMA_RX_FIFO_EN;
+		return 0;
+	}
 
 	MXC_SETFIELD(spi->ctrl1, MXC_F_SPI_CTRL1_RX_NUM_CHAR,
 		     word_count << MXC_F_SPI_CTRL1_RX_NUM_CHAR_POS);
 	spi->dma |= ADI_MAX32_SPI_DMA_RX_FIFO_CLEAR;
-	spi->dma |= MXC_F_SPI_DMA_RX_FIFO_EN;
 	spi->dma |= ADI_MAX32_SPI_DMA_RX_DMA_EN;
+	spi->dma |= MXC_F_SPI_DMA_RX_FIFO_EN;
 	MXC_SPI_SetRXThreshold(spi, dfs_shift ? 1 : 0);
 
 	return spi_max32_rx_dma_load(dev, buf, len, dfs_shift);
@@ -790,12 +889,16 @@ static int spi_max32_transceive_dma(const struct device *dev)
 		return ret;
 	}
 
-	ret = spi_max32_rx_dma_setup(dev, ctx->rx_buf, len, word_count, dfs_shift);
+	ret = spi_max32_rx_dma_setup(dev, ctx->rx_buf,
+				     (ctx->config->operation & SPI_HALF_DUPLEX) ? ctx->rx_len : len,
+				     word_count, dfs_shift);
 	if (ret < 0) {
 		return ret;
 	}
 
-	ret = spi_max32_tx_dma_setup(dev, ctx->tx_buf, len, word_count, dfs_shift);
+	ret = spi_max32_tx_dma_setup(dev, ctx->tx_buf,
+				     (ctx->config->operation & SPI_HALF_DUPLEX) ? ctx->tx_len : len,
+				     word_count, dfs_shift);
 	if (ret < 0) {
 		return ret;
 	}
@@ -836,6 +939,8 @@ static int transceive_dma(const struct device *dev, const struct spi_config *con
 	MXC_SPI_ClearTXFIFO(spi);
 	MXC_SPI_ClearRXFIFO(spi);
 
+	spi_max32_pm_policy_state_lock_get(dev);
+
 	ret = dma_get_status(cfg->tx_dma.dev, cfg->tx_dma.channel, &status);
 	if (ret < 0 || status.busy) {
 		ret = ret < 0 ? ret : -EBUSY;
@@ -864,7 +969,7 @@ static int transceive_dma(const struct device *dev, const struct spi_config *con
 	/* Assert the CS line */
 	spi_cs_assert(dev);
 
-	MXC_SPI_SetSlave(cfg->regs, ctx->config->slave);
+	MXC_SPI_SetSlave(cfg->regs, ctx->config->peripheral);
 
 	do {
 		ret = spi_max32_transceive_dma(dev);
@@ -879,6 +984,7 @@ unlock:
 	/* Deassert the CS line */
 	if (!async || ret < 0) {
 		spi_cs_deassert(dev);
+		spi_max32_pm_policy_state_lock_put(dev);
 	}
 
 	spi_context_release(ctx, ret);
@@ -942,6 +1048,8 @@ static void spi_max32_iodev_complete(const struct device *dev, int status)
 		if (spi_rtio_complete(rtio_ctx, status)) {
 			spi_max32_iodev_prepare_start(dev);
 			spi_max32_iodev_start(dev);
+		} else {
+			spi_max32_pm_policy_state_lock_put(dev);
 		}
 	}
 }
@@ -951,9 +1059,12 @@ static void api_iodev_submit(const struct device *dev, struct rtio_iodev_sqe *io
 	struct max32_spi_data *data = dev->data;
 	struct spi_rtio *rtio_ctx = data->rtio_ctx;
 
+	spi_max32_pm_policy_state_lock_get(dev);
 	if (spi_rtio_submit(rtio_ctx, iodev_sqe)) {
 		spi_max32_iodev_prepare_start(dev);
 		spi_max32_iodev_start(dev);
+	} else {
+		spi_max32_pm_policy_state_lock_put(dev);
 	}
 }
 #endif
@@ -962,9 +1073,7 @@ static int api_transceive(const struct device *dev, const struct spi_config *con
 			  const struct spi_buf_set *tx_bufs, const struct spi_buf_set *rx_bufs)
 {
 #if defined(CONFIG_SPI_MAX32_DMA) && !defined(CONFIG_SPI_MAX32_RTIO)
-	const struct max32_spi_config *cfg = dev->config;
-
-	if (cfg->tx_dma.channel != 0xFF && cfg->rx_dma.channel != 0xFF) {
+	if (spi_max32_has_dma_channels(dev)) {
 		return transceive_dma(dev, config, tx_bufs, rx_bufs, false, NULL, NULL);
 	}
 #endif /* CONFIG_SPI_MAX32_DMA */
@@ -978,9 +1087,7 @@ static int api_transceive_async(const struct device *dev, const struct spi_confi
 				void *userdata)
 {
 #ifdef CONFIG_SPI_MAX32_DMA
-	const struct max32_spi_config *cfg = dev->config;
-
-	if (cfg->tx_dma.channel != 0xFF && cfg->rx_dma.channel != 0xFF) {
+	if (spi_max32_has_dma_channels(dev)) {
 		return transceive_dma(dev, config, tx_bufs, rx_bufs, true, cb, userdata);
 	}
 #endif /* CONFIG_SPI_MAX32_DMA */
@@ -1012,14 +1119,31 @@ static void spi_max32_callback(mxc_spi_req_t *req, int error)
 	uint8_t dfs;
 
 	dfs = spi_max32_get_dfs_shift(ctx) ? 2 : 1;
-	len = spi_context_max_continuous_chunk(ctx);
-	spi_context_update_tx(ctx, dfs, len);
-	spi_context_update_rx(ctx, dfs, len);
-#ifdef CONFIG_SPI_ASYNC
-	if (ctx->asynchronous && ((spi_context_tx_on(ctx) || spi_context_rx_on(ctx)))) {
-		k_work_submit(&data->async_work);
+	if (spi_context_is_peripheral(ctx)) {
+		if (spi_context_tx_on(ctx)) {
+			spi_context_update_tx(ctx, dfs, data->req.txCnt);
+		}
+
+		if (spi_context_rx_on(ctx)) {
+			spi_context_update_rx(ctx, dfs, data->req.rxCnt);
+		}
 	} else {
-		spi_cs_deassert(dev);
+		/* Controller connections always assume matching TX/RX */
+		len = spi_context_max_continuous_chunk(ctx);
+		spi_context_update_tx(ctx, dfs, len);
+		spi_context_update_rx(ctx, dfs, len);
+	}
+
+#ifdef CONFIG_SPI_ASYNC
+	if (ctx->asynchronous) {
+		if (spi_context_tx_on(ctx) || spi_context_rx_on(ctx)) {
+			k_work_submit(&data->async_work);
+		} else {
+			spi_cs_deassert(dev);
+			spi_max32_pm_policy_state_lock_put(dev);
+			spi_context_complete(ctx, dev, error == E_NO_ERROR ? 0 : -EIO);
+		}
+	} else {
 		spi_context_complete(ctx, dev, error == E_NO_ERROR ? 0 : -EIO);
 	}
 #else
@@ -1038,6 +1162,7 @@ void spi_max32_async_work_handler(struct k_work *work)
 
 	ret = spi_max32_transceive(dev);
 	if (ret) {
+		spi_max32_pm_policy_state_lock_put(dev);
 		spi_context_complete(&data->ctx, dev, -EIO);
 	}
 }
@@ -1046,29 +1171,43 @@ void spi_max32_async_work_handler(struct k_work *work)
 static void spi_max32_isr(const struct device *dev)
 {
 	const struct max32_spi_config *cfg = dev->config;
+	struct max32_spi_data *data = dev->data;
 	mxc_spi_regs_t *spi = cfg->regs;
+	mxc_spi_req_t *req = &data->req;
 	uint32_t flags;
 
 	flags = MXC_SPI_GetAndClearFlags(spi);
 
-#if defined(CONFIG_SPI_MAX32_DMA) && defined(CONFIG_SPI_MAX32_RTIO)
-	if (cfg->tx_dma.channel != 0xFF && cfg->rx_dma.channel != 0xFF) {
-		MXC_SPI_DisableInt(spi, ADI_MAX32_SPI_INT_EN_TX_EMPTY);
-		spi_max32_iodev_complete(dev, 0);
+#if defined(CONFIG_SPI_MAX32_DMA)
+	if (spi_max32_has_dma_channels(dev)) {
+#ifdef CONFIG_SPI_MAX32_RTIO
+		struct spi_rtio *rtio_ctx = data->rtio_ctx;
+		struct rtio_sqe *sqe = &rtio_ctx->txn_curr->sqe;
+
+		if ((sqe->op == RTIO_OP_TX || sqe->op == RTIO_OP_TINY_TX) &&
+		    (flags & ADI_MAX32_SPI_INT_FL_MST_DONE)) {
+#else
+		struct spi_context *ctx = &data->ctx;
+
+		if (ctx->tx_len && !ctx->rx_len && (flags & ADI_MAX32_SPI_INT_FL_MST_DONE)) {
+#endif
+			MXC_SPI_DisableInt(spi, ADI_MAX32_SPI_INT_EN_MST_DONE
+						| ADI_MAX32_SPI_INT_EN_TX_EMPTY);
+			spi_max32_callback(req, 0);
+		}
 		return;
 	}
 #endif
 
-	struct max32_spi_data *data = dev->data;
-	mxc_spi_req_t *req = &data->req;
 	uint32_t remain;
 
 	remain = req->txLen - req->txCnt;
 	if (flags & ADI_MAX32_SPI_INT_FL_TX_THD) {
 		if (remain) {
 			if (!data->req.txData) {
-				req->txCnt += MXC_SPI_WriteTXFIFO(cfg->regs, data->dummy,
-								  MIN(remain, sizeof(data->dummy)));
+				req->txCnt += MXC_SPI_WriteTXFIFO(cfg->regs, data->tx_dummy,
+								  MIN(remain,
+								      sizeof(data->tx_dummy)));
 			} else {
 				req->txCnt +=
 					MXC_SPI_WriteTXFIFO(spi, &req->txData[req->txCnt], remain);
@@ -1085,7 +1224,7 @@ static void spi_max32_isr(const struct device *dev)
 		if (remain >= MXC_SPI_FIFO_DEPTH) {
 			MXC_SPI_SetRXThreshold(spi, 2);
 		} else {
-			MXC_SPI_SetRXThreshold(spi, remain);
+			MXC_SPI_SetRXThreshold(spi, remain / 2);
 		}
 	} else {
 		MXC_SPI_DisableInt(spi, ADI_MAX32_SPI_INT_EN_RX_THD);
@@ -1093,8 +1232,10 @@ static void spi_max32_isr(const struct device *dev)
 
 	if ((req->txLen == req->txCnt) && (req->rxLen == req->rxCnt)) {
 		MXC_SPI_DisableInt(spi, ADI_MAX32_SPI_INT_EN_TX_THD | ADI_MAX32_SPI_INT_EN_RX_THD);
-		if (flags & ADI_MAX32_SPI_INT_FL_MST_DONE) {
-			MXC_SPI_DisableInt(spi, ADI_MAX32_SPI_INT_EN_MST_DONE);
+		if (spi_context_is_peripheral(&data->ctx) ||
+		    (flags & ADI_MAX32_SPI_INT_FL_MST_DONE)) {
+			MXC_SPI_DisableInt(spi, ADI_MAX32_SPI_INT_EN_MST_DONE
+						| ADI_MAX32_SPI_INT_EN_TX_EMPTY);
 			spi_max32_callback(req, 0);
 		}
 	}
@@ -1119,6 +1260,70 @@ static int api_release(const struct device *dev, const struct spi_config *config
 	return 0;
 }
 
+static int spi_max32_pm_resume(const struct max32_spi_config *const cfg)
+{
+	int ret;
+
+	ret = clock_control_on(cfg->clock, (clock_control_subsys_t)&cfg->perclk);
+	if (ret != 0) {
+		LOG_ERR("Cannot enable SPI clock");
+		return ret;
+	}
+
+	ret = pinctrl_apply_state(cfg->pctrl, PINCTRL_STATE_DEFAULT);
+	if (ret) {
+		return ret;
+	}
+
+	return 0;
+}
+
+static int spi_max32_pm_suspend(const struct max32_spi_config *const cfg)
+{
+	int ret;
+
+	/* Move pins to sleep state */
+	ret = pinctrl_apply_state(cfg->pctrl, PINCTRL_STATE_SLEEP);
+	if ((ret < 0) && (ret != -ENOENT)) {
+		return ret;
+	}
+
+	/* Disable clock */
+	ret = clock_control_off(cfg->clock, (clock_control_subsys_t)&cfg->perclk);
+	if (ret != 0) {
+		LOG_ERR("cannot disable SPI clock");
+	}
+
+	return ret;
+}
+
+static int spi_max32_pm_action(const struct device *dev, enum pm_device_action action)
+{
+	int ret;
+	const struct max32_spi_config *cfg = dev->config;
+
+	switch (action) {
+	case PM_DEVICE_ACTION_RESUME:
+		ret = spi_max32_pm_resume(cfg);
+		if (ret < 0) {
+			return ret;
+		}
+
+		break;
+	case PM_DEVICE_ACTION_SUSPEND:
+		ret = spi_max32_pm_suspend(cfg);
+		if (ret < 0) {
+			return ret;
+		}
+
+		break;
+	default:
+		return -ENOTSUP;
+	}
+
+	return 0;
+}
+
 static int spi_max32_init(const struct device *dev)
 {
 	int ret = 0;
@@ -1130,17 +1335,8 @@ static int spi_max32_init(const struct device *dev)
 		return -ENODEV;
 	}
 
+	MXC_SPI_InitState(regs);
 	MXC_SPI_Shutdown(regs);
-
-	ret = clock_control_on(cfg->clock, (clock_control_subsys_t)&cfg->perclk);
-	if (ret) {
-		return ret;
-	}
-
-	ret = pinctrl_apply_state(cfg->pctrl, PINCTRL_STATE_DEFAULT);
-	if (ret) {
-		return ret;
-	}
 
 	ret = spi_context_cs_configure_all(&data->ctx);
 	if (ret < 0) {
@@ -1168,7 +1364,7 @@ static int spi_max32_init(const struct device *dev)
 
 	spi_context_unlock_unconditionally(&data->ctx);
 
-	return ret;
+	return pm_device_driver_init(dev, spi_max32_pm_action);
 }
 
 /* SPI driver APIs structure */
@@ -1238,9 +1434,10 @@ static DEVICE_API(spi, spi_max32_api) = {
 		SPI_CONTEXT_INIT_LOCK(max32_spi_data_##_num, ctx),                                 \
 		SPI_CONTEXT_INIT_SYNC(max32_spi_data_##_num, ctx),                                 \
 		SPI_CONTEXT_CS_GPIOS_INITIALIZE(DT_DRV_INST(_num), ctx)                            \
-			IF_ENABLED(CONFIG_SPI_RTIO, (.rtio_ctx = &max32_spi_rtio_##_num))};        \
-	SPI_DEVICE_DT_INST_DEFINE(_num, spi_max32_init, NULL, &max32_spi_data_##_num,              \
-				  &max32_spi_config_##_num, PRE_KERNEL_2,                          \
+		IF_ENABLED(CONFIG_SPI_RTIO, (.rtio_ctx = &max32_spi_rtio_##_num))};                \
+	PM_DEVICE_DT_INST_DEFINE(_num, spi_max32_pm_action);                                       \
+	SPI_DEVICE_DT_INST_DEFINE(_num, spi_max32_init, PM_DEVICE_DT_INST_GET(_num),               \
+				  &max32_spi_data_##_num, &max32_spi_config_##_num, PRE_KERNEL_2,  \
 				  CONFIG_SPI_INIT_PRIORITY, &spi_max32_api);
 
 DT_INST_FOREACH_STATUS_OKAY(DEFINE_SPI_MAX32)

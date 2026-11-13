@@ -60,6 +60,14 @@ BUILD_ASSERT(CONFIG_QUIC_INITIAL_MAX_STREAM_DATA_BIDI_REMOTE <= CONFIG_QUIC_STRE
 BUILD_ASSERT(CONFIG_QUIC_INITIAL_MAX_STREAM_DATA_UNI <= CONFIG_QUIC_STREAM_RX_BUFFER_SIZE,
 	     "Peer-initiated uni flow control window must not exceed RX buffer size");
 
+/* CSPRNG_NEEDED only pulls in an entropy driver where the platform has one.
+ * Without it sys_csrand_get() silently degrades to the non-cryptographic
+ * generator, which would make connection IDs and tokens predictable.
+ */
+BUILD_ASSERT(IS_ENABLED(CONFIG_CSPRNG_ENABLED) || IS_ENABLED(CONFIG_QUIC_ALLOW_NON_CSPRNG),
+	     "QUIC needs a cryptographically secure RNG; this platform provides none. "
+	     "Enable an entropy source, or CONFIG_QUIC_ALLOW_NON_CSPRNG for testing.");
+
 #define SLAB_ALLOC_TIMEOUT K_MSEC(500)
 
 #if defined(CONFIG_QUIC_LOG_LEVEL_DBG)
@@ -71,7 +79,7 @@ struct quic_endpoint *endpoint_alloc_from_slab_debug(struct k_mem_slab *slab,
 #endif /* CONFIG_QUIC_LOG_LEVEL_DBG */
 
 static struct quic_context contexts[CONFIG_QUIC_MAX_CONTEXTS];
-static struct k_mutex contexts_lock;
+static K_MUTEX_DEFINE(contexts_lock);
 
 static const struct socket_op_vtable quic_ctx_fd_op_vtable;
 static const struct socket_op_vtable quic_stream_fd_op_vtable;
@@ -82,11 +90,11 @@ static const struct smf_state quic_stream_bidirectional_states[];
 K_MEM_SLAB_DEFINE_STATIC_TYPE(endpoints_slab, struct quic_endpoint,
 			      CONFIG_QUIC_MAX_ENDPOINTS);
 static struct quic_endpoint *endpoints[CONFIG_QUIC_MAX_ENDPOINTS];
-static struct k_mutex endpoints_lock;
+static K_MUTEX_DEFINE(endpoints_lock);
 
 static struct quic_stream streams[CONFIG_QUIC_MAX_STREAMS_BIDI +
 				  CONFIG_QUIC_MAX_STREAMS_UNI];
-static struct k_mutex streams_lock;
+static K_MUTEX_DEFINE(streams_lock);
 ZTESTABLE_STATIC struct quic_context *quic_get_context(int sock);
 
 static int connection_ids;
@@ -321,9 +329,9 @@ enum quic_stream_states {
 
 ZTESTABLE_STATIC int quic_put_varint(uint8_t *buf, size_t buf_len, uint64_t val);
 static struct quic_context *quic_find_context(struct quic_endpoint *ep);
-static struct quic_stream *quic_find_stream(struct quic_context *ctx,
-					    struct quic_endpoint *ep,
-					    uint64_t stream_id);
+ZTESTABLE_STATIC struct quic_stream *quic_find_stream(struct quic_context *ctx,
+						      struct quic_endpoint *ep,
+						      uint64_t stream_id);
 static struct quic_stream *quic_create_stream_from_peer(struct quic_context *ctx,
 							struct quic_endpoint *ep,
 							uint64_t stream_id);
@@ -334,6 +342,7 @@ ZTESTABLE_STATIC int quic_stream_receive_data(struct quic_stream *stream,
 					      bool is_fin);
 static struct quic_stream *quic_find_stream_by_id(struct quic_endpoint *ep,
 						  uint64_t stream_id);
+static struct quic_endpoint *quic_stream_endpoint_get(struct quic_stream *stream);
 static void quic_tls_cleanup(struct quic_tls_context *tls);
 static struct quic_tls_context *tls_init(struct quic_endpoint *ep);
 static int quic_handshake_complete(struct quic_endpoint *ep);
@@ -358,15 +367,49 @@ static int quic_send_stream_data_blocked(struct quic_endpoint *ep,
 static void quic_pto_work_handler(struct k_work *work);
 static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
 				       enum quic_secret_level level,
-				       size_t payload_len);
-static int quic_send_packet(struct quic_endpoint *ep,
-			    enum quic_secret_level level,
-			    const uint8_t *payload,
-			    size_t payload_len);
+				       size_t payload_len,
+				       size_t target_datagram_len,
+				       bool dont_fragment,
+				       bool dplpmtud_probe);
+static int quic_send_packet_from_txbuf_ex(struct quic_endpoint *ep,
+					  enum quic_secret_level level,
+					  size_t payload_len,
+					  size_t target_datagram_len,
+					  bool dont_fragment,
+					  bool dplpmtud_probe,
+					  uint64_t *sent_pn_out);
+static int quic_send_packet_sg(struct quic_endpoint *ep,
+			       enum quic_secret_level level,
+			       const uint8_t *hdr, size_t hdr_len,
+			       const uint8_t *data, size_t data_len,
+			       uint64_t *sent_pn_out);
+static int quic_send_packet_with_pn(struct quic_endpoint *ep,
+				    enum quic_secret_level level,
+				    const uint8_t *payload,
+				    size_t payload_len,
+				    uint64_t *sent_pn_out);
+ZTESTABLE_STATIC int quic_send_packet(struct quic_endpoint *ep,
+				      enum quic_secret_level level,
+				      const uint8_t *payload,
+				      size_t payload_len);
 static int quic_send_stop_sending(struct quic_endpoint *ep,
 				  uint64_t stream_id,
 				  uint64_t error_code);
 int quic_flush_deferred_crypto(struct quic_endpoint *ep);
+ZTESTABLE_STATIC void quic_dplpmtud_refresh_state(struct quic_endpoint *ep);
+ZTESTABLE_STATIC void quic_dplpmtud_on_probe_acked(struct quic_endpoint *ep,
+						   uint16_t probe_size);
+ZTESTABLE_STATIC void quic_dplpmtud_on_probe_lost(struct quic_endpoint *ep,
+						  uint16_t probe_size);
+static uint16_t quic_get_local_max_udp_payload_size(struct quic_endpoint *ep);
+static int quic_dplpmtud_maybe_probe(struct quic_endpoint *ep);
+static void quic_dplpmtud_update_limit_locked(struct quic_endpoint *ep);
+static void quic_dplpmtud_on_probe_acked_locked(struct quic_endpoint *ep,
+						uint16_t probe_size);
+static void quic_dplpmtud_on_probe_lost_locked(struct quic_endpoint *ep,
+					       uint16_t probe_size);
+ZTESTABLE_STATIC bool quic_early_data_is_armed(const struct quic_endpoint *ep);
+ZTESTABLE_STATIC enum quic_secret_level quic_stream_send_level(const struct quic_endpoint *ep);
 
 #if defined(CONFIG_NET_STATISTICS_QUIC)
 static struct net_stats_quic *quic_stats_get_for_ep(struct quic_endpoint *ep)
@@ -455,11 +498,24 @@ struct quic_token_cache_entry {
 	bool valid;
 };
 
+/* Nonce of an address validation token that has already been accepted. */
+struct quic_token_seen_entry {
+	uint8_t nonce[QUIC_TOKEN_NONCE_LEN];
+	uint64_t expires_at_sec;
+	bool valid;
+};
+
 static uint8_t quic_token_secret[QUIC_TOKEN_SECRET_LEN];
 static struct quic_token_cache_entry quic_token_cache[CONFIG_QUIC_TOKEN_CACHE_SIZE];
 /* Protected by quic_token_lock together with quic_token_cache[] updates. */
 static size_t quic_token_cache_replace_idx;
 static K_MUTEX_DEFINE(quic_token_lock);
+
+static struct quic_token_seen_entry quic_token_seen[CONFIG_QUIC_TOKEN_REPLAY_CACHE_SIZE];
+static size_t quic_token_seen_replace_idx;
+static K_MUTEX_DEFINE(quic_token_seen_lock);
+
+ZTESTABLE_STATIC bool quic_token_claim_nonce(const uint8_t *nonce, uint64_t expires_at_sec);
 
 static int quic_get_by_ep(struct quic_endpoint *ep)
 {
@@ -915,6 +971,21 @@ static int pollfd_try_add(net_sa_family_t family, int sock)
 }
 
 /*
+ * Report a failed key import. Running out of PSA key slots is a
+ * configuration problem that is otherwise hard to tell from the log, so
+ * name it.
+ */
+static void quic_log_key_import_failure(const char *what, psa_status_t status)
+{
+	if (status == PSA_ERROR_INSUFFICIENT_MEMORY) {
+		NET_ERR("Failed to import %s key: no free PSA key slot, "
+			"see CONFIG_MBEDTLS_PSA_KEY_SLOT_COUNT", what);
+	} else {
+		NET_ERR("Failed to import %s key: %d", what, status);
+	}
+}
+
+/*
  * Cleanup helper to call when destroying context or switching keys.
  * Destroys all PSA keys and clears sensitive data.
  */
@@ -950,6 +1021,40 @@ ZTESTABLE_STATIC void quic_crypto_context_destroy(struct quic_crypto_context *ct
 	}
 
 	ctx->initialized = false;
+}
+
+/*
+ * Discard the keys of one encryption level for the rest of the connection
+ * (RFC 9001 ch. 4.9). Unlike a plain destroy this is remembered, so the
+ * level is not set up again and late packets for it are dropped.
+ */
+static void quic_crypto_context_discard(struct quic_crypto_context *ctx)
+{
+	quic_crypto_context_destroy(ctx);
+	ctx->discarded = true;
+}
+
+/*
+ * Destroy the key update state: the previous- and next-generation RX keys
+ * and the current traffic secrets, which could otherwise be used to derive
+ * every future generation.
+ */
+ZTESTABLE_STATIC void quic_key_update_destroy(struct quic_key_update *ku)
+{
+	if (ku->prev_rx_pp.initialized) {
+		psa_destroy_key(ku->prev_rx_pp.key_id);
+	}
+
+	if (ku->next_rx_pp.initialized) {
+		psa_destroy_key(ku->next_rx_pp.key_id);
+	}
+
+	crypto_zero(&ku->prev_rx_pp, sizeof(ku->prev_rx_pp));
+	crypto_zero(&ku->next_rx_pp, sizeof(ku->next_rx_pp));
+	crypto_zero(ku->next_rx_secret, sizeof(ku->next_rx_secret));
+	crypto_zero(ku->rx_secret, sizeof(ku->rx_secret));
+	crypto_zero(ku->tx_secret, sizeof(ku->tx_secret));
+	ku->initialized = false;
 }
 
 /*
@@ -1084,14 +1189,38 @@ static void quic_endpoint_set_initial_token(struct quic_endpoint *ep,
 	ep->token.initial_type = type;
 }
 
-static uint64_t quic_token_now_sec(void)
+ZTESTABLE_STATIC uint64_t quic_token_now_sec(void)
 {
 	return (uint64_t)k_uptime_get() / MSEC_PER_SEC;
 }
 
-static void quic_token_ensure_secret(void)
+static int quic_token_ensure_secret(void)
 {
-	sys_rand_get(quic_token_secret, sizeof(quic_token_secret));
+	static bool secret_ready;
+	int ret = 0;
+
+	/* Seeding normally happens once at init, but if the entropy source
+	 * was not ready yet it is retried lazily from the token paths, which
+	 * can run concurrently. Serialise so a reader cannot compute a tag
+	 * over a half-written secret.
+	 */
+	k_mutex_lock(&quic_token_lock, K_FOREVER);
+
+	if (secret_ready) {
+		goto out;
+	}
+
+	ret = sys_csrand_get(quic_token_secret, sizeof(quic_token_secret));
+	if (ret != 0) {
+		goto out;
+	}
+
+	secret_ready = true;
+
+out:
+	k_mutex_unlock(&quic_token_lock);
+
+	return ret;
 }
 
 static int quic_token_compute_tag(const uint8_t *body, size_t body_len,
@@ -1102,6 +1231,11 @@ static int quic_token_compute_tag(const uint8_t *body, size_t body_len,
 
 	if (tag_len > sizeof(full_tag)) {
 		return -EINVAL;
+	}
+
+	ret = quic_token_ensure_secret();
+	if (ret != 0) {
+		return ret;
 	}
 
 	ret = quic_hkdf_extract_ex(PSA_ALG_SHA_256,
@@ -1130,6 +1264,13 @@ ZTESTABLE_STATIC int quic_build_address_token(enum quic_address_token_type type,
 	size_t pos = 0U;
 	int ret;
 
+	/* Check this before the subtraction below, which would otherwise wrap
+	 * and hand the address copy a huge length.
+	 */
+	if (out_len < QUIC_TOKEN_FIXED_PART_LEN + QUIC_TOKEN_TAG_LEN) {
+		return -ENOBUFS;
+	}
+
 	if (!quic_token_copy_addr(&out[QUIC_TOKEN_FIXED_PART_LEN],
 				  out_len - QUIC_TOKEN_FIXED_PART_LEN,
 				  addr, &addr_len)) {
@@ -1147,7 +1288,10 @@ ZTESTABLE_STATIC int quic_build_address_token(enum quic_address_token_type type,
 	out[pos++] = orig_dcid_len;
 	sys_put_be64(quic_token_now_sec(), &out[pos]);
 	pos += sizeof(uint64_t);
-	sys_rand_get(&out[pos], QUIC_TOKEN_NONCE_LEN);
+	ret = sys_csrand_get(&out[pos], QUIC_TOKEN_NONCE_LEN);
+	if (ret != 0) {
+		return ret;
+	}
 	pos += QUIC_TOKEN_NONCE_LEN;
 	pos += addr_len;
 
@@ -1230,6 +1374,15 @@ ZTESTABLE_STATIC int quic_validate_address_token(const struct net_sockaddr *addr
 		return -EADDRNOTAVAIL;
 	}
 
+	/* Only now that the token is known to be ours, unexpired and issued for
+	 * this address, check that it has not been used before. Doing it last
+	 * keeps forged tokens from occupying replay slots.
+	 */
+	if (!quic_token_claim_nonce(&token[4 + sizeof(uint64_t)],
+				    issued_at + lifetime)) {
+		return -EALREADY;
+	}
+
 	validation->orig_dcid_len = orig_dcid_len;
 	if (orig_dcid_len > 0U) {
 		memcpy(validation->orig_dcid,
@@ -1238,6 +1391,63 @@ ZTESTABLE_STATIC int quic_validate_address_token(const struct net_sockaddr *addr
 	}
 
 	return 0;
+}
+
+/*
+ * Record an address validation token as used.
+ *
+ * Returns true if the token had not been seen before, false if it is a replay.
+ * Entries are dropped once the token they describe can no longer pass the age
+ * check, so the table only ever has to hold tokens that are still live.
+ */
+ZTESTABLE_STATIC bool quic_token_claim_nonce(const uint8_t *nonce, uint64_t expires_at_sec)
+{
+	struct quic_token_seen_entry *slot = NULL;
+	uint64_t now_sec = quic_token_now_sec();
+	bool claimed = false;
+
+	k_mutex_lock(&quic_token_seen_lock, K_FOREVER);
+
+	ARRAY_FOR_EACH_PTR(quic_token_seen, entry) {
+		/* The age check accepts a token through its expiry second
+		 * inclusive, so the entry must survive that second too or its
+		 * final second becomes a replay window.
+		 */
+		if (entry->valid && entry->expires_at_sec < now_sec) {
+			entry->valid = false;
+		}
+
+		if (entry->valid) {
+			if (memcmp(entry->nonce, nonce, QUIC_TOKEN_NONCE_LEN) == 0) {
+				goto out;
+			}
+		} else if (slot == NULL) {
+			slot = entry;
+		}
+	}
+
+	/*
+	 * With every slot in use, drop the oldest tracked token rather than
+	 * refuse the connection. That lets a flood of distinct valid tokens
+	 * push earlier ones out and replay them again, but forging a token
+	 * still requires the secret, so this only weakens replay protection
+	 * for a peer that already holds many live tokens.
+	 */
+	if (slot == NULL) {
+		slot = &quic_token_seen[quic_token_seen_replace_idx];
+		quic_token_seen_replace_idx =
+			(quic_token_seen_replace_idx + 1U) % ARRAY_SIZE(quic_token_seen);
+	}
+
+	memcpy(slot->nonce, nonce, QUIC_TOKEN_NONCE_LEN);
+	slot->expires_at_sec = expires_at_sec;
+	slot->valid = true;
+	claimed = true;
+
+out:
+	k_mutex_unlock(&quic_token_seen_lock);
+
+	return claimed;
 }
 
 ZTESTABLE_STATIC void quic_token_cache_store(const struct net_sockaddr *remote_addr,
@@ -1407,8 +1617,7 @@ static int quic_hkdf_expand_label_ex(psa_algorithm_t hash_alg,
 
 	status = psa_import_key(&attributes, secret, secret_len, &key_id);
 	if (status != PSA_SUCCESS) {
-		NET_DBG("psa_import_key failed: status=%d, hash_alg=0x%x, secret_len=%zu",
-			status, hash_alg, secret_len);
+		quic_log_key_import_failure("HKDF", status);
 		return -EIO;
 	}
 
@@ -1578,6 +1787,7 @@ static bool quic_hp_setup(struct quic_hp_cipher *hp_cipher, int hash_algo,
 	crypto_zero(hp_key, sizeof(hp_key));
 
 	if (status != PSA_SUCCESS) {
+		quic_log_key_import_failure("HP", status);
 		return false;
 	}
 
@@ -1664,6 +1874,7 @@ static bool quic_pp_setup(struct quic_pp_cipher *pp_cipher, int hash_algo,
 	crypto_zero(pp_key, sizeof(pp_key));
 
 	if (status != PSA_SUCCESS) {
+		quic_log_key_import_failure("PP", status);
 		memset(pp_cipher->iv, 0, sizeof(pp_cipher->iv));
 		return false;
 	}
@@ -1775,7 +1986,7 @@ static bool quic_hp_setup_ex(struct quic_hp_cipher *hp_cipher,
 	crypto_zero(hp_key, sizeof(hp_key));
 
 	if (status != PSA_SUCCESS) {
-		NET_ERR("Failed to import HP key:  %d", status);
+		quic_log_key_import_failure("HP", status);
 		return false;
 	}
 
@@ -1867,7 +2078,7 @@ static bool quic_pp_setup_ex(struct quic_pp_cipher *pp_cipher,
 	crypto_zero(pp_key, sizeof(pp_key));
 
 	if (status != PSA_SUCCESS) {
-		NET_ERR("Failed to import PP key:  %d", status);
+		quic_log_key_import_failure("PP", status);
 		memset(pp_cipher->iv, 0, sizeof(pp_cipher->iv));
 		return false;
 	}
@@ -1876,6 +2087,116 @@ static bool quic_pp_setup_ex(struct quic_pp_cipher *pp_cipher,
 	pp_cipher->initialized = true;
 
 	return true;
+}
+
+/*
+ * RFC 9001 Section 6.1: the next-generation traffic secret is derived from
+ * the current one with the "quic ku" label. The header protection key is
+ * not updated.
+ */
+ZTESTABLE_STATIC int quic_ku_next_secret(const struct quic_key_update *ku,
+					 const uint8_t *secret, uint8_t *next)
+{
+	return quic_hkdf_expand_label_ex(ku->hash_alg,
+					 secret, ku->secret_len,
+					 (const uint8_t *)"quic ku",
+					 sizeof("quic ku") - 1,
+					 NULL, 0,
+					 next, ku->secret_len);
+}
+
+/*
+ * Move the send direction to the next key generation: derive the next TX
+ * traffic secret, replace the TX packet protection cipher with one keyed
+ * from it, and flip the TX key phase bit. The old send keys are destroyed;
+ * unlike receive keys they are never needed again.
+ */
+static int quic_ku_advance_tx(struct quic_endpoint *ep)
+{
+	struct quic_key_update *ku = &ep->crypto.ku;
+	struct quic_pp_cipher next_pp = { 0 };
+	uint8_t next_secret[QUIC_HASH_MAX_LEN];
+	int ret = 0;
+
+	if (quic_ku_next_secret(ku, ku->tx_secret, next_secret) != 0) {
+		ret = -EIO;
+		goto out;
+	}
+
+	if (!quic_pp_setup_ex(&next_pp, ku->hash_alg, ku->cipher_algo,
+			      next_secret, ku->secret_len)) {
+		ret = -EIO;
+		goto out;
+	}
+
+	/* The send path reads the TX key phase while building the header and
+	 * the TX cipher while encrypting, both under send_lock. A peer-initiated
+	 * update runs this transition on the RX thread, so serialize the whole
+	 * generation swap with sends (and with a concurrent local initiation);
+	 * otherwise a send can emit a header for one generation and encrypt with
+	 * the other, or use the cipher after it was destroyed.
+	 */
+	k_mutex_lock(&ep->send_lock, K_FOREVER);
+
+	psa_destroy_key(ep->crypto.application.tx.pp.key_id);
+	ep->crypto.application.tx.pp = next_pp;
+
+	memcpy(ku->tx_secret, next_secret, ku->secret_len);
+	ku->tx_phase ^= 1U;
+	ku->tx_phase_first_pn = ep->tx_pn.application;
+	ku->tx_phase_acked = false;
+
+	k_mutex_unlock(&ep->send_lock);
+
+out:
+	crypto_zero(next_secret, sizeof(next_secret));
+	crypto_zero(&next_pp, sizeof(next_pp));
+
+	return ret;
+}
+
+/*
+ * Start a key update (RFC 9001 Section 6.1). Packets sent from here on are
+ * protected with the next-generation keys and carry a flipped key phase
+ * bit; the peer is expected to move its own send keys to the same phase.
+ *
+ * Runs in whatever thread the caller is in; like the rest of the endpoint
+ * crypto state it relies on the caller not racing the RX path for the
+ * same endpoint.
+ *
+ * TODO: there is no production caller yet, so a Zephyr endpoint can follow a
+ * peer-initiated update but never starts one itself. RFC 9001 Section 6.6
+ * requires initiating an update before the AEAD confidentiality limit is
+ * reached; wire this to packet-protection usage accounting so keys rotate
+ * before their usage limit rather than only in response to the peer.
+ */
+int quic_endpoint_initiate_key_update(struct quic_endpoint *ep)
+{
+	struct quic_key_update *ku = &ep->crypto.ku;
+
+	/* RFC 9001 Section 6.1: an endpoint must not initiate a key update
+	 * prior to having confirmed the handshake. The application keys
+	 * alone are not enough; a client installs them before
+	 * HANDSHAKE_DONE arrives.
+	 */
+	if (!ku->initialized || !ep->crypto.application.initialized ||
+	    !ep->handshake_confirmed) {
+		return -ENOTCONN;
+	}
+
+	/* RFC 9001 Section 6.1: an endpoint must not initiate another
+	 * update until the peer has acknowledged a packet sent in the
+	 * current phase. A phase comparison is not enough: with
+	 * simultaneous updates the phases align while the peer has not
+	 * decrypted anything of ours in this generation, and updating
+	 * again would put the phase bit back where the peer expects it
+	 * while skipping a generation, silently ending the connection.
+	 */
+	if (!ku->tx_phase_acked) {
+		return -EBUSY;
+	}
+
+	return quic_ku_advance_tx(ep);
 }
 
 /*
@@ -1966,27 +2287,20 @@ ZTESTABLE_STATIC int quic_hp_mask(psa_key_id_t hp_key_id,
 
 	if (cipher_algo == QUIC_CIPHER_CHACHA20_POLY1305) {
 		/*
-		 * ChaCha20 header protection (RFC 9001 Section 5.4.4):
-		 * The first 4 bytes of sample are the block counter.
-		 * The remaining 12 bytes are the nonce.
-		 * Encrypt 5 zero bytes to produce the mask.
+		 * ChaCha20 header protection (RFC 9001 Section 5.4.4) needs the
+		 * mask to be ChaCha20(hp_key, counter=sample[0..3],
+		 * nonce=sample[4..15]) over five zero bytes.
+		 *
+		 * The PSA one-shot cipher API cannot express that: it generates
+		 * its own IV for a stream cipher and always starts the block
+		 * counter at zero, and psa_cipher_set_iv() only accepts a
+		 * 12 byte IV, so the sample counter cannot be supplied at all.
+		 *
+		 * Refuse rather than return a mask that is not derived from the
+		 * sample. The cipher suite is not offered or accepted during the
+		 * handshake, so this is only reached if that changes.
 		 */
-		uint8_t counter_nonce[16];
-		uint8_t plaintext[5] = {0, 0, 0, 0, 0};
-		uint8_t output[5 + 16]; /* May need extra space for some PSA implementations */
-
-		/* sample[0..3] = counter (little-endian), sample[4..15] = nonce */
-		memcpy(counter_nonce, sample, 16);
-
-		status = psa_cipher_encrypt(hp_key_id,
-					    PSA_ALG_STREAM_CIPHER,
-					    plaintext, sizeof(plaintext),
-					    output, sizeof(output),
-					    &output_length);
-
-		if (status == PSA_SUCCESS && output_length >= QUIC_HP_MASK_LEN) {
-			memcpy(mask, output, QUIC_HP_MASK_LEN);
-		}
+		return -ENOTSUP;
 	} else {
 		/*
 		 * AES header protection (RFC 9001 Section 5.4.3):
@@ -2393,8 +2707,7 @@ static struct quic_crypto_context *quic_get_crypto_context(struct quic_endpoint 
 	case QUIC_PACKET_TYPE_HANDSHAKE:
 		return ep->crypto.handshake.initialized ? &ep->crypto.handshake : NULL;
 	case QUIC_PACKET_TYPE_0RTT:
-		/* 0-RTT not implemented */
-		return NULL;
+		return ep->crypto.early.initialized ? &ep->crypto.early : NULL;
 	default:
 		break;
 	}
@@ -2405,12 +2718,85 @@ static struct quic_crypto_context *quic_get_crypto_context(struct quic_endpoint 
 /*
  * Result structure for fully decrypted packet.
  */
-struct quic_decrypted_packet {
-	uint8_t *payload;           /* Decrypted frames */
-	size_t payload_len;         /* Length of decrypted payload */
-	uint64_t packet_number;     /* Full reconstructed packet number */
-	enum quic_packet_type type; /* Packet type */
-};
+/*
+ * Trial-decrypt a 1-RTT packet whose key phase bit does not match the
+ * current RX phase with the next-generation keys (RFC 9001 Section 6.3).
+ * The phase bit is attacker controlled until the AEAD check passes, so
+ * nothing changes on failure: the packet is dropped and every key stays
+ * as it was. On success the update commits atomically: the send keys
+ * follow the peer to the new phase first if needed, then the current RX
+ * keys become the previous generation, kept for reordered packets.
+ */
+static int quic_ku_rx_try_next(struct quic_endpoint *ep,
+			       uint64_t full_pn,
+			       const uint8_t *header, size_t header_len,
+			       const uint8_t *ciphertext, size_t ciphertext_len,
+			       uint8_t *plaintext, size_t plaintext_size,
+			       size_t *plaintext_len)
+{
+	struct quic_key_update *ku = &ep->crypto.ku;
+	struct quic_crypto_context *crypto = &ep->crypto.application;
+	int ret;
+
+	/* The next-generation keys are derived once per generation and kept
+	 * across failed trials (RFC 9001 Section 6.3), so a forged phase bit
+	 * costs one AEAD check like any other forged packet instead of a key
+	 * derivation per packet.
+	 */
+	if (!ku->next_rx_pp.initialized) {
+		ret = quic_ku_next_secret(ku, ku->rx_secret, ku->next_rx_secret);
+		if (ret != 0) {
+			return ret;
+		}
+
+		if (!quic_pp_setup_ex(&ku->next_rx_pp, ku->hash_alg,
+				      ku->cipher_algo, ku->next_rx_secret,
+				      ku->secret_len)) {
+			crypto_zero(ku->next_rx_secret, sizeof(ku->next_rx_secret));
+			return -EIO;
+		}
+	}
+
+	ret = quic_decrypt_payload(&ku->next_rx_pp, full_pn, header, header_len,
+				   ciphertext, ciphertext_len,
+				   plaintext, plaintext_size, plaintext_len);
+	if (ret != 0) {
+		/* Unauthenticated phase flip: drop the packet, keep every
+		 * key as it was, retain the derived candidate.
+		 */
+		return ret;
+	}
+
+	if (ku->tx_phase == ku->rx_phase) {
+		/* The peer initiated this update, so move our send keys to
+		 * the new phase too (RFC 9001 Section 6.2). Do it before
+		 * committing the RX side so a failure leaves the whole
+		 * state untouched and the peer's next packet retries the
+		 * update from scratch.
+		 */
+		ret = quic_ku_advance_tx(ep);
+		if (ret != 0) {
+			return ret;
+		}
+	}
+
+	if (ku->prev_rx_pp.initialized) {
+		psa_destroy_key(ku->prev_rx_pp.key_id);
+	}
+	ku->prev_rx_pp = crypto->rx.pp;
+	crypto->rx.pp = ku->next_rx_pp;
+	crypto_zero(&ku->next_rx_pp, sizeof(ku->next_rx_pp));
+
+	memcpy(ku->rx_secret, ku->next_rx_secret, ku->secret_len);
+	crypto_zero(ku->next_rx_secret, sizeof(ku->next_rx_secret));
+	ku->rx_phase ^= 1U;
+	ku->rx_phase_first_pn = full_pn;
+
+	NET_DBG("[EP:%p/%d] Key update committed, RX phase %u from pn %" PRIu64,
+		ep, quic_get_by_ep(ep), ku->rx_phase, full_pn);
+
+	return 0;
+}
 
 /**
  * Decrypt a complete QUIC packet (header protection + AEAD).
@@ -2431,16 +2817,19 @@ struct quic_decrypted_packet {
  *
  * @return 0 on success, <0 on failure
  */
-static int quic_decrypt_packet(struct quic_endpoint *ep,
-			       const uint8_t *packet,
-			       size_t packet_len,
-			       size_t pn_offset,
-			       enum quic_packet_type ptype,
-			       uint8_t *plaintext,
-			       size_t plaintext_size,
-			       struct quic_decrypted_packet *result)
+ZTESTABLE_STATIC int quic_decrypt_packet(struct quic_endpoint *ep,
+					 const uint8_t *packet,
+					 size_t packet_len,
+					 size_t pn_offset,
+					 enum quic_packet_type ptype,
+					 uint8_t *plaintext,
+					 size_t plaintext_size,
+					 struct quic_decrypted_packet *result)
 {
 	struct quic_crypto_context *crypto;
+	struct quic_key_update *ku = &ep->crypto.ku;
+	struct quic_pp_cipher *rx_pp;
+	bool try_next_generation = false;
 	uint8_t first_byte;
 	uint32_t truncated_pn;
 	size_t pn_length;
@@ -2543,13 +2932,51 @@ static int quic_decrypt_packet(struct quic_endpoint *ep,
 		NET_HEXDUMP_DBG(ciphertext, MIN(ciphertext_len, 48), "ciphertext (first 48):");
 	}
 
-	/* Step 5: Decrypt payload */
-	ret = quic_decrypt_payload(&crypto->rx.pp,
-				   full_pn,
-				   header_aad, header_len,
-				   ciphertext, ciphertext_len,
-				   plaintext, plaintext_size,
-				   &result->payload_len);
+	/* Step 5: Select the RX keys by the key phase bit (RFC 9001
+	 * Section 6.3) and decrypt the payload
+	 */
+	rx_pp = &crypto->rx.pp;
+
+	if (ptype == QUIC_PACKET_TYPE_1RTT && ku->initialized &&
+	    ((first_byte & QUIC_SHORT_KEY_PHASE_MASK) != 0U) != (ku->rx_phase != 0U)) {
+		bool reordered = full_pn < ku->rx_phase_first_pn &&
+				 ku->prev_rx_pp.initialized;
+
+		/* A conformant peer does not initiate a key update before the
+		 * handshake is confirmed (RFC 9001 Section 6.1), and responding
+		 * to one would advance our own send keys before confirmation.
+		 * Reject the packet without rotating; the caller closes the
+		 * connection with KEY_UPDATE_ERROR.
+		 */
+		if (!reordered && !ep->handshake_confirmed) {
+			NET_DBG("[EP:%p/%d] Key phase flip before handshake confirmed",
+				ep, quic_get_by_ep(ep));
+			QUIC_EP_STAT_INC(ep, drop_rx);
+			return -EPROTO;
+		}
+
+		if (reordered) {
+			/* Reordered packet from before the last update */
+			rx_pp = &ku->prev_rx_pp;
+		} else {
+			try_next_generation = true;
+		}
+	}
+
+	if (try_next_generation) {
+		ret = quic_ku_rx_try_next(ep, full_pn,
+					  header_aad, header_len,
+					  ciphertext, ciphertext_len,
+					  plaintext, plaintext_size,
+					  &result->payload_len);
+	} else {
+		ret = quic_decrypt_payload(rx_pp,
+					   full_pn,
+					   header_aad, header_len,
+					   ciphertext, ciphertext_len,
+					   plaintext, plaintext_size,
+					   &result->payload_len);
+	}
 	if (ret != 0) {
 		NET_DBG("Payload decryption failed (%d)", ret);
 		if (ret == -EBADMSG) {
@@ -2568,10 +2995,21 @@ static int quic_decrypt_packet(struct quic_endpoint *ep,
 		*largest_pn = full_pn;
 	}
 
+	/* Track the lowest packet number seen in the current phase so
+	 * reordered previous-generation packets keep resolving to the
+	 * previous keys after an update.
+	 */
+	if (ptype == QUIC_PACKET_TYPE_1RTT && ku->initialized &&
+	    !try_next_generation && rx_pp == &crypto->rx.pp &&
+	    full_pn < ku->rx_phase_first_pn) {
+		ku->rx_phase_first_pn = full_pn;
+	}
+
 	/* Fill result */
 	result->payload = plaintext;
 	result->packet_number = full_pn;
 	result->type = ptype;
+	result->first_byte = first_byte;
 
 	return 0;
 }
@@ -2635,7 +3073,9 @@ static int quic_context_unref_debug(struct quic_context *ctx, const char *caller
 static int quic_context_unref(struct quic_context *ctx)
 #endif
 {
+	struct quic_endpoint *released[CONFIG_QUIC_MAX_ENDPOINTS] = { 0 };
 	struct quic_endpoint *ep, *tmp;
+	int released_count = 0;
 #if defined(CONFIG_QUIC_STATS_HISTORY)
 	struct quic_closed_context_stats closed_stats;
 	bool keep_closed_stats;
@@ -2663,6 +3103,15 @@ static int quic_context_unref(struct quic_context *ctx)
 		quic_get_by_conn(ctx), ctx->sock, caller, line);
 #endif
 
+	/* quic_endpoint_unref() takes contexts_lock and then endpoints_lock,
+	 * so take them in that order here too; taking them the other way
+	 * round deadlocks against the RX path. The references themselves are
+	 * dropped only after both locks are released: the final unref cancels
+	 * the endpoint's PTO work synchronously, and the PTO handler takes
+	 * contexts_lock, so unreferencing under the lock can deadlock against
+	 * a PTO that is firing at the same time.
+	 */
+	k_mutex_lock(&contexts_lock, K_FOREVER);
 	k_mutex_lock(&endpoints_lock, K_FOREVER);
 
 #if defined(CONFIG_QUIC_STATS_HISTORY)
@@ -2673,7 +3122,7 @@ static int quic_context_unref(struct quic_context *ctx)
 		quic_stats_merge_endpoint(ctx, ep);
 		sys_slist_find_and_remove(&ctx->endpoints, &ep->node);
 		quic_endpoint_send_connection_close(ep, 0, NULL);
-		quic_endpoint_unref(ep);
+		released[released_count++] = ep;
 
 		if (ctx->listen == ep) {
 			ctx->listen = NULL;
@@ -2681,11 +3130,19 @@ static int quic_context_unref(struct quic_context *ctx)
 	}
 
 	if (ctx->listen != NULL) {
-		quic_endpoint_unref(ctx->listen);
+		released[released_count++] = ctx->listen;
 		ctx->listen = NULL;
 	}
 
 	k_mutex_unlock(&endpoints_lock);
+	k_mutex_unlock(&contexts_lock);
+
+	/* The detached endpoints stay alive until these drops: each still
+	 * carries the reference the context list held for it.
+	 */
+	for (int i = 0; i < released_count; i++) {
+		quic_endpoint_unref(released[i]);
+	}
 
 #if defined(CONFIG_QUIC_STATS_HISTORY)
 	if (keep_closed_stats) {
@@ -2727,6 +3184,24 @@ static int quic_stream_ref(struct quic_stream *stream)
 	return ref + 1;
 }
 
+/* Take a reference only if the stream is still alive (refcount > 0). Unlike
+ * quic_stream_ref(), this never resurrects a stream whose refcount has already
+ * dropped to 0 (i.e. is being freed). Returns true if a reference was taken.
+ */
+static bool quic_stream_ref_if_used(struct quic_stream *stream)
+{
+	atomic_val_t ref;
+
+	do {
+		ref = atomic_get(&stream->refcount);
+		if (ref == 0) {
+			return false;
+		}
+	} while (!atomic_cas(&stream->refcount, ref, ref + 1));
+
+	return true;
+}
+
 #if defined(CONFIG_QUIC_LOG_LEVEL_DBG)
 static int quic_stream_unref_debug(struct quic_stream *stream, const char *caller, int line)
 #define quic_stream_unref(stream) quic_stream_unref_debug(stream, __func__, __LINE__)
@@ -2734,6 +3209,7 @@ static int quic_stream_unref_debug(struct quic_stream *stream, const char *calle
 static int quic_stream_unref(struct quic_stream *stream)
 #endif
 {
+	struct quic_endpoint *ep;
 	atomic_val_t ref;
 
 	do {
@@ -2769,37 +3245,44 @@ static int quic_stream_unref(struct quic_stream *stream)
 	 * Peer-initiated streams on a server endpoint have bit 0 == 0 (client bit).
 	 * Peer-initiated streams on a client endpoint have bit 0 == 1 (server bit).
 	 * Bidi streams have bit 1 == 0; uni streams have bit 1 == 1.
+	 *
+	 * The connection can be torn down by another thread while this runs,
+	 * which clears stream->ep, so one endpoint is taken with a reference
+	 * and used throughout.
 	 */
-	if (stream->ep != NULL && stream->id != QUIC_STREAM_ID_UNASSIGNED) {
-		bool is_server = stream->ep->is_server;
+	ep = stream->id != QUIC_STREAM_ID_UNASSIGNED ? quic_stream_endpoint_get(stream) : NULL;
+	if (ep != NULL) {
+		bool is_server = ep->is_server;
 		bool peer_init = ((stream->id & 1u) == 0u) == is_server;
 		bool is_bidi = (stream->id & 2u) == 0u;
 
 		if (peer_init) {
-			if (is_bidi && stream->ep->rx_sl.open_bidi > 0) {
-				stream->ep->rx_sl.open_bidi--;
+			if (is_bidi && ep->rx_sl.open_bidi > 0) {
+				ep->rx_sl.open_bidi--;
 
 				/*
 				 * Slide the cumulative limit up by 1: the freed slot
 				 * is now available for a future stream.  Notify the
 				 * peer so it can unblock if it was waiting.
 				 */
-				stream->ep->rx_sl.max_bidi++;
-				(void)quic_send_max_streams(stream->ep, true);
+				ep->rx_sl.max_bidi++;
+				(void)quic_send_max_streams(ep, true);
 
 				NET_DBG("[EP:%p/%d] Stream %" PRIu64 " closed, "
 					"open_bidi=%" PRIu64 " max_bidi=%" PRIu64,
-					stream->ep, quic_get_by_ep(stream->ep),
+					ep, quic_get_by_ep(ep),
 					stream->id,
-					stream->ep->rx_sl.open_bidi,
-					stream->ep->rx_sl.max_bidi);
+					ep->rx_sl.open_bidi,
+					ep->rx_sl.max_bidi);
 
-			} else if (!is_bidi && stream->ep->rx_sl.open_uni > 0) {
-				stream->ep->rx_sl.open_uni--;
-				stream->ep->rx_sl.max_uni++;
-				(void)quic_send_max_streams(stream->ep, false);
+			} else if (!is_bidi && ep->rx_sl.open_uni > 0) {
+				ep->rx_sl.open_uni--;
+				ep->rx_sl.max_uni++;
+				(void)quic_send_max_streams(ep, false);
 			}
 		}
+
+		quic_endpoint_unref(ep);
 	}
 
 	if (stream->conn != NULL) {
@@ -2860,6 +3343,28 @@ static int quic_endpoint_ref(struct quic_endpoint *ep)
 	return ref + 1;
 }
 
+/*
+ * Take a reference only if the endpoint is still alive. A plain
+ * quic_endpoint_ref() would resurrect an endpoint whose refcount already
+ * dropped to zero, i.e. one that quic_endpoint_unref() has committed to
+ * freeing. Callers that look an endpoint up from a table it does not own
+ * must use this so the slab slot cannot be freed and reused underneath them.
+ * Returns true when a reference was taken.
+ */
+static bool quic_endpoint_ref_unless_zero(struct quic_endpoint *ep)
+{
+	atomic_val_t ref;
+
+	do {
+		ref = atomic_get(&ep->refcount);
+		if (ref == 0) {
+			return false;
+		}
+	} while (!atomic_cas(&ep->refcount, ref, ref + 1));
+
+	return true;
+}
+
 /* Notify all streams associated with this endpoint that the connection is closed */
 static void quic_endpoint_notify_streams_closed(struct quic_endpoint *ep)
 {
@@ -2916,6 +3421,7 @@ static int quic_endpoint_unref_debug(struct quic_endpoint *ep, const char *calle
 static int quic_endpoint_unref(struct quic_endpoint *ep)
 #endif
 {
+	struct quic_endpoint *parent = NULL;
 	atomic_val_t ref;
 	int ret;
 
@@ -3021,12 +3527,17 @@ static int quic_endpoint_unref(struct quic_endpoint *ep)
 	quic_crypto_context_destroy(&ep->crypto.initial);
 	quic_crypto_context_destroy(&ep->crypto.handshake);
 	quic_crypto_context_destroy(&ep->crypto.application);
+	quic_crypto_context_destroy(&ep->crypto.early);
+	quic_key_update_destroy(&ep->crypto.ku);
 
 	if (ep->parent != NULL) {
 		/* The ref was taken in process_long_header() when we assigned
-		 * the parent, so unref it here
+		 * the parent. Drop it after the locks below are released: if
+		 * it is the parent's final reference, releasing it cancels
+		 * the parent's PTO work synchronously, which can deadlock
+		 * under contexts_lock against a PTO handler taking that lock.
 		 */
-		quic_endpoint_unref(ep->parent);
+		parent = ep->parent;
 		ep->parent = NULL;
 	}
 
@@ -3039,10 +3550,23 @@ static int quic_endpoint_unref(struct quic_endpoint *ep)
 
 	ep->slab_index = -1;
 
+	/* quic_recovery_begin_shutdown() (called above via the unref path) must
+	 * have cancelled pto_work before we get here: endpoint_alloc() memsets
+	 * the reused slab slot, and zeroing a still-linked _timeout node would
+	 * corrupt the global kernel timeout list and surface as a baffling
+	 * assert in unrelated code. Catch any future teardown regression here.
+	 */
+	__ASSERT(!sys_dnode_is_linked(&ep->recovery.pto_work.timeout.node),
+		 "pto_work still linked at endpoint free");
+
 	k_mem_slab_free(ep->slab, (void *)ep);
 
 	k_mutex_unlock(&endpoints_lock);
 	k_mutex_unlock(&contexts_lock);
+
+	if (parent != NULL) {
+		quic_endpoint_unref(parent);
+	}
 
 	return 0;
 }
@@ -3170,11 +3694,29 @@ static struct quic_endpoint *find_endpoint_lock(const struct net_sockaddr *remot
 	ep = find_endpoint(remote_addr, local_addr, peer_cid, peer_cid_len,
 			  my_cid, my_cid_len);
 
+	/* Pin the endpoint while still holding the lock. The slab free in
+	 * quic_endpoint_unref() runs under this same lock, so an endpoint that
+	 * survived the ref_unless_zero cannot be freed until the caller
+	 * releases the reference taken here.
+	 */
+	if (ep != NULL && !quic_endpoint_ref_unless_zero(ep)) {
+		ep = NULL;
+	}
+
 	k_mutex_unlock(&endpoints_lock);
 
 	return ep;
 }
 
+/*
+ * Look up an endpoint by address and connection ID.
+ *
+ * The endpoint is returned with a reference held, so the caller must release
+ * it with quic_endpoint_unref() on every path once done. Without it, a
+ * concurrent context close or idle timeout could free and reuse the slab slot
+ * while the RX path is still decrypting into it; the owning context's own
+ * reference does not prevent that, as closing the context is what drops it.
+ */
 static struct quic_endpoint *quic_endpoint_lookup(const struct net_sockaddr *remote_addr,
 						  const struct net_sockaddr *local_addr,
 						  uint8_t *peer_cid, uint8_t peer_cid_len,
@@ -3261,6 +3803,15 @@ static struct quic_endpoint *find_endpoint_by_sock(int sock)
 		}
 	}
 
+	/* Pin the endpoint while still holding the lock, as quic_endpoint_lookup()
+	 * does. The RX path dereferences it and fills its pending buffer, so the
+	 * slab slot must not be freed underneath it. The caller releases this
+	 * reference on every path.
+	 */
+	if (ep != NULL && !quic_endpoint_ref_unless_zero(ep)) {
+		ep = NULL;
+	}
+
 	k_mutex_unlock(&endpoints_lock);
 
 	return ep;
@@ -3270,9 +3821,19 @@ static struct quic_endpoint *find_endpoint_by_sock(int sock)
 static void quic_check_idle_timeouts(struct k_work *work)
 {
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+	struct quic_endpoint *expired[CONFIG_QUIC_MAX_ENDPOINTS];
 	int64_t now = k_uptime_get();
 	int64_t shortest = 0;
+	int expired_count = 0;
 
+	/* This sweep releases endpoints, and quic_endpoint_unref() takes
+	 * contexts_lock before endpoints_lock. Follow the same order here,
+	 * but drop the references only after both locks are released: the
+	 * final unref cancels the endpoint's PTO work synchronously, and the
+	 * PTO handler takes contexts_lock, so releasing under the lock can
+	 * deadlock against a PTO that is firing at the same time.
+	 */
+	k_mutex_lock(&contexts_lock, K_FOREVER);
 	k_mutex_lock(&endpoints_lock, K_FOREVER);
 
 	for (int i = 0; i < CONFIG_QUIC_MAX_ENDPOINTS; i++) {
@@ -3305,8 +3866,19 @@ static void quic_check_idle_timeouts(struct k_work *work)
 								    QUIC_ERROR_PROTOCOL_VIOLATION,
 								    "Handshake timeout");
 
-				quic_endpoint_unref(ep);
+				expired[expired_count++] = ep;
 				continue;
+			}
+
+			/* An endpoint that is still handshaking has no negotiated
+			 * idle timeout yet, so it would contribute nothing below
+			 * and this work would stop rescheduling itself. Its own
+			 * handshake timeout would then never fire and the slot
+			 * would be held until reboot.
+			 */
+			remaining = (int64_t)ep->handshake.timeout_ms - handshake_time;
+			if (shortest == 0 || shortest > remaining) {
+				shortest = remaining;
 			}
 		}
 
@@ -3327,7 +3899,7 @@ static void quic_check_idle_timeouts(struct k_work *work)
 				 ep, quic_get_by_ep(ep), idle_time);
 
 			/* Per RFC 9000: No CONNECTION_CLOSE is sent for idle timeout */
-			quic_endpoint_unref(ep);
+			expired[expired_count++] = ep;
 			continue;
 		}
 
@@ -3339,6 +3911,11 @@ static void quic_check_idle_timeouts(struct k_work *work)
 	}
 
 	k_mutex_unlock(&endpoints_lock);
+	k_mutex_unlock(&contexts_lock);
+
+	for (int i = 0; i < expired_count; i++) {
+		quic_endpoint_unref(expired[i]);
+	}
 
 	if (shortest > 0) {
 		k_work_reschedule(dwork, K_MSEC(shortest));
@@ -3391,6 +3968,7 @@ static inline int level_to_pn_space(enum quic_secret_level level)
 		return 0;
 	case QUIC_SECRET_LEVEL_HANDSHAKE:
 		return 1;
+	case QUIC_SECRET_LEVEL_EARLY:
 	case QUIC_SECRET_LEVEL_APPLICATION:
 	default:
 		return 2;
@@ -3489,6 +4067,24 @@ static void quic_recovery_discard_pn_space(struct quic_endpoint *ep, int pn_spac
 	k_mutex_unlock(&ep->recovery.lock);
 }
 
+/*
+ * Discard the keys of the Initial or the Handshake level for the rest of
+ * the connection (RFC 9001 ch. 4.9), together with the loss recovery state
+ * of the packets sent with them. Those packets can no longer be
+ * acknowledged, so they must not stay counted as in flight or keep the probe
+ * timer armed (RFC 9002 ch. 6.4).
+ */
+ZTESTABLE_STATIC void quic_endpoint_discard_keys(struct quic_endpoint *ep,
+						 enum quic_secret_level level)
+{
+	__ASSERT_NO_MSG(level == QUIC_SECRET_LEVEL_INITIAL ||
+			level == QUIC_SECRET_LEVEL_HANDSHAKE);
+
+	quic_crypto_context_discard(level == QUIC_SECRET_LEVEL_INITIAL ?
+				    &ep->crypto.initial : &ep->crypto.handshake);
+	quic_recovery_discard_pn_space(ep, level_to_pn_space(level));
+}
+
 ZTESTABLE_STATIC void quic_recovery_init(struct quic_endpoint *ep)
 {
 	k_mutex_init(&ep->recovery.lock);
@@ -3513,7 +4109,10 @@ ZTESTABLE_STATIC void quic_recovery_init(struct quic_endpoint *ep)
 		for (int i = 0; i < CONFIG_QUIC_SENT_PKT_HISTORY_SIZE; i++) {
 			ep->recovery.sent_pkts[pn_space][i].in_flight = false;
 			ep->recovery.sent_pkts[pn_space][i].retransmit_pending = false;
+			ep->recovery.sent_pkts[pn_space][i].dplpmtud_probe = false;
+			ep->recovery.sent_pkts[pn_space][i].dplpmtud_probe_size = 0U;
 			ep->recovery.sent_pkts[pn_space][i].has_stream_frame = false;
+			ep->recovery.sent_pkts[pn_space][i].level = QUIC_SECRET_LEVEL_INITIAL;
 		}
 	}
 
@@ -3523,11 +4122,53 @@ ZTESTABLE_STATIC void quic_recovery_init(struct quic_endpoint *ep)
 		ep, quic_get_by_ep(ep), ep->recovery.smoothed_rtt);
 }
 
+/*
+ * Whether the sent-packet history can track one more in-flight stream data
+ * packet at this level. The stream data send paths back off with -EAGAIN
+ * when it cannot: an untracked packet could never be declared lost, and its
+ * stream data would never be released from the TX buffer once acknowledged.
+ *
+ * QUIC_SENT_PKT_HISTORY_RESERVE slots are kept free of stream data so that
+ * ack-eliciting control packets (window updates and the like), which are
+ * sent from paths that cannot back off, do not have to evict an in-flight
+ * stream entry either.
+ */
+bool quic_recovery_tx_slot_available(struct quic_endpoint *ep,
+				     enum quic_secret_level level)
+{
+	int pn_space = level_to_pn_space(level);
+	int free_slots = 0;
+
+	k_mutex_lock(&ep->recovery.lock, K_FOREVER);
+
+	for (int i = 0; i < CONFIG_QUIC_SENT_PKT_HISTORY_SIZE; i++) {
+		struct quic_sent_pkt_info *info = &ep->recovery.sent_pkts[pn_space][i];
+
+		/* A lost stream entry still awaiting retransmit is not in flight
+		 * but is not free either: it holds the only record of what must be
+		 * re-sent until the retransmit queue drains it. Recording over it
+		 * would drop that retransmission, so treat it as occupied.
+		 */
+		if (!info->in_flight && !info->retransmit_pending) {
+			free_slots++;
+			if (free_slots > QUIC_SENT_PKT_HISTORY_RESERVE) {
+				break;
+			}
+		}
+	}
+
+	k_mutex_unlock(&ep->recovery.lock);
+
+	return free_slots > QUIC_SENT_PKT_HISTORY_RESERVE;
+}
+
 ZTESTABLE_STATIC void quic_recovery_on_packet_sent(struct quic_endpoint *ep,
 						   enum quic_secret_level level,
 						   uint64_t pkt_num,
 						   size_t sent_bytes,
-						   bool ack_eliciting)
+						   bool ack_eliciting,
+						   bool dplpmtud_probe,
+						   uint16_t dplpmtud_probe_size)
 {
 	int pn_space = level_to_pn_space(level);
 	uint16_t idx;
@@ -3543,18 +4184,65 @@ ZTESTABLE_STATIC void quic_recovery_on_packet_sent(struct quic_endpoint *ep,
 	idx = ep->recovery.sent_pkts_idx[pn_space];
 	info = &ep->recovery.sent_pkts[pn_space][idx];
 
+	/* Never overwrite an in-flight entry while a free slot exists.
+	 * Losing an in-flight entry forgets its loss-recovery state, and for
+	 * a packet carrying stream data it also drops the annotation that
+	 * releases the stream TX buffer when the packet is acknowledged; the
+	 * buffer then stays occupied forever and the stream wedges. The data
+	 * send paths refuse to send without free slots to spare, so a full
+	 * history only happens for control packets sent from paths that
+	 * cannot back off; those overwrites prefer a victim without a stream
+	 * annotation, whose loss is recoverable.
+	 *
+	 * A slot marked retransmit_pending is a stream entry that loss
+	 * detection has taken out of flight but whose data has not yet been
+	 * copied to the retransmit queue. It is the only remaining record of
+	 * that pending retransmission, so it must be preserved exactly like an
+	 * in-flight entry until the queue drains it.
+	 */
+	if (info->in_flight || info->retransmit_pending) {
+		struct quic_sent_pkt_info *victim = NULL;
+
+		for (int i = 1; i < CONFIG_QUIC_SENT_PKT_HISTORY_SIZE; i++) {
+			uint16_t probe = (idx + i) % CONFIG_QUIC_SENT_PKT_HISTORY_SIZE;
+			struct quic_sent_pkt_info *entry =
+				&ep->recovery.sent_pkts[pn_space][probe];
+
+			if (!entry->in_flight && !entry->retransmit_pending) {
+				idx = probe;
+				info = entry;
+				break;
+			}
+
+			if (victim == NULL && !entry->has_stream_frame) {
+				victim = entry;
+			}
+		}
+
+		if ((info->in_flight || info->retransmit_pending) && victim != NULL &&
+		    info->has_stream_frame) {
+			info = victim;
+		}
+	}
+
 	/* If we're overwriting a packet still in flight, decrement bytes_in_flight */
 	if (info->in_flight) {
+		NET_WARN("[EP:%p/%d] Sent packet history full, dropping state of pn=%" PRIu64
+			 " (stream frame: %d)",
+			 ep, quic_get_by_ep(ep), info->pkt_num, (int)info->has_stream_frame);
 		ep->recovery.bytes_in_flight -= info->sent_bytes;
 	}
 
 	/* Record this packet */
 	info->pkt_num = pkt_num;
 	info->sent_time = k_uptime_get();
+	info->level = level;
 	info->sent_bytes = (uint16_t)MIN(sent_bytes, UINT16_MAX);
 	info->ack_eliciting = ack_eliciting;
 	info->in_flight = ack_eliciting; /* Only ack-eliciting packets count */
 	info->retransmit_pending = false;
+	info->dplpmtud_probe = dplpmtud_probe;
+	info->dplpmtud_probe_size = dplpmtud_probe_size;
 	info->has_stream_frame  = false;
 
 	/* Update bytes in flight */
@@ -3575,37 +4263,178 @@ ZTESTABLE_STATIC void quic_recovery_on_packet_sent(struct quic_endpoint *ep,
 	k_mutex_unlock(&ep->recovery.lock);
 }
 
-static void quic_stream_advance_tx_acked(struct quic_endpoint *ep,
-					 uint64_t stream_id,
-					 uint64_t acked_end)
+static uint64_t quic_stream_tx_ack_seg_end(const struct quic_stream_tx_ack_segment *seg)
 {
-	struct quic_stream *stream = quic_find_stream_by_id(ep, stream_id);
+	return seg->offset + seg->len;
+}
+
+static bool quic_stream_tx_ack_mergeable(uint64_t start_a, uint64_t end_a,
+					 uint64_t start_b, uint64_t end_b)
+{
+	return start_a <= end_b && start_b <= end_a;
+}
+
+static void quic_stream_tx_ack_merge_into(struct quic_stream_tx_ack_segment *seg,
+					  uint64_t start, uint64_t end)
+{
+	uint64_t merged_start = MIN(seg->offset, start);
+	uint64_t merged_end = MAX(quic_stream_tx_ack_seg_end(seg), end);
+
+	seg->offset = merged_start;
+	seg->len = (uint32_t)(merged_end - merged_start);
+}
+
+static void quic_stream_tx_ack_remove(struct quic_stream *stream, int index)
+{
+	stream->acked_ooo[index] = stream->acked_ooo[stream->acked_ooo_count - 1];
+	stream->acked_ooo_count--;
+}
+
+static void quic_stream_tx_ack_compact(struct quic_stream *stream)
+{
+	bool progress = true;
+
+	while (progress) {
+		progress = false;
+
+		for (int i = 0; i < stream->acked_ooo_count; i++) {
+			uint64_t i_end = quic_stream_tx_ack_seg_end(&stream->acked_ooo[i]);
+
+			for (int j = i + 1; j < stream->acked_ooo_count; j++) {
+				struct quic_stream_tx_ack_segment *other =
+					&stream->acked_ooo[j];
+				uint64_t j_end = quic_stream_tx_ack_seg_end(other);
+
+				if (!quic_stream_tx_ack_mergeable(stream->acked_ooo[i].offset,
+								  i_end, other->offset, j_end)) {
+					continue;
+				}
+
+				quic_stream_tx_ack_merge_into(&stream->acked_ooo[i],
+							      other->offset, j_end);
+				quic_stream_tx_ack_remove(stream, j);
+				progress = true;
+				break;
+			}
+
+			if (progress) {
+				break;
+			}
+		}
+	}
+}
+
+static bool quic_stream_tx_ack_try_merge(struct quic_stream *stream,
+					 uint64_t start, uint64_t end)
+{
+	for (int i = 0; i < stream->acked_ooo_count; i++) {
+		struct quic_stream_tx_ack_segment *seg = &stream->acked_ooo[i];
+		uint64_t seg_end = quic_stream_tx_ack_seg_end(seg);
+
+		if (start >= seg->offset && end <= seg_end) {
+			return true;
+		}
+
+		if (quic_stream_tx_ack_mergeable(seg->offset, seg_end, start, end)) {
+			quic_stream_tx_ack_merge_into(seg, start, end);
+			quic_stream_tx_ack_compact(stream);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool quic_stream_tx_ack_store(struct quic_stream *stream,
+				     uint64_t start, uint64_t end)
+{
+	if (quic_stream_tx_ack_try_merge(stream, start, end)) {
+		return true;
+	}
+
+	quic_stream_tx_ack_compact(stream);
+
+	if (quic_stream_tx_ack_try_merge(stream, start, end)) {
+		return true;
+	}
+
+	if (stream->acked_ooo_count >= ARRAY_SIZE(stream->acked_ooo)) {
+		return false;
+	}
+
+	stream->acked_ooo[stream->acked_ooo_count].offset = start;
+	stream->acked_ooo[stream->acked_ooo_count].len = (uint32_t)(end - start);
+	stream->acked_ooo_count++;
+
+	quic_stream_tx_ack_compact(stream);
+
+	return true;
+}
+
+ZTESTABLE_STATIC void quic_stream_advance_tx_acked_for_stream(struct quic_stream *stream,
+							      uint64_t acked_start,
+							      uint64_t acked_end)
+{
 	struct quic_stream_tx_buffer *tx;
-	uint64_t new_base;
-	size_t advance;
+	bool progress = true;
+	size_t advance = 0U;
 
 	if (stream == NULL) {
 		return;
 	}
 
-	/* Only advance if this ACK extends the contiguous frontier.
-	 * Out-of-order ACKs (acked_end <= bytes_acked) are ignored;
-	 * the data they cover stays in the buffer until the gap is filled.
-	 */
-	if (acked_end <= stream->bytes_acked) {
-		return;
+	k_mutex_lock(&stream->tx_lock, K_FOREVER);
+
+	if (acked_end <= acked_start) {
+		goto unlock;
 	}
 
-	stream->bytes_acked = acked_end;
+	if (acked_end <= stream->bytes_acked) {
+		goto unlock;
+	}
+
+	if (acked_start > stream->bytes_acked) {
+		if (!quic_stream_tx_ack_store(stream, acked_start, acked_end)) {
+			NET_WARN("[ST:%p/%d] TX ACK OOO queue full for stream %" PRIu64
+				 " (offset=%" PRIu64 ", len=%" PRIu64 ")",
+				 stream, quic_get_by_stream(stream), stream->id,
+				 acked_start, acked_end - acked_start);
+		}
+	} else {
+		stream->bytes_acked = MAX(stream->bytes_acked, acked_end);
+	}
+
+	while (progress && stream->acked_ooo_count > 0U) {
+		progress = false;
+
+		for (int i = 0; i < stream->acked_ooo_count; i++) {
+			struct quic_stream_tx_ack_segment *seg = &stream->acked_ooo[i];
+			uint64_t seg_end = quic_stream_tx_ack_seg_end(seg);
+
+			if (seg_end <= stream->bytes_acked) {
+				quic_stream_tx_ack_remove(stream, i);
+				progress = true;
+				break;
+			}
+
+			if (seg->offset > stream->bytes_acked) {
+				continue;
+			}
+
+			stream->bytes_acked = seg_end;
+			quic_stream_tx_ack_remove(stream, i);
+			progress = true;
+			break;
+		}
+	}
 
 	tx = &stream->tx_buf;
-	new_base = stream->bytes_acked;
 
-	if (new_base <= tx->base_offset) {
-		return; /* nothing new to release */
+	if (stream->bytes_acked <= tx->base_offset) {
+		goto unlock;
 	}
 
-	advance = (size_t)(new_base - tx->base_offset);
+	advance = (size_t)(stream->bytes_acked - tx->base_offset);
 	if (advance > tx->len) {
 		advance = tx->len; /* clamp, shouldn't happen */
 	}
@@ -3614,51 +4443,154 @@ static void quic_stream_advance_tx_acked(struct quic_endpoint *ep,
 	tx->len -= advance;
 	tx->base_offset += advance;
 
-	/* Signal that the stream is now writable (TX buffer has space) */
+unlock:
+	k_mutex_unlock(&stream->tx_lock);
+
+	/* Signal that the stream may be writable again. Even when no buffer
+	 * bytes were released (advance == 0), the acknowledged packet freed a
+	 * sent-packet history slot, and a sender gated on the full history
+	 * must be woken up to retry.
+	 */
 	k_poll_signal_raise(&stream->send.signal, 0);
+}
+
+static void quic_stream_advance_tx_acked(struct quic_endpoint *ep,
+					 uint64_t stream_id,
+					 uint64_t acked_start,
+					 uint64_t acked_end)
+{
+	struct quic_stream *stream = quic_find_stream_by_id(ep, stream_id);
+
+	quic_stream_advance_tx_acked_for_stream(stream, acked_start, acked_end);
 }
 
 /*
  * Scatter-gather variant of quic_send_packet().
  * Accepts a small frame header and a separate data buffer,
- * assembling them into ep->crypto.tx_buffer internally.
+ * assembling them into ep->crypto.tx_buffer under ep->send_lock.
  * Avoids requiring a large frame[] on the caller's stack.
  */
 static int quic_send_packet_sg(struct quic_endpoint *ep,
 			       enum quic_secret_level level,
 			       const uint8_t *hdr, size_t hdr_len,
-			       const uint8_t *data, size_t data_len)
+			       const uint8_t *data, size_t data_len,
+			       uint64_t *sent_pn_out)
 {
 	size_t plaintext_len = hdr_len + data_len;
+	int ret;
 
 	if (plaintext_len > sizeof(ep->crypto.tx_buffer)) {
 		return -ENOBUFS;
 	}
 
-	/* Assemble plaintext directly into the encryption buffer.
-	 * This is safe: nothing else touches tx_buffer at this point.
-	 */
+	k_mutex_lock(&ep->send_lock, K_FOREVER);
+
 	memcpy(ep->crypto.tx_buffer, hdr, hdr_len);
 	if (data_len > 0) {
 		memcpy(ep->crypto.tx_buffer + hdr_len, data, data_len);
 	}
 
-	/* Delegate to the internal _from_txbuf variant that skips the
-	 * redundant payload copy inside quic_send_packet().
-	 */
-	return quic_send_packet_from_txbuf(ep, level, plaintext_len);
+	ret = quic_send_packet_from_txbuf_ex(ep, level, plaintext_len, 0U, false, false,
+					     sent_pn_out);
+
+	k_mutex_unlock(&ep->send_lock);
+
+	return ret;
 }
 
-static void quic_annotate_last_sent_stream(struct quic_endpoint *ep,
-					   enum quic_secret_level level,
-					   uint64_t stream_id,
-					   uint64_t stream_offset,
-					   uint16_t stream_data_len,
-					   bool stream_fin)
+static int quic_send_dplpmtud_probe(struct quic_endpoint *ep, uint16_t probe_size)
+{
+	int ret;
+
+	k_mutex_lock(&ep->send_lock, K_FOREVER);
+	ep->crypto.tx_buffer[0] = QUIC_FRAME_TYPE_PING;
+	ret = quic_send_packet_from_txbuf(ep, QUIC_SECRET_LEVEL_APPLICATION, 1,
+					  probe_size, true, true);
+	k_mutex_unlock(&ep->send_lock);
+
+	return ret;
+}
+
+static int quic_dplpmtud_maybe_probe(struct quic_endpoint *ep)
+{
+	uint16_t probe_size;
+	bool retry_immediately;
+	int ret;
+
+	for (;;) {
+		retry_immediately = false;
+
+		k_mutex_lock(&ep->recovery.lock, K_FOREVER);
+
+		if (ep->recovery.closing || !ep->handshake.completed) {
+			k_mutex_unlock(&ep->recovery.lock);
+			return 0;
+		}
+
+		quic_dplpmtud_update_limit_locked(ep);
+
+		if (net_dplpmtud_path_probe_in_flight(&ep->dplpmtud.path)) {
+			k_mutex_unlock(&ep->recovery.lock);
+			return 0;
+		}
+
+		ret = net_dplpmtud_get_path_probe_size(&ep->dplpmtud.path);
+		if (ret <= 0) {
+			/* 0 means no probe needed; a negative value is an error. */
+			k_mutex_unlock(&ep->recovery.lock);
+			return 0;
+		}
+		probe_size = (uint16_t)ret;
+
+		ret = net_dplpmtud_on_path_probe_sent(&ep->dplpmtud.path, probe_size);
+		if (ret < 0) {
+			k_mutex_unlock(&ep->recovery.lock);
+			return ret;
+		}
+
+		k_mutex_unlock(&ep->recovery.lock);
+
+		ret = quic_send_dplpmtud_probe(ep, probe_size);
+		k_mutex_lock(&ep->recovery.lock, K_FOREVER);
+
+		if (ret == 0) {
+			k_mutex_unlock(&ep->recovery.lock);
+			return 0;
+		}
+
+		quic_dplpmtud_on_probe_lost_locked(ep, probe_size);
+
+		if (ret == -EMSGSIZE) {
+			if (probe_size > QUIC_DPLPMTUD_BASE_PLPMTU) {
+				net_dplpmtud_set_path_max_plpmtu(&ep->dplpmtud.path,
+								 probe_size - 1U);
+			}
+
+			quic_dplpmtud_update_limit_locked(ep);
+			retry_immediately =
+				net_dplpmtud_get_path_probe_size(&ep->dplpmtud.path) > 0;
+		}
+
+		k_mutex_unlock(&ep->recovery.lock);
+
+		if (!retry_immediately) {
+			NET_DBG("[EP:%p/%d] DPLPMTUD probe %u could not be sent (%d)",
+				ep, quic_get_by_ep(ep), probe_size, ret);
+			return 0;
+		}
+	}
+}
+
+static void quic_annotate_sent_stream(struct quic_endpoint *ep,
+				      enum quic_secret_level level,
+				      uint64_t pkt_num,
+				      uint64_t stream_id,
+				      uint64_t stream_offset,
+				      uint16_t stream_data_len,
+				      bool stream_fin)
 {
 	int pn_space = level_to_pn_space(level);
-	uint16_t last_idx;
-	struct quic_sent_pkt_info *info;
+	bool found = false;
 
 	k_mutex_lock(&ep->recovery.lock, K_FOREVER);
 
@@ -3667,30 +4599,55 @@ static void quic_annotate_last_sent_stream(struct quic_endpoint *ep,
 		return;
 	}
 
-	last_idx = (ep->recovery.sent_pkts_idx[pn_space] +
-		    CONFIG_QUIC_SENT_PKT_HISTORY_SIZE - 1) %
-		CONFIG_QUIC_SENT_PKT_HISTORY_SIZE;
-	info = &ep->recovery.sent_pkts[pn_space][last_idx];
+	for (int i = 0; i < CONFIG_QUIC_SENT_PKT_HISTORY_SIZE; i++) {
+		struct quic_sent_pkt_info *info = &ep->recovery.sent_pkts[pn_space][i];
 
-	info->has_stream_frame  = true;
-	info->stream_id         = stream_id;
-	info->stream_offset     = stream_offset;
-	info->stream_data_len   = stream_data_len;
-	info->stream_fin        = stream_fin;
+		if (info->pkt_num != pkt_num) {
+			continue;
+		}
+
+		info->has_stream_frame = true;
+		info->stream_id = stream_id;
+		info->stream_offset = stream_offset;
+		info->stream_data_len = stream_data_len;
+		info->stream_fin = stream_fin;
+		found = true;
+		break;
+	}
 
 	k_mutex_unlock(&ep->recovery.lock);
+
+	if (!found) {
+		NET_DBG("[EP:%p/%d] Cannot annotate stream frame for pn=%" PRIu64,
+			ep, quic_get_by_ep(ep), pkt_num);
+	}
 }
+
+/* Scratch buffer for stream-frame retransmission. The lost payload is copied
+ * out of the stream TX buffer under tx_lock, then sent from here. It is kept in
+ * .bss (not on the stack) because it is up to CONFIG_QUIC_TX_BUFFER_SIZE bytes;
+ * quic_retransmit_lock serializes the two threads that can retransmit (the
+ * socket-service thread on ACK-driven loss and the recovery work queue on PTO).
+ * The payload must be copied and tx_lock released before sending: the send
+ * records the packet under recovery.lock, while the ACK path takes recovery.lock
+ * then tx_lock, so holding tx_lock across the send would invert that order.
+ */
+static uint8_t quic_retransmit_payload[CONFIG_QUIC_TX_BUFFER_SIZE];
+static K_MUTEX_DEFINE(quic_retransmit_lock);
 
 static void quic_retransmit_stream_frame(struct quic_endpoint *ep,
 					 const struct quic_sent_pkt_info *lost)
 {
 	/* Small fixed header, 1 + 8 + 8 + 8 bytes max */
 	uint8_t hdr[32];
+	enum quic_secret_level level;
 	size_t hdr_len = 0;
 	struct quic_stream_tx_buffer *tx;
 	struct quic_stream *stream;
 	uint8_t frame_type;
 	size_t buf_off;
+	uint16_t payload_len;
+	uint64_t sent_pn;
 	int ret;
 
 	stream = quic_find_stream_by_id(ep, lost->stream_id);
@@ -3698,18 +4655,37 @@ static void quic_retransmit_stream_frame(struct quic_endpoint *ep,
 		return;
 	}
 
+	if (lost->stream_data_len > sizeof(quic_retransmit_payload)) {
+		NET_WARN("[EP:%p/%d] Lost frame too large to retransmit (%u)",
+			 ep, quic_get_by_ep(ep), lost->stream_data_len);
+		return;
+	}
+
+	level = quic_stream_send_level(ep);
 	tx = &stream->tx_buf;
 
+	k_mutex_lock(&quic_retransmit_lock, K_FOREVER);
+	k_mutex_lock(&stream->tx_lock, K_FOREVER);
+
 	if (lost->stream_offset < tx->base_offset) {
+		k_mutex_unlock(&stream->tx_lock);
+		k_mutex_unlock(&quic_retransmit_lock);
 		return; /* already ACKed */
 	}
 
 	buf_off = (size_t)(lost->stream_offset - tx->base_offset);
 	if (buf_off + lost->stream_data_len > tx->len) {
+		k_mutex_unlock(&stream->tx_lock);
+		k_mutex_unlock(&quic_retransmit_lock);
 		NET_WARN("[EP:%p/%d] Lost frame not in TX buffer",
 			 ep, quic_get_by_ep(ep));
 		return;
 	}
+
+	payload_len = lost->stream_data_len;
+	memcpy(quic_retransmit_payload, &tx->data[buf_off], payload_len);
+
+	k_mutex_unlock(&stream->tx_lock);
 
 	/* Build STREAM frame header into the small stack buffer */
 	frame_type = QUIC_FRAME_TYPE_STREAM_BASE | 0x04 | 0x02;
@@ -3720,31 +4696,38 @@ static void quic_retransmit_stream_frame(struct quic_endpoint *ep,
 
 	ret = quic_put_len(&hdr[hdr_len], sizeof(hdr) - hdr_len, lost->stream_id);
 	if (ret != 0) {
-		return;
+		goto unlock;
 	}
 	hdr_len += quic_get_varint_size(lost->stream_id);
 
 	ret = quic_put_len(&hdr[hdr_len], sizeof(hdr) - hdr_len, lost->stream_offset);
 	if (ret != 0) {
-		return;
+		goto unlock;
 	}
 	hdr_len += quic_get_varint_size(lost->stream_offset);
 
 	ret = quic_put_len(&hdr[hdr_len], sizeof(hdr) - hdr_len, lost->stream_data_len);
 	if (ret != 0) {
-		return;
+		goto unlock;
 	}
 	hdr_len += quic_get_varint_size(lost->stream_data_len);
 
-	/* Send: header from stack, payload directly from tx_buf */
-	ret = quic_send_packet_sg(ep, QUIC_SECRET_LEVEL_APPLICATION,
-				  hdr, hdr_len,
-				  &tx->data[buf_off], lost->stream_data_len);
+	/* Send: header from stack, payload from the scratch buffer copied under
+	 * tx_lock above.
+	 */
+	ret = quic_send_packet_sg(ep, level, hdr, hdr_len,
+				  quic_retransmit_payload, payload_len,
+				  &sent_pn);
 	if (ret == 0) {
-		quic_annotate_last_sent_stream(ep, QUIC_SECRET_LEVEL_APPLICATION,
-					       lost->stream_id, lost->stream_offset,
-					       lost->stream_data_len, lost->stream_fin);
+		quic_annotate_sent_stream(ep, level, sent_pn,
+					  lost->stream_id,
+					  lost->stream_offset,
+					  lost->stream_data_len,
+					  lost->stream_fin);
 	}
+
+unlock:
+	k_mutex_unlock(&quic_retransmit_lock);
 }
 
 /* Maximum number of ACK ranges we track from a single ACK frame.
@@ -3771,11 +4754,12 @@ static bool pkt_num_in_ack_ranges(uint64_t pkt_num,
 	return false;
 }
 
-static void quic_detect_lost_packets_locked(struct quic_endpoint *ep,
+static bool quic_detect_lost_packets_locked(struct quic_endpoint *ep,
 					    int pn_space,
 					    uint64_t largest_ack)
 {
 	int64_t  now_ms = k_uptime_get();
+	bool lost_any = false;
 
 	/* RFC 9002 Section 6.1.2: time threshold in milliseconds.
 	 * loss_delay = max(K_TIME_THRESHOLD * SRTT, GRANULARITY)
@@ -3820,11 +4804,18 @@ static void quic_detect_lost_packets_locked(struct quic_endpoint *ep,
 
 		ep->recovery.bytes_in_flight -= info->sent_bytes;
 		info->in_flight = false;
+		lost_any = true;
+
+		if (info->dplpmtud_probe) {
+			quic_dplpmtud_on_probe_lost_locked(ep, info->dplpmtud_probe_size);
+		}
 
 		if (info->has_stream_frame) {
 			info->retransmit_pending = true;
 		}
 	}
+
+	return lost_any;
 }
 
 static bool quic_recovery_take_pending_retransmit(struct quic_endpoint *ep,
@@ -3860,6 +4851,78 @@ static bool quic_recovery_take_pending_retransmit(struct quic_endpoint *ep,
 	return found;
 }
 
+/* Re-advertise the current connection- and stream-level flow-control limits.
+ *
+ * RFC 9000 Section 13.3: MAX_DATA / MAX_STREAM_DATA carry the most recent limit,
+ * so when a packet that may have carried one is lost the current value must be
+ * re-sent. Unlike STREAM frames these control frames are not tracked for
+ * retransmission, so without this a single lost limit update can permanently
+ * stall a flow-control-blocked peer (it has already sent STREAM_DATA_BLOCKED for
+ * the stale limit and will not repeat it).
+ *
+ * Streams are snapshotted under contexts_lock and the updates are sent with the
+ * lock released, matching handle_stream_data_blocked_frame().
+ */
+
+static struct quic_stream *quic_readvertise_snapshot[ARRAY_SIZE(streams)];
+static K_MUTEX_DEFINE(quic_readvertise_lock);
+
+static void quic_readvertise_flow_control(struct quic_endpoint *ep)
+{
+	size_t count = 0;
+	struct quic_context *ctx;
+	struct quic_stream *stream, *tmp;
+
+	(void)quic_send_max_data(ep);
+
+	ctx = quic_find_context(ep);
+	if (ctx == NULL) {
+		return;
+	}
+
+	k_mutex_lock(&quic_readvertise_lock, K_FOREVER);
+
+	/* ctx->streams can be mutated concurrently by stream alloc/free and endpoint
+	 * teardown logic, so hold both locks while walking it. Lock order is
+	 * contexts_lock -> streams_lock, matching quic_context_stream_foreach().
+	 * Pin each snapshotted stream with a reference so it cannot be freed and
+	 * its pool slot reused while the locks are dropped for sending; the
+	 * matching unref is taken after the send below.
+	 */
+	k_mutex_lock(&contexts_lock, K_FOREVER);
+	k_mutex_lock(&streams_lock, K_FOREVER);
+
+	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&ctx->streams, stream, tmp, node) {
+		if (count >= ARRAY_SIZE(quic_readvertise_snapshot)) {
+			break;
+		}
+
+		if (stream->ep != ep) {
+			continue;
+		}
+
+		/* Only pin live streams; skip any whose refcount already hit
+		 * zero (being freed). Every stream placed in the snapshot has
+		 * exactly one reference taken here, released after the send.
+		 */
+		if (!quic_stream_ref_if_used(stream)) {
+			continue;
+		}
+
+		quic_readvertise_snapshot[count++] = stream;
+	}
+
+	k_mutex_unlock(&streams_lock);
+	k_mutex_unlock(&contexts_lock);
+
+	for (size_t i = 0; i < count; i++) {
+		(void)quic_send_max_stream_data(ep, quic_readvertise_snapshot[i]);
+		(void)quic_stream_unref(quic_readvertise_snapshot[i]);
+	}
+
+	k_mutex_unlock(&quic_readvertise_lock);
+}
+
 static void quic_recovery_on_ack_received(struct quic_endpoint *ep,
 					  enum quic_secret_level level,
 					  const struct quic_ack_range *ranges,
@@ -3872,6 +4935,7 @@ static void quic_recovery_on_ack_received(struct quic_endpoint *ep,
 	int64_t largest_sent_time = 0;
 	uint64_t largest_ack;
 	struct quic_sent_pkt_info lost;
+	bool readvertise_fc = false;
 
 	if (range_count <= 0) {
 		return;
@@ -3908,10 +4972,15 @@ static void quic_recovery_on_ack_received(struct quic_endpoint *ep,
 		ep->recovery.bytes_in_flight -= info->sent_bytes;
 		info->in_flight = false;
 
+		if (info->dplpmtud_probe) {
+			quic_dplpmtud_on_probe_acked_locked(ep, info->dplpmtud_probe_size);
+		}
+
 		/* Release ACKed data from TX buffer */
 		if (info->has_stream_frame) {
 			quic_stream_advance_tx_acked(
 				ep, info->stream_id,
+				info->stream_offset,
 				info->stream_offset + info->stream_data_len);
 		}
 
@@ -3982,7 +5051,7 @@ static void quic_recovery_on_ack_received(struct quic_endpoint *ep,
 	}
 
 	/* Run loss detection after processing the ACK */
-	quic_detect_lost_packets_locked(ep, pn_space, largest_ack);
+	readvertise_fc = quic_detect_lost_packets_locked(ep, pn_space, largest_ack);
 
 	/* Reset PTO timer aspackets are moving */
 	ep->recovery.pto_count = 0;
@@ -3992,6 +5061,16 @@ static void quic_recovery_on_ack_received(struct quic_endpoint *ep,
 	while (quic_recovery_take_pending_retransmit(ep, &lost)) {
 		quic_retransmit_stream_frame(ep, &lost);
 	}
+
+	/* A lost packet may have carried a MAX_DATA / MAX_STREAM_DATA update;
+	 * re-advertise the current limits so a flow-control-blocked peer does
+	 * not deadlock waiting for an update that is never retransmitted.
+	 */
+	if (readvertise_fc) {
+		quic_readvertise_flow_control(ep);
+	}
+
+	(void)quic_dplpmtud_maybe_probe(ep);
 }
 
 /* RFC 9002 specifies minimum PTO count of 3 */
@@ -4056,12 +5135,22 @@ static int quic_pto_probe(struct quic_endpoint *ep)
 	int pn_space = level_to_pn_space(QUIC_SECRET_LEVEL_APPLICATION);
 	struct quic_sent_pkt_info oldest = { 0 };
 	bool found = false;
+	bool probe_pending;
+	int probe_size;
 
 	k_mutex_lock(&ep->recovery.lock, K_FOREVER);
 
 	if (ep->recovery.closing) {
 		k_mutex_unlock(&ep->recovery.lock);
 		return -ESHUTDOWN;
+	}
+
+	if (net_dplpmtud_path_probe_in_flight(&ep->dplpmtud.path)) {
+		probe_size = net_dplpmtud_get_path_probe_size(&ep->dplpmtud.path);
+
+		if (probe_size > 0) {
+			quic_dplpmtud_on_probe_lost_locked(ep, probe_size);
+		}
 	}
 
 	for (int i = 0; i < CONFIG_QUIC_SENT_PKT_HISTORY_SIZE; i++) {
@@ -4078,6 +5167,10 @@ static int quic_pto_probe(struct quic_endpoint *ep)
 		}
 	}
 
+	probe_pending = ep->dplpmtud.path.in_use &&
+			!net_dplpmtud_path_probe_in_flight(&ep->dplpmtud.path) &&
+			net_dplpmtud_get_path_probe_size(&ep->dplpmtud.path) > 0;
+
 	k_mutex_unlock(&ep->recovery.lock);
 
 	if (found) {
@@ -4085,10 +5178,20 @@ static int quic_pto_probe(struct quic_endpoint *ep)
 			ep, quic_get_by_ep(ep), oldest.pkt_num);
 		quic_retransmit_stream_frame(ep, &oldest);
 		return 0;
-	} else {
-		/* No stream frame to retransmit, send a PING to keep the
-		 * connection alive and elicit an ACK.
-		 */
+	}
+
+	/* RFC 9002 Section 6.2.4: only send a probe when there is no in-flight
+	 * stream data to retransmit. Prefer a DPLPMTUD probe over a bare PING
+	 * when path MTU discovery is pending.
+	 */
+	if (probe_pending) {
+		return quic_dplpmtud_maybe_probe(ep);
+	}
+
+	/* No stream frame to retransmit, send a PING to keep the
+	 * connection alive and elicit an ACK.
+	 */
+	{
 		uint8_t ping = QUIC_FRAME_TYPE_PING;
 
 		NET_DBG("[EP:%p/%d] PTO: sending PING probe", ep, quic_get_by_ep(ep));
@@ -4171,6 +5274,131 @@ static void quic_endpoint_handshake_complete(struct quic_endpoint *ep)
 #define QUIC_DEFAULT_IDLE_TIMEOUT_MS (30 * MSEC_PER_SEC)  /* Default 30s idle timeout */
 #define QUIC_DEFAULT_HANDSHAKE_TIMEOUT_MS (30 * MSEC_PER_SEC)  /* Default 30s handshake timeout */
 
+static uint16_t quic_clamp_udp_payload_size(uint64_t value)
+{
+	return (uint16_t)MIN(value, (uint64_t)UINT16_MAX);
+}
+
+static uint16_t quic_peer_max_udp_payload_size(const struct quic_endpoint *ep)
+{
+	if (ep->peer_params.max_udp_payload_size < QUIC_DPLPMTUD_BASE_PLPMTU) {
+		return UINT16_MAX;
+	}
+
+	return ep->peer_params.max_udp_payload_size;
+}
+
+static bool quic_has_remote_addr(const struct quic_endpoint *ep)
+{
+	if (ep->remote_addr.ss_family == NET_AF_INET) {
+		const struct net_sockaddr_in *sin4 =
+			(const struct net_sockaddr_in *)&ep->remote_addr;
+
+		return !net_ipv4_is_addr_unspecified(&sin4->sin_addr);
+	}
+
+	if (ep->remote_addr.ss_family == NET_AF_INET6) {
+		const struct net_sockaddr_in6 *sin6 =
+			(const struct net_sockaddr_in6 *)&ep->remote_addr;
+
+		return !net_ipv6_is_addr_unspecified(&sin6->sin6_addr);
+	}
+
+	return false;
+}
+
+static uint16_t quic_dplpmtud_target_payload_size_locked(struct quic_endpoint *ep)
+{
+	uint16_t target = quic_get_local_max_udp_payload_size(ep);
+	uint16_t peer_limit = quic_peer_max_udp_payload_size(ep);
+
+	if (target == 0U) {
+		target = QUIC_DPLPMTUD_BASE_PLPMTU;
+	}
+
+	target = MIN(target, peer_limit);
+
+	return MAX(target, QUIC_DPLPMTUD_BASE_PLPMTU);
+}
+
+static int quic_dplpmtud_sync_path_locked(struct quic_endpoint *ep)
+{
+	uint16_t target = quic_dplpmtud_target_payload_size_locked(ep);
+
+	if (!quic_has_remote_addr(ep)) {
+		return -EDESTADDRREQ;
+	}
+
+	if (!ep->dplpmtud.path.in_use) {
+		return net_dplpmtud_init_path(&ep->dplpmtud.path, net_sad(&ep->remote_addr),
+					      target);
+	}
+
+	net_dplpmtud_set_path_max_plpmtu(&ep->dplpmtud.path, target);
+
+	return 0;
+}
+
+static void quic_dplpmtud_update_limit_locked(struct quic_endpoint *ep)
+{
+	int mtu;
+	int ret;
+
+	ret = quic_dplpmtud_sync_path_locked(ep);
+	if (ret < 0) {
+		ep->max_tx_payload_size = QUIC_DPLPMTUD_BASE_PLPMTU;
+		return;
+	}
+
+	mtu = net_dplpmtud_get_path_mtu(&ep->dplpmtud.path);
+	if (mtu < 0) {
+		mtu = QUIC_DPLPMTUD_BASE_PLPMTU;
+	}
+
+	ep->max_tx_payload_size = MAX(mtu, (int)QUIC_DPLPMTUD_BASE_PLPMTU);
+}
+
+static void quic_dplpmtud_on_probe_acked_locked(struct quic_endpoint *ep, uint16_t probe_size)
+{
+	if (net_dplpmtud_on_path_probe_acked(&ep->dplpmtud.path, probe_size) < 0) {
+		return;
+	}
+
+	quic_dplpmtud_update_limit_locked(ep);
+}
+
+static void quic_dplpmtud_on_probe_lost_locked(struct quic_endpoint *ep, uint16_t probe_size)
+{
+	if (net_dplpmtud_on_path_probe_lost(&ep->dplpmtud.path, probe_size) < 0) {
+		return;
+	}
+
+	quic_dplpmtud_update_limit_locked(ep);
+}
+
+__maybe_unused ZTESTABLE_STATIC void quic_dplpmtud_refresh_state(struct quic_endpoint *ep)
+{
+	k_mutex_lock(&ep->recovery.lock, K_FOREVER);
+	quic_dplpmtud_update_limit_locked(ep);
+	k_mutex_unlock(&ep->recovery.lock);
+}
+
+__maybe_unused ZTESTABLE_STATIC void quic_dplpmtud_on_probe_acked(struct quic_endpoint *ep,
+								  uint16_t probe_size)
+{
+	k_mutex_lock(&ep->recovery.lock, K_FOREVER);
+	quic_dplpmtud_on_probe_acked_locked(ep, probe_size);
+	k_mutex_unlock(&ep->recovery.lock);
+}
+
+__maybe_unused ZTESTABLE_STATIC void quic_dplpmtud_on_probe_lost(struct quic_endpoint *ep,
+								 uint16_t probe_size)
+{
+	k_mutex_lock(&ep->recovery.lock, K_FOREVER);
+	quic_dplpmtud_on_probe_lost_locked(ep, probe_size);
+	k_mutex_unlock(&ep->recovery.lock);
+}
+
 static void quic_endpoint_init(struct quic_endpoint *ep)
 {
 	ep->sock = -1;
@@ -4183,8 +5411,10 @@ static void quic_endpoint_init(struct quic_endpoint *ep)
 	memset(ep->peer_orig_dcid, 0, sizeof(ep->peer_orig_dcid));
 	memset(&ep->token, 0, sizeof(ep->token));
 
-	/* Default max UDP payload size per RFC 9000 when PMTUD is not performed */
-	ep->max_tx_payload_size = 1200;
+	/* Start from QUIC's required 1200-byte UDP payload until probing
+	 * validates a larger path size.
+	 */
+	ep->max_tx_payload_size = QUIC_DPLPMTUD_BASE_PLPMTU;
 
 	/* Initialize flow control with default values.
 	 * These will be updated when peer transport params are parsed.
@@ -4199,16 +5429,63 @@ static void quic_endpoint_init(struct quic_endpoint *ep)
 	ep->rx_sl.max_uni = CONFIG_QUIC_INITIAL_MAX_STREAMS_UNI;
 	ep->rx_sl.open_bidi = 0;
 	ep->rx_sl.open_uni = 0;
+	ep->peer_params.max_udp_payload_size = UINT16_MAX;
 	ep->peer_params.parsed = false;
+
+	ep->dplpmtud.path.in_use = false;
 
 	quic_endpoint_init_idle_timeout(ep, QUIC_DEFAULT_IDLE_TIMEOUT_MS);
 	quic_endpoint_init_handshake_timeout(ep, QUIC_DEFAULT_HANDSHAKE_TIMEOUT_MS);
 	quic_recovery_init(ep);
 
 	k_mutex_init(&ep->pending.lock);
+	k_mutex_init(&ep->send_lock);
 	k_sem_init(&ep->handshake.sem, 0, 1);
 
 	tls_init(ep);
+}
+
+static uint16_t quic_get_local_max_udp_payload_size(struct quic_endpoint *ep)
+{
+	struct net_if *iface;
+	int mtu = 0;
+	int ret;
+	net_socklen_t optlen = sizeof(mtu);
+
+	if (ep->sock >= 0) {
+		if (ep->remote_addr.ss_family == NET_AF_INET) {
+			ret = zsock_getsockopt(ep->sock, NET_IPPROTO_IP, ZSOCK_IP_MTU,
+					       &mtu, &optlen);
+		} else {
+			ret = zsock_getsockopt(ep->sock, NET_IPPROTO_IPV6, ZSOCK_IPV6_MTU,
+					       &mtu, &optlen);
+		}
+
+		if (ret == 0 && mtu > 0) {
+			goto have_mtu;
+		}
+	}
+
+	iface = net_if_select_src_iface((struct net_sockaddr *)&ep->remote_addr);
+	if (iface != NULL) {
+		mtu = net_if_get_mtu(iface);
+	} else if (ep->remote_addr.ss_family == NET_AF_INET6) {
+		mtu = NET_IPV6_MTU;
+	} else {
+		mtu = QUIC_DPLPMTUD_BASE_PLPMTU +
+		      sizeof(struct net_ipv4_hdr) + sizeof(struct net_udp_hdr);
+	}
+
+have_mtu:
+	if (ep->remote_addr.ss_family == NET_AF_INET6) {
+		return MAX((int)QUIC_DPLPMTUD_BASE_PLPMTU,
+			   mtu - (int)sizeof(struct net_ipv6_hdr) -
+			   (int)sizeof(struct net_udp_hdr));
+	}
+
+	return MAX((int)QUIC_DPLPMTUD_BASE_PLPMTU,
+		   mtu - (int)sizeof(struct net_ipv4_hdr) -
+		   (int)sizeof(struct net_udp_hdr));
 }
 
 #if defined(CONFIG_QUIC_LOG_LEVEL_DBG)
@@ -4399,6 +5676,9 @@ static struct quic_endpoint *quic_endpoint_create(struct quic_endpoint *ep,
 		new_ep->peer_params.initial_max_streams_uni =
 			ep->peer_params.initial_max_streams_uni;
 		new_ep->peer_params.max_idle_timeout = ep->peer_params.max_idle_timeout;
+		new_ep->peer_params.max_udp_payload_size =
+			ep->peer_params.max_udp_payload_size;
+		new_ep->peer_params.parsed = ep->peer_params.parsed;
 		new_ep->max_tx_payload_size = ep->max_tx_payload_size;
 		new_ep->rx_sl.max_bidi = ep->rx_sl.max_bidi;
 		new_ep->rx_sl.max_uni = ep->rx_sl.max_uni;
@@ -4543,6 +5823,10 @@ static int endpoint_socket_create(struct quic_endpoint *ep)
 		goto close_fail;
 	}
 
+	k_mutex_lock(&ep->recovery.lock, K_FOREVER);
+	quic_dplpmtud_update_limit_locked(ep);
+	k_mutex_unlock(&ep->recovery.lock);
+
 	if (ep->local_addr.ss_family == NET_AF_INET) {
 		NET_DBG("[EP:%p/%d] %s socket service handler for IPv%d",
 			ep, quic_get_by_ep(ep), "Registering", 4);
@@ -4599,11 +5883,23 @@ static struct quic_context *quic_context_init(struct quic_context *ctx)
 	k_sem_init(&ctx->pending.accept_sem, 0, 1);
 
 	k_fifo_init(&ctx->incoming.stream_q);
-	k_sem_init(&ctx->incoming.stream_sem, 0, 1);
+	/*
+	 * Use K_SEM_MAX_LIMIT so each peer-initiated stream gets its own
+	 * semaphore count.  A cap of 1 would silently discard wakeups when
+	 * multiple streams arrive in the same 0-RTT or coalesced packet,
+	 * causing quic_stream_accept() to block even though the FIFO is
+	 * non-empty.
+	 */
+	k_sem_init(&ctx->incoming.stream_sem, 0, K_SEM_MAX_LIMIT);
 
 	sys_slist_init(&ctx->endpoints);
 	sys_slist_init(&ctx->streams);
 
+	/* Contexts live in bss, so an unused slot reads back as fd 0. Mark it
+	 * invalid until a socket is assigned, otherwise an early teardown
+	 * closes fd 0.
+	 */
+	ctx->sock = -1;
 	ctx->error_code = 0;
 
 #if defined(CONFIG_NET_STATISTICS_QUIC)
@@ -4646,6 +5942,7 @@ static struct quic_stream *quic_stream_init(struct quic_stream *stream)
 	 */
 	k_condvar_init(&stream->cond.recv);
 	k_mutex_init(&stream->cond.data_available);
+	k_mutex_init(&stream->tx_lock);
 
 	/* The event is used when waiting for data to be received with timeout */
 	k_poll_signal_init(&stream->recv.signal);
@@ -4669,6 +5966,7 @@ static struct quic_stream *quic_stream_init(struct quic_stream *stream)
 	stream->remote_max_data = 16384;
 	stream->bytes_sent = 0;
 	stream->bytes_acked = 0;
+	stream->acked_ooo_count = 0;
 
 	/* RX flow control is initialized once the stream type is known. */
 	stream->local_max_data = 0;
@@ -4875,11 +6173,11 @@ static int tls_suite_to_quic_cipher(uint16_t cipher_suite)
 /*
  * Setup ciphers with explicit hash algorithm for handshake/application levels
  */
-static bool quic_setup_ciphers_ex(struct quic_ciphers *ciphers,
-				  psa_algorithm_t hash_alg,
-				  int cipher_algo,
-				  const uint8_t *secret,
-				  size_t secret_len)
+ZTESTABLE_STATIC bool quic_setup_ciphers_ex(struct quic_ciphers *ciphers,
+					    psa_algorithm_t hash_alg,
+					    int cipher_algo,
+					    const uint8_t *secret,
+					    size_t secret_len)
 {
 	if (!quic_hp_setup_ex(&ciphers->hp, hash_alg, cipher_algo,
 			      secret, secret_len)) {
@@ -4937,6 +6235,11 @@ static int quic_tls_secret_callback(void *user_data,
 				quic_log_tls_secret("CLIENT_TRAFFIC_SECRET_0",
 						    tls->client_random, tx_secret, secret_len);
 			}
+		} else if (level == QUIC_SECRET_LEVEL_EARLY) {
+			quic_log_tls_secret("CLIENT_EARLY_TRAFFIC_SECRET",
+					    tls->client_random,
+					    ep->is_server ? rx_secret : tx_secret,
+					    secret_len);
 		}
 	}
 
@@ -4970,6 +6273,9 @@ static int quic_tls_secret_callback(void *user_data,
 		break;
 	case QUIC_SECRET_LEVEL_APPLICATION:
 		crypto_ctx = &ep->crypto.application;
+		break;
+	case QUIC_SECRET_LEVEL_EARLY:
+		crypto_ctx = &ep->crypto.early;
 		break;
 	default:
 		NET_ERR("Invalid secret level: %d", level);
@@ -5011,9 +6317,125 @@ static int quic_tls_secret_callback(void *user_data,
 
 	crypto_ctx->initialized = true;
 
+	if (level == QUIC_SECRET_LEVEL_APPLICATION) {
+		struct quic_key_update *ku = &ep->crypto.ku;
+
+		/* Keep the generation 0 traffic secrets so later key
+		 * updates can derive the next generations (RFC 9001
+		 * Section 6). QUIC_HASH_MAX_LEN covers every negotiable
+		 * hash, so the length always fits.
+		 */
+		memcpy(ku->rx_secret, rx_secret, secret_len);
+		memcpy(ku->tx_secret, tx_secret, secret_len);
+		ku->secret_len = secret_len;
+		ku->hash_alg = hash_alg;
+		ku->cipher_algo = cipher_algo;
+		ku->rx_phase = 0U;
+		ku->tx_phase = 0U;
+		ku->rx_phase_first_pn = UINT64_MAX;
+		ku->tx_phase_first_pn = 0U;
+		ku->tx_phase_acked = false;
+		ku->prev_rx_pp.initialized = false;
+		ku->next_rx_pp.initialized = false;
+		ku->initialized = true;
+	}
+
 	NET_DBG("Crypto context for level %d initialized successfully", level);
 
 	return 0;
+}
+
+static int quic_client_endpoint_init_cids(struct quic_endpoint *ep,
+					  const struct net_sockaddr *remote_addr)
+{
+	size_t token_len;
+	int ret;
+
+	ep->peer_cid_len = 8;
+	ret = sys_csrand_get(ep->peer_cid, ep->peer_cid_len);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ep->my_cid_len = 8;
+	ret = sys_csrand_get(ep->my_cid, ep->my_cid_len);
+	if (ret != 0) {
+		return ret;
+	}
+	ep->token.client_initial_dcid_len = ep->peer_cid_len;
+	memcpy(ep->token.client_initial_dcid, ep->peer_cid, ep->peer_cid_len);
+
+	token_len = quic_token_cache_take(remote_addr, ep->token.initial,
+					  sizeof(ep->token.initial));
+	if (token_len > 0U) {
+		ep->token.initial_len = token_len;
+		ep->token.initial_type = QUIC_TOKEN_NEW;
+	}
+
+	return 0;
+}
+
+static bool quic_endpoint_on_active_context(const struct quic_endpoint *ep)
+{
+	for (int i = 0; i < ARRAY_SIZE(contexts); i++) {
+		struct quic_endpoint *endp, *tmp;
+
+		if (!quic_context_is_used(&contexts[i])) {
+			continue;
+		}
+
+		SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&contexts[i].endpoints, endp, tmp, node) {
+			if (endp == ep) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Drop client endpoints left behind when a connection context was closed
+ * without unlinking the endpoint (e.g. setsockopt failed before the endpoint
+ * was attached to the context list).
+ */
+static void quic_release_orphan_client_endpoints(const struct net_sockaddr *remote_addr)
+{
+	struct quic_endpoint *orphans[CONFIG_QUIC_MAX_ENDPOINTS] = { 0 };
+	int orphan_count = 0;
+
+	k_mutex_lock(&contexts_lock, K_FOREVER);
+	k_mutex_lock(&endpoints_lock, K_FOREVER);
+
+	ARRAY_FOR_EACH(endpoints, i) {
+		struct quic_endpoint *ep = endpoints[i];
+		struct quic_endpoint *matched;
+
+		if (ep == NULL || atomic_get(&ep->refcount) == 0 || ep->is_server ||
+		    ep->sock < 0) {
+			continue;
+		}
+
+		matched = find_endpoint(remote_addr, NULL, NULL, 0, NULL, 0);
+		if (matched != ep) {
+			continue;
+		}
+
+		if (quic_endpoint_on_active_context(ep)) {
+			continue;
+		}
+
+		orphans[orphan_count++] = ep;
+	}
+
+	k_mutex_unlock(&endpoints_lock);
+	k_mutex_unlock(&contexts_lock);
+
+	for (int i = 0; i < orphan_count; i++) {
+		while (atomic_get(&orphans[i]->refcount) > 0) {
+			quic_endpoint_unref(orphans[i]);
+		}
+	}
 }
 
 #include "quic_tls.c"
@@ -5062,6 +6484,103 @@ static int handle_handshake_packet(struct quic_endpoint *ep,
 	}
 
 	return ret;
+}
+
+static int handle_0rtt_packet(struct quic_endpoint *ep,
+			      const uint8_t *payload,
+			      size_t payload_len,
+			      size_t packet_len)
+{
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_QUIC_0RTT)) {
+		NET_DBG("[EP:%p/%d] Dropping 0-RTT packet while support is disabled",
+			ep, quic_get_by_ep(ep));
+		return 0;
+	}
+
+	if (ep->is_server && !ep->crypto.tls.early_data_accepted) {
+		NET_DBG("[EP:%p/%d] Ignoring 0-RTT packet before acceptance", ep,
+			quic_get_by_ep(ep));
+		return 0;
+	}
+
+	ret = handle_crypto_level_packet(ep, QUIC_SECRET_LEVEL_EARLY,
+					 payload, payload_len, packet_len, NULL);
+	if (ret >= 0) {
+		QUIC_EP_STAT_INC(ep, valid_rx);
+	} else {
+		QUIC_EP_STAT_INC(ep, invalid_packet);
+		QUIC_EP_STAT_INC(ep, drop_rx);
+	}
+
+	return ret;
+}
+
+ZTESTABLE_STATIC bool quic_early_data_is_armed(const struct quic_endpoint *ep)
+{
+	const struct quic_tls_context *tls;
+
+	if (!IS_ENABLED(CONFIG_QUIC_0RTT) || ep == NULL || ep->is_server ||
+	    ep->handshake.completed) {
+		return false;
+	}
+
+	tls = &ep->crypto.tls;
+
+	if (!tls->is_initialized || !tls->session_state_valid ||
+	    !tls->early_data_offered ||
+	    tls->early_data_rejected ||
+	    tls->session_state.max_early_data_size == 0U) {
+		return false;
+	}
+
+	return ep->crypto.early.initialized;
+}
+
+ZTESTABLE_STATIC int quic_mark_rejected_early_data(struct quic_endpoint *ep)
+{
+	struct quic_stream *stream;
+	int pn_space = level_to_pn_space(QUIC_SECRET_LEVEL_EARLY);
+
+	if (!IS_ENABLED(CONFIG_QUIC_0RTT)) {
+		return 0;
+	}
+
+	k_mutex_lock(&ep->recovery.lock, K_FOREVER);
+
+	for (int i = 0; i < CONFIG_QUIC_SENT_PKT_HISTORY_SIZE; i++) {
+		struct quic_sent_pkt_info *info = &ep->recovery.sent_pkts[pn_space][i];
+
+		if (info->level != QUIC_SECRET_LEVEL_EARLY) {
+			continue;
+		}
+
+		if (info->in_flight) {
+			ep->recovery.bytes_in_flight -= info->sent_bytes;
+			info->in_flight = false;
+		}
+
+		if (!info->has_stream_frame || !info->stream_fin) {
+			continue;
+		}
+
+		stream = quic_find_stream_by_id(ep, info->stream_id);
+		if (stream != NULL) {
+			stream->replay_fin_pending = true;
+		}
+	}
+
+	quic_reset_pto_timer_locked(ep);
+	k_mutex_unlock(&ep->recovery.lock);
+
+	return 0;
+}
+
+ZTESTABLE_STATIC enum quic_secret_level quic_stream_send_level(const struct quic_endpoint *ep)
+{
+	return quic_early_data_is_armed(ep) ? QUIC_SECRET_LEVEL_EARLY :
+					      QUIC_SECRET_LEVEL_APPLICATION;
 }
 
 /*
@@ -5138,18 +6657,24 @@ static int derive_application_secrets(struct quic_tls_context *ctx)
 				"Server app traffic secret:");
 	}
 
-	/* Notify QUIC layer of new secrets */
+	/* Notify QUIC layer of new secrets. Without the keys the connection
+	 * cannot be used, so a failure here must end the handshake.
+	 */
 	if (ctx->secret_cb != NULL) {
 		if (ctx->ep->is_server) {
-			ctx->secret_cb(ctx->user_data, QUIC_SECRET_LEVEL_APPLICATION,
-				       ctx->ks.client_ap_traffic_secret,
-				       ctx->ks.server_ap_traffic_secret,
-				       ctx->ks.hash_len);
+			ret = ctx->secret_cb(ctx->user_data, QUIC_SECRET_LEVEL_APPLICATION,
+					     ctx->ks.client_ap_traffic_secret,
+					     ctx->ks.server_ap_traffic_secret,
+					     ctx->ks.hash_len);
 		} else {
-			ctx->secret_cb(ctx->user_data, QUIC_SECRET_LEVEL_APPLICATION,
-				       ctx->ks.server_ap_traffic_secret,
-				       ctx->ks.client_ap_traffic_secret,
-				       ctx->ks.hash_len);
+			ret = ctx->secret_cb(ctx->user_data, QUIC_SECRET_LEVEL_APPLICATION,
+					     ctx->ks.server_ap_traffic_secret,
+					     ctx->ks.client_ap_traffic_secret,
+					     ctx->ks.hash_len);
+		}
+
+		if (ret != 0) {
+			return ret;
 		}
 	}
 
@@ -5280,6 +6805,42 @@ static int quic_endpoint_send_connection_close(struct quic_endpoint *ep,
 	return quic_endpoint_send_transport_close(ep, error_code, 0, reason);
 }
 
+#define QUIC_CHECK_RESUMED_TP_GE(field)							\
+	do {										\
+		if (ret == 0 && ep->peer_params.field < remembered->field) {		\
+			NET_ERR("[EP:%p/%d] Resumed transport parameter " #field	\
+				" shrank from %" PRIu64 " to %" PRIu64,			\
+				ep, quic_get_by_ep(ep), remembered->field,		\
+				ep->peer_params.field);					\
+			ret = -EPROTO;							\
+		}									\
+	} while (false)
+
+static int quic_validate_resumed_transport_params(struct quic_endpoint *ep)
+{
+	const struct quic_tls_context *tls = &ep->crypto.tls;
+	const struct quic_session_transport_params *remembered =
+		&tls->session_state.transport_params;
+	int ret = 0;
+
+	if (ep->is_server || !tls->session_state_valid || !remembered->valid ||
+	    !tls->early_data_accepted) {
+		goto out;
+	}
+
+	QUIC_CHECK_RESUMED_TP_GE(initial_max_data);
+	QUIC_CHECK_RESUMED_TP_GE(initial_max_stream_data_bidi_local);
+	QUIC_CHECK_RESUMED_TP_GE(initial_max_stream_data_bidi_remote);
+	QUIC_CHECK_RESUMED_TP_GE(initial_max_stream_data_uni);
+	QUIC_CHECK_RESUMED_TP_GE(initial_max_streams_bidi);
+	QUIC_CHECK_RESUMED_TP_GE(initial_max_streams_uni);
+
+#undef QUIC_CHECK_RESUMED_TP_GE
+
+out:
+	return ret;
+}
+
 /* Parse peer's transport parameters and initialize flow control */
 ZTESTABLE_STATIC int parse_peer_transport_params(struct quic_endpoint *ep)
 {
@@ -5402,13 +6963,11 @@ ZTESTABLE_STATIC int parse_peer_transport_params(struct quic_endpoint *ep)
 			break;
 		case QUIC_MAX_UDP_PAYLOAD_SIZE:
 			if (value >= 1200) {
-				/* Cap at our local estimated MTU limits (e.g. 1452)
-				 * or 1200 if PMTUD not supported
-				 */
-				ep->max_tx_payload_size = 1200;
+				ep->peer_params.max_udp_payload_size =
+					quic_clamp_udp_payload_size(value);
 			}
-			NET_DBG("  max_udp_payload_size: %" PRIu64 " (eff TX %u)",
-				value, ep->max_tx_payload_size);
+			NET_DBG("  max_udp_payload_size: %" PRIu64 " (peer cap %u)",
+				value, ep->peer_params.max_udp_payload_size);
 			break;
 		default:
 			NET_DBG("  param 0x%02" PRIx64 ": %" PRIu64 " (len=%" PRIu64 ")",
@@ -5430,7 +6989,16 @@ ZTESTABLE_STATIC int parse_peer_transport_params(struct quic_endpoint *ep)
 		}
 	}
 
+	ret = quic_validate_resumed_transport_params(ep);
+	if (ret != 0) {
+		return ret;
+	}
+
 	ep->peer_params.parsed = true;
+
+	k_mutex_lock(&ep->recovery.lock, K_FOREVER);
+	quic_dplpmtud_update_limit_locked(ep);
+	k_mutex_unlock(&ep->recovery.lock);
 
 	return 0;
 }
@@ -5445,6 +7013,8 @@ static void quic_connection_accept_enqueue(struct quic_endpoint *child_ep)
 	struct quic_context *listen_ctx;
 	struct quic_context *child_ctx;
 	struct quic_stream *stream, *tmp;
+	struct quic_stream *queued_streams[ARRAY_SIZE(streams)];
+	size_t queued_stream_count = 0U;
 
 	/* Only server child endpoints should be enqueued */
 	if (!child_ep->is_server || child_ep->parent == NULL) {
@@ -5475,12 +7045,19 @@ static void quic_connection_accept_enqueue(struct quic_endpoint *child_ep)
 	sys_slist_find_and_remove(&listen_ctx->endpoints, &child_ep->node);
 	sys_slist_prepend(&child_ctx->endpoints, &child_ep->node);
 
-	/* Migrate any pending streams to the new context as well. This
-	 * can happen if the connection accept queue has not been processed
-	 * fully yet and the streams were allocated to wrong connection context.
+	/* Migrate any pending streams to the new context as well. This can happen
+	 * if peer streams arrive before the accepted child socket is created.
+	 * Keep the original FIFO arrival order when those streams are later
+	 * delivered via accept(), so control streams are not reordered behind
+	 * request streams.
+	 *
+	 * Do NOT pre-allocate file descriptors here.  fd allocation is the
+	 * exclusive responsibility of quic_stream_accept(); doing it here
+	 * would cause a double-allocation (and fd leak) when quic_stream_accept()
+	 * subsequently allocates another fd for the same stream.
 	 */
 	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&listen_ctx->streams, stream, tmp, node) {
-		if (stream->conn != listen_ctx) {
+		if (stream->conn != listen_ctx || stream->ep != child_ep) {
 			continue;
 		}
 
@@ -5495,55 +7072,37 @@ static void quic_connection_accept_enqueue(struct quic_endpoint *child_ep)
 
 		stream->conn = child_ctx;
 		stream->ep = child_ep;
+	}
 
-		/* Remove stream from listen_ctx pending accept queue if it's there,
-		 * since it should now be delivered to the new child_ctx accept queue.
-		 */
-		do {
-			struct quic_stream *st = k_fifo_get(&listen_ctx->incoming.stream_q,
-							    K_NO_WAIT);
-
-			if (st == stream) {
-				/* Found the stream, don't put it back */
-				break;
-			} else if (st == NULL) {
-				/* No more streams in the queue */
-				break;
-			}
-
-			/* Not the stream we're looking for, put it back and keep looking */
-			k_fifo_put(&listen_ctx->incoming.stream_q, st);
-		} while (true);
-
-		/* Reparent only already-instantiated stream sockets.
-		 * Peer-created streams normally get their fd later in accept().
-		 */
-		if (stream->sock >= 0) {
-			zvfs_free_fd(stream->sock);
-			(void)sock_obj_core_dealloc(stream->sock);
-
-			stream->sock = zvfs_reserve_fd();
-			if (stream->sock < 0) {
-				NET_ERR("[EP:%p/%d] Failed to reserve fd for stream %p/%d: %d",
-					child_ep, quic_get_by_ep(child_ep),
-					stream, quic_get_by_stream(stream),
-					stream->sock);
-				quic_stream_unref(stream);
-				break;
-			}
-
-			zvfs_finalize_typed_fd(stream->sock, stream,
-					       (const struct fd_op_vtable *)
-					       &quic_stream_fd_op_vtable,
-					       ZVFS_MODE_IFSOCK);
-
-			(void)sock_obj_core_alloc_find(child_ctx->sock, stream->sock,
-						       NET_SOCK_STREAM);
+	while (queued_stream_count < ARRAY_SIZE(queued_streams)) {
+		stream = k_fifo_get(&listen_ctx->incoming.stream_q, K_NO_WAIT);
+		if (stream == NULL) {
+			break;
 		}
 
-		/* Queue for accept() call */
-		k_fifo_put(&child_ctx->incoming.stream_q, stream);
-		k_sem_give(&child_ctx->incoming.stream_sem);
+		queued_streams[queued_stream_count++] = stream;
+	}
+
+	k_sem_reset(&listen_ctx->incoming.stream_sem);
+
+	for (size_t i = 0U; i < queued_stream_count; i++) {
+		stream = queued_streams[i];
+
+		if (stream->ep == child_ep) {
+			if (stream->conn == listen_ctx) {
+				sys_slist_find_and_remove(&listen_ctx->streams, &stream->node);
+				sys_slist_prepend(&child_ctx->streams, &stream->node);
+
+				stream->conn = child_ctx;
+				stream->ep = child_ep;
+			}
+
+			k_fifo_put(&child_ctx->incoming.stream_q, stream);
+			k_sem_give(&child_ctx->incoming.stream_sem);
+		} else {
+			k_fifo_put(&listen_ctx->incoming.stream_q, stream);
+			k_sem_give(&listen_ctx->incoming.stream_sem);
+		}
 	}
 
 	k_mutex_unlock(&endpoints_lock);
@@ -5600,8 +7159,19 @@ static int quic_handshake_complete(struct quic_endpoint *ep)
 		return ret;
 	}
 
-	/* Send HANDSHAKE_DONE frame (only server sends this) */
+	ret = quic_tls_note_handshake_complete(tls);
+	if (ret != 0) {
+		NET_ERR("Failed to finalize TLS resumption state");
+		return ret;
+	}
+
+	/* Send HANDSHAKE_DONE frame (only server sends this). The server
+	 * confirms the handshake as soon as it completes (RFC 9001
+	 * Section 4.1.2).
+	 */
 	if (ep->is_server) {
+		ep->handshake_confirmed = true;
+
 		ret = quic_send_handshake_done(ep);
 		if (ret != 0) {
 			NET_ERR("Failed to send HANDSHAKE_DONE");
@@ -5613,12 +7183,58 @@ static int quic_handshake_complete(struct quic_endpoint *ep)
 			NET_WARN("[EP:%p/%d] Failed to send NEW_TOKEN (%d)",
 				 ep, quic_get_by_ep(ep), ret);
 		}
+
+		if (tls->issue_session_tickets) {
+			ret = quic_tls_send_new_session_ticket(tls);
+			if (ret != 0 && ret != -ENOTSUP) {
+				NET_WARN("[EP:%p/%d] Failed to send NewSessionTicket (%d)",
+					 ep, quic_get_by_ep(ep), ret);
+			}
+		}
 	}
 
 	quic_recovery_discard_pn_space(ep, level_to_pn_space(QUIC_SECRET_LEVEL_INITIAL));
 	quic_recovery_discard_pn_space(ep, level_to_pn_space(QUIC_SECRET_LEVEL_HANDSHAKE));
 
+	if (ep->handshake_confirmed) {
+		/* RFC 9001 ch. 4.9.2: the server has confirmed the handshake
+		 * and has no further use for the Handshake keys. The client
+		 * does the same when it receives HANDSHAKE_DONE.
+		 */
+		quic_endpoint_discard_keys(ep, QUIC_SECRET_LEVEL_HANDSHAKE);
+	}
+
 	quic_endpoint_handshake_complete(ep);
+
+	if (IS_ENABLED(CONFIG_QUIC_0RTT) && !ep->is_server &&
+	    tls->early_data_rejected) {
+		ret = quic_mark_rejected_early_data(ep);
+		if (ret != 0) {
+			return ret;
+		}
+
+		ret = quic_prepare_rejected_early_data_replay(ep);
+		if (ret != 0) {
+			return ret;
+		}
+
+		ret = quic_replay_rejected_early_data(ep);
+		if (ret != 0) {
+			return ret;
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_QUIC_0RTT) && ep->crypto.early.initialized) {
+		/* RFC 9001 4.9.3: discard 0-RTT keys once the handshake is
+		 * complete. The client no longer needs them now that 1-RTT keys
+		 * are installed, and the server must not retain them beyond a
+		 * short time; any later-reordered 0-RTT packet is dropped and its
+		 * data retransmitted under 1-RTT.
+		 */
+		quic_crypto_context_destroy(&ep->crypto.early);
+	}
+
+	(void)quic_dplpmtud_maybe_probe(ep);
 
 	NET_DBG("[EP:%p/%d] QUIC handshake complete", ep, quic_get_by_ep(ep));
 
@@ -5999,10 +7615,25 @@ ZTESTABLE_STATIC int quic_stream_receive_data(struct quic_stream *stream,
 				continue;
 			}
 
-			/* This segment is now in order, so deliver it */
+			/* This segment is now in order, so deliver it.
+			 * Do not truncate OOO segments: if it does not fit yet,
+			 * keep it queued and retry after more data is consumed.
+			 */
 			avail = buf->size - buf->tail;
-			copy  = MIN((size_t)seg->len, avail);
+			if ((size_t)seg->len > avail && buf->head > 0U) {
+				size_t unread = buf->tail - buf->head;
 
+				memmove(buf->data, &buf->data[buf->head], unread);
+				buf->tail = unread;
+				buf->head = 0U;
+				avail = buf->size - buf->tail;
+			}
+
+			if ((size_t)seg->len > avail) {
+				continue;
+			}
+
+			copy = (size_t)seg->len;
 			memcpy(&buf->data[buf->tail], seg->data, copy);
 			buf->tail += copy;
 
@@ -6058,9 +7689,9 @@ ooo_flow_control_error:
 /*
  * Find an existing stream by ID
  */
-static struct quic_stream *quic_find_stream(struct quic_context *ctx,
-					    struct quic_endpoint *ep,
-					    uint64_t stream_id)
+ZTESTABLE_STATIC struct quic_stream *quic_find_stream(struct quic_context *ctx,
+						      struct quic_endpoint *ep,
+						      uint64_t stream_id)
 {
 	struct quic_stream *stream, *tmp, *found = NULL;
 
@@ -6068,8 +7699,14 @@ static struct quic_stream *quic_find_stream(struct quic_context *ctx,
 	k_mutex_lock(&contexts_lock, K_FOREVER);
 
 	SYS_SLIST_FOR_EACH_CONTAINER_SAFE(&ctx->streams, stream, tmp, node) {
-		/* Stream found, verify it belongs to this connection */
-		if (stream->id == stream_id && stream->conn == ctx) {
+		/* A stream ID is only unique within one connection. The
+		 * streams of all connections that are not accepted yet are
+		 * kept in the listening context, so the endpoint has to
+		 * match too, or data would be delivered to a stream of
+		 * another peer that happens to use the same ID.
+		 */
+		if (stream->id == stream_id && stream->conn == ctx &&
+		    stream->ep == ep) {
 			found = stream;
 			break;
 		}
@@ -6161,6 +7798,7 @@ static struct quic_stream *quic_create_stream_from_peer(struct quic_context *ctx
 
 	stream->tx_buf.base_offset = 0;
 	stream->tx_buf.len = 0;
+	stream->acked_ooo_count = 0;
 
 	quic_stats_update_stream_opened();
 
@@ -6173,6 +7811,92 @@ static struct quic_stream *quic_create_stream_from_peer(struct quic_context *ctx
 
 	return stream;
 }
+
+#if defined(CONFIG_QUIC_0RTT)
+static int quic_buffer_deferred_0rtt_packet(struct quic_pkt *pkt)
+{
+	struct quic_endpoint *ep = pkt->ep;
+	struct quic_deferred_0rtt_packet *deferred;
+
+	if (!ep->is_server) {
+		return -EINVAL;
+	}
+
+	if (ep->deferred_0rtt.count >= ARRAY_SIZE(ep->deferred_0rtt.packets)) {
+		return -ENOBUFS;
+	}
+
+	deferred = &ep->deferred_0rtt.packets[ep->deferred_0rtt.count++];
+	deferred->len = pkt->len;
+	deferred->total_len = pkt->total_len;
+	deferred->pn_offset = pkt->pn_offset;
+	memcpy(deferred->data, pkt->data, pkt->total_len);
+
+	return 0;
+}
+
+static int quic_flush_deferred_0rtt_packets(struct quic_endpoint *ep)
+{
+	struct quic_crypto_context *crypto_ctx;
+
+	if (!ep->is_server || ep->deferred_0rtt.count == 0U) {
+		return 0;
+	}
+
+	if (!ep->crypto.tls.early_data_accepted) {
+		if (ep->crypto.tls.early_data_rejected || ep->handshake.completed) {
+			ep->deferred_0rtt.count = 0U;
+		}
+
+		return 0;
+	}
+
+	crypto_ctx = quic_get_crypto_context_by_level(ep, QUIC_SECRET_LEVEL_EARLY);
+	if (crypto_ctx == NULL || !crypto_ctx->initialized) {
+		return 0;
+	}
+
+	while (ep->deferred_0rtt.count > 0U) {
+		struct quic_deferred_0rtt_packet *deferred = &ep->deferred_0rtt.packets[0];
+		struct quic_pkt *pkt;
+
+		pkt = quic_pkt_alloc(&quic_pkts, K_MSEC(CONFIG_QUIC_PKT_ALLOC_TIMEOUT));
+		if (pkt == NULL) {
+			return -ENOMEM;
+		}
+
+		pkt->ep = ep;
+		pkt->old_ep = ep->parent;
+		pkt->ptype = QUIC_PACKET_TYPE_0RTT;
+		pkt->htype = QUIC_HEADER_TYPE_LONG;
+		pkt->pn_offset = deferred->pn_offset;
+		pkt->pos = 0U;
+		pkt->len = deferred->len;
+		pkt->total_len = deferred->total_len;
+		memcpy(pkt->data, deferred->data, deferred->total_len);
+
+		quic_endpoint_ref(pkt->ep);
+		k_fifo_put(&quic_queue, pkt);
+
+		ep->deferred_0rtt.count--;
+		if (ep->deferred_0rtt.count > 0U) {
+			memmove(&ep->deferred_0rtt.packets[0],
+				&ep->deferred_0rtt.packets[1],
+				ep->deferred_0rtt.count *
+					sizeof(ep->deferred_0rtt.packets[0]));
+		}
+	}
+
+	return 0;
+}
+#else
+static int quic_flush_deferred_0rtt_packets(struct quic_endpoint *ep)
+{
+	ARG_UNUSED(ep);
+
+	return 0;
+}
+#endif /* CONFIG_QUIC_0RTT */
 
 static void process_pkt(struct quic_pkt *pkt)
 {
@@ -6203,6 +7927,15 @@ static void process_pkt(struct quic_pkt *pkt)
 			quic_endpoint_unref(pkt->ep);
 		}
 
+		if (ret == 0) {
+			int flush_ret = quic_flush_deferred_0rtt_packets(pkt->ep);
+
+			if (flush_ret < 0) {
+				NET_WARN("[EP:%p/%d] Failed to flush deferred 0-RTT packets (%d)",
+					 pkt->ep, quic_get_by_ep(pkt->ep), flush_ret);
+			}
+		}
+
 		break;
 
 	case QUIC_PACKET_TYPE_HANDSHAKE:
@@ -6231,10 +7964,33 @@ static void process_pkt(struct quic_pkt *pkt)
 			quic_endpoint_unref(pkt->ep);
 		}
 
+		if (ret == 0) {
+			int flush_ret = quic_flush_deferred_0rtt_packets(pkt->ep);
+
+			if (flush_ret < 0) {
+				NET_WARN("[EP:%p/%d] Failed to flush deferred 0-RTT packets (%d)",
+					 pkt->ep, quic_get_by_ep(pkt->ep), flush_ret);
+			}
+		}
+
 		break;
 
 	case QUIC_PACKET_TYPE_0RTT:
-		/* TODO: Handle 0-RTT */
+		ret = handle_0rtt_packet(pkt->ep,
+					 pkt->data,
+					 pkt->len,
+					 pkt->total_len);
+		if (ret < 0) {
+			NET_DBG("[EP:%p/%d] %s packet handling failure (%d)",
+				pkt->ep, quic_get_by_ep(pkt->ep), "0-RTT", ret);
+			if (!pkt->ep->handshake.completed) {
+				quic_endpoint_notify_streams_closed(pkt->ep);
+			}
+		} else if (ret == 1) {
+			NET_DBG("[EP:%p/%d] Connection closing after %s packet",
+				pkt->ep, quic_get_by_ep(pkt->ep), "0-RTT");
+			quic_endpoint_unref(pkt->ep);
+		}
 		break;
 
 	case QUIC_PACKET_TYPE_1RTT:
@@ -6267,6 +8023,21 @@ static void process_pkt(struct quic_pkt *pkt)
 /* This is called by Quic handler thread and it will decrypt the header and process
  * the packet further.
  */
+/*
+ * Restart the idle timer of an endpoint for a packet that was received and
+ * authenticated (RFC 9000 ch. 10.1). It must be the endpoint the packet is
+ * for, not the one that owns the UDP socket, which a server shares between
+ * all of its connections. And it must not be done for a packet that failed
+ * to decrypt, or anyone who knows the addresses and the connection ID could
+ * keep the connection from ever timing out.
+ */
+static void quic_endpoint_restart_idle_timer(struct quic_endpoint *ep)
+{
+	if (!ep->idle.idle_timeout_disabled) {
+		ep->idle.last_rx_time = k_uptime_get();
+	}
+}
+
 static bool process_long_header_msg(struct quic_pkt *pkt)
 {
 	enum quic_packet_type ptype = pkt->ptype;
@@ -6288,6 +8059,18 @@ static bool process_long_header_msg(struct quic_pkt *pkt)
 
 	if (IS_ENABLED(CONFIG_QUIC_TXRX_DEBUG)) {
 		NET_HEXDUMP_DBG(buf, pkt->total_len, "Msg:");
+	}
+
+	if ((ptype == QUIC_PACKET_TYPE_INITIAL && ep->crypto.initial.discarded) ||
+	    (ptype == QUIC_PACKET_TYPE_HANDSHAKE && ep->crypto.handshake.discarded)) {
+		/* The keys of this level are gone (RFC 9001 ch. 4.9). A late
+		 * or retransmitted packet cannot be read any more and is of
+		 * no use, drop it and leave the connection alone.
+		 */
+		NET_DBG("[EP:%p/%d] Dropping packet for a discarded key level",
+			ep, quic_get_by_ep(ep));
+		QUIC_EP_STAT_INC(ep, drop_rx);
+		goto fail;
 	}
 
 	if (ptype == QUIC_PACKET_TYPE_INITIAL) {
@@ -6328,6 +8111,40 @@ static bool process_long_header_msg(struct quic_pkt *pkt)
 		goto fail;
 	}
 
+#if defined(CONFIG_QUIC_0RTT)
+	if (ptype == QUIC_PACKET_TYPE_0RTT) {
+		struct quic_crypto_context *crypto_ctx;
+
+		crypto_ctx = quic_get_crypto_context_by_level(ep, QUIC_SECRET_LEVEL_EARLY);
+		if (crypto_ctx == NULL || !crypto_ctx->initialized) {
+			/* Before the handshake completes, hold the packet until the
+			 * early keys are installed. Afterwards the 0-RTT keys have
+			 * been discarded (RFC 9001 4.9.3), so drop any late or
+			 * reordered 0-RTT packet; its data is retransmitted at 1-RTT.
+			 */
+			if (ep->handshake.completed) {
+				NET_DBG("[EP:%p/%d] Dropping 0-RTT packet after handshake",
+					ep, quic_get_by_ep(ep));
+				QUIC_EP_STAT_INC(ep, drop_rx);
+				goto fail;
+			}
+
+			ret = quic_buffer_deferred_0rtt_packet(pkt);
+			if (ret < 0) {
+				NET_DBG("[EP:%p/%d] Failed to defer 0-RTT packet (%d)",
+					ep, quic_get_by_ep(ep), ret);
+				QUIC_EP_STAT_INC(ep, alloc_failed);
+				QUIC_EP_STAT_INC(ep, drop_rx);
+				goto fail;
+			}
+
+			NET_DBG("[EP:%p/%d] Deferred 0-RTT packet until early keys are ready",
+				ep, quic_get_by_ep(ep));
+			return false;
+		}
+	}
+#endif /* CONFIG_QUIC_0RTT */
+
 	/*
 	 * Decrypt the complete packet:
 	 * 1. Remove header protection
@@ -6344,13 +8161,32 @@ static bool process_long_header_msg(struct quic_pkt *pkt)
 	if (ret != 0) {
 		NET_DBG("[EP:%p/%d] Packet decryption failed (%d)", ep,
 			quic_get_by_ep(ep), ret);
+
+		if ((ptype == QUIC_PACKET_TYPE_INITIAL && ep->crypto.initial.discarded) ||
+		    (ptype == QUIC_PACKET_TYPE_HANDSHAKE && ep->crypto.handshake.discarded)) {
+			/* The keys were discarded while this packet was being
+			 * handled, which is not an error of the connection.
+			 */
+			goto fail;
+		}
+
 		goto free_ep;
 	}
+
+	quic_endpoint_restart_idle_timer(ep);
 
 	pkt->pkt_num = decrypted.packet_number;
 
 	if (ptype == QUIC_PACKET_TYPE_HANDSHAKE) {
 		quic_endpoint_validate_address(ep);
+
+		if (ep->is_server && !ep->crypto.initial.discarded) {
+			/* RFC 9001 ch. 4.9.1: a server discards the Initial
+			 * keys when it first successfully processes a
+			 * Handshake packet.
+			 */
+			quic_endpoint_discard_keys(ep, QUIC_SECRET_LEVEL_INITIAL);
+		}
 	}
 
 	NET_DBG("[EP:%p/%d] Decrypted packet %" PRIu64 ", payload %zu bytes", ep,
@@ -6361,7 +8197,7 @@ static bool process_long_header_msg(struct quic_pkt *pkt)
 				"Decrypted payload:");
 	}
 
-	if (!ep->crypto.initial.initialized) {
+	if (!ep->crypto.initial.initialized && !ep->crypto.initial.discarded) {
 		if (!quic_conn_init_setup(ep, ep->peer_orig_dcid,
 					  ep->peer_orig_dcid_len)) {
 			NET_ERR("[EP:%p/%d] Failed to setup Initial crypto for new endpoint",
@@ -6449,6 +8285,8 @@ static bool process_short_header_msg(struct quic_pkt *pkt)
 		NET_ERR("Failed to decrypt short header packet: %d", ret);
 		return false;
 	}
+
+	quic_endpoint_restart_idle_timer(ep);
 
 	NET_DBG("[EP:%p/%d] Decrypted short header packet %" PRIu64 ", payload %zu bytes",
 		ep, quic_get_by_ep(ep), decrypted.packet_number, decrypted.payload_len);
@@ -6630,7 +8468,12 @@ static int quic_send_retry(struct quic_endpoint *ep,
 		return ret;
 	}
 
-	sys_rand_get(retry_scid, sizeof(retry_scid));
+	ret = sys_csrand_get(retry_scid, sizeof(retry_scid));
+	if (ret != 0) {
+		QUIC_EP_STAT_INC(ep, drop_tx);
+		return ret;
+	}
+
 	sys_rand_get(&first_byte, sizeof(first_byte));
 
 	packet[pos++] = QUIC_LONG_HEADER_RETRY | (first_byte & 0x0f);
@@ -6761,6 +8604,7 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 	uint8_t src_conn_id[MAX_CONN_ID_LEN];
 	uint8_t my_cid[MAX_CONN_ID_LEN];
 	struct quic_endpoint *existing_ep;
+	struct quic_endpoint *looked_up;
 	struct quic_pkt *pkt;
 	enum quic_packet_type ptype;
 	int dst_conn_id_len;
@@ -6800,6 +8644,17 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 		NET_DBG("[EP:%p/%d] Unsupported QUIC version: 0x%08x",
 			ep, quic_get_by_ep(ep), info->version);
 
+		/* RFC 9000 Section 6.1: do not answer a datagram smaller than
+		 * the minimum Initial size. Replying to a tiny datagram makes
+		 * this a free packet generator aimed at any spoofed address.
+		 */
+		if (datagram_len < MAX_QUIC_MIN_INITIAL_SIZE) {
+			NET_DBG("[EP:%p/%d] Not sending Version Negotiation for a "
+				"%zu byte datagram", ep, quic_get_by_ep(ep), datagram_len);
+			QUIC_EP_STAT_INC(ep, drop_rx);
+			return 1;
+		}
+
 		if (quic_send_version_negotiation(ep, addr, addrlen,
 						  src_conn_id, src_conn_id_len,
 						  dst_conn_id, dst_conn_id_len) < 0) {
@@ -6822,30 +8677,57 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 	/* All the crypto stuff is done in a separate thread.
 	 * We next find the correct endpoint and pass the data to it.
 	 */
-	existing_ep = quic_endpoint_lookup(addr, net_sad(&ep->local_addr),
-					   src_conn_id, src_conn_id_len,
-					   dst_conn_id, dst_conn_id_len);
+	/* The lookup returns the endpoint with a reference held. It is tracked
+	 * in looked_up and released at the out label; existing_ep may be
+	 * reassigned to a freshly created endpoint below, which carries its
+	 * own reference, so the two must not be conflated.
+	 */
+	looked_up = quic_endpoint_lookup(addr, net_sad(&ep->local_addr),
+					 src_conn_id, src_conn_id_len,
+					 dst_conn_id, dst_conn_id_len);
+	existing_ep = looked_up;
 	if (ptype == QUIC_PACKET_TYPE_RETRY) {
 		if (existing_ep == NULL || existing_ep->is_server) {
-			return 1;
+			ret = 1;
+			goto out;
 		}
 
 		ret = quic_client_handle_retry(existing_ep, info);
 		if (ret != 0) {
 			QUIC_EP_STAT_INC(existing_ep, invalid_packet);
 			QUIC_EP_STAT_INC(existing_ep, drop_rx);
-			return ret;
+			goto out;
 		}
 
 		QUIC_EP_STAT_INC(existing_ep, handshake_resp_rx);
 
-		return 1;
+		ret = 1;
+		goto out;
 	}
 
 	if (existing_ep == NULL) {
 		struct quic_token_validation validation;
 		struct quic_endpoint *new_ep;
 		bool token_validated = false;
+
+		/* Only an Initial packet starts a connection, and the address
+		 * validation and the datagram size check below are applied to
+		 * Initial packets only. Any other long header packet that
+		 * matches no connection is dropped (RFC 9000 ch. 5.2.2):
+		 * creating an endpoint for it would let anyone fill the
+		 * endpoint table with packets that pass none of those checks.
+		 * 0-RTT packets that arrive ahead of their Initial packet are
+		 * not buffered, the client sends that data again.
+		 */
+		if (ptype != QUIC_PACKET_TYPE_INITIAL) {
+			NET_DBG("[EP:%p/%d] Dropping long header packet type %d "
+				"for an unknown connection",
+				ep, quic_get_by_ep(ep), ptype);
+			QUIC_EP_STAT_INC(ep, peer_not_found);
+			QUIC_EP_STAT_INC(ep, drop_rx);
+			ret = 1;
+			goto out;
+		}
 
 		/* Make sure that the initial packet's UDP datagram is at least
 		 * 1200 bytes long (RFC 9000 Section 14.1) to prevent
@@ -6856,7 +8738,8 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 				ep, quic_get_by_ep(ep), datagram_len);
 			QUIC_EP_STAT_INC(ep, invalid_packet_len);
 			QUIC_EP_STAT_INC(ep, drop_rx);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out;
 		}
 
 		if (ptype == QUIC_PACKET_TYPE_INITIAL && ep->is_server) {
@@ -6868,7 +8751,8 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 							 ep, quic_get_by_ep(ep), ret);
 					}
 
-					return 1;
+					ret = 1;
+					goto out;
 				}
 			} else {
 				ret = validate_address_token(ep, addr, addrlen,
@@ -6879,7 +8763,7 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 						QUIC_EP_STAT_INC(ep, drop_rx);
 					}
 
-					return ret;
+					goto out;
 				}
 
 				token_validated = true;
@@ -6896,7 +8780,11 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 			memcpy(my_cid, dst_conn_id, my_cid_len);
 		} else {
 			my_cid_len = MAX_MY_CONN_ID_LEN;
-			sys_rand_get(my_cid, my_cid_len);
+			ret = sys_csrand_get(my_cid, my_cid_len);
+			if (ret != 0) {
+				QUIC_EP_STAT_INC(ep, drop_rx);
+				goto out;
+			}
 		}
 
 		NET_HEXDUMP_DBG(my_cid, my_cid_len, "Recipient generated CID:");
@@ -6909,7 +8797,8 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 				ep, quic_get_by_ep(ep));
 			QUIC_EP_STAT_INC(ep, alloc_failed);
 			QUIC_EP_STAT_INC(ep, drop_rx);
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto out;
 		}
 
 		/* Save the original DCID as it is used during handshake process */
@@ -6974,12 +8863,8 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 			sizeof(((struct quic_pkt *)0)->data));
 		QUIC_EP_STAT_INC(existing_ep, invalid_packet_len);
 		QUIC_EP_STAT_INC(existing_ep, drop_rx);
-		return -ENOBUFS;
-	}
-
-	/* Update idle timer on ANY received packet */
-	if (!existing_ep->idle.idle_timeout_disabled) {
-		existing_ep->idle.last_rx_time = k_uptime_get();
+		ret = -ENOBUFS;
+		goto out;
 	}
 
 	/*
@@ -6990,7 +8875,8 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 		NET_DBG("Cannot allocate QUIC packet");
 		QUIC_EP_STAT_INC(existing_ep, alloc_failed);
 		QUIC_EP_STAT_INC(existing_ep, drop_rx);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out;
 	}
 
 	pkt->ep = existing_ep;
@@ -7003,6 +8889,9 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 	pkt->total_len = info->total_len;
 	memcpy(pkt->data, info->packet, info->total_len);
 
+	/* The queued packet needs its own reference; the lookup reference, if
+	 * any, is released through the out label below.
+	 */
 	quic_endpoint_ref(pkt->ep);
 
 	/* Quic thread will process the packet further like decrypt it etc */
@@ -7014,7 +8903,17 @@ ZTESTABLE_STATIC int process_long_header(struct quic_endpoint *ep,
 	/* Let also the QUIC service thread run to process the packets */
 	k_yield();
 
-	return 0;
+	ret = 0;
+out:
+	/* Release the reference the lookup took, if it found an endpoint. A
+	 * newly created endpoint is tracked separately and is not released
+	 * here.
+	 */
+	if (looked_up != NULL) {
+		quic_endpoint_unref(looked_up);
+	}
+
+	return ret;
 }
 
 static int process_short_header(struct quic_endpoint *ep,
@@ -7086,21 +8985,26 @@ static int process_short_header(struct quic_endpoint *ep,
 
 	dcid = &buf[1];
 
-	/* Look up the endpoint by DCID (which is our my_cid) */
+	/* Look up the endpoint by DCID (which is our my_cid). The lookup
+	 * returns the endpoint with a reference held, released via the out
+	 * label below on every path from here on.
+	 */
 	target_ep = quic_endpoint_lookup(addr, NULL, NULL, 0, dcid, dcid_len);
-	if (target_ep == NULL || target_ep->sock == -1) {
+	if (target_ep == NULL) {
 		NET_DBG("No endpoint found for short header DCID");
 		QUIC_EP_STAT_INC(ep, peer_not_found);
 		QUIC_EP_STAT_INC(ep, drop_rx);
 		return 0; /* Silently ignore, might be for unknown connection */
 	}
+	if (target_ep->sock == -1) {
+		NET_DBG("No endpoint found for short header DCID");
+		QUIC_EP_STAT_INC(ep, peer_not_found);
+		QUIC_EP_STAT_INC(ep, drop_rx);
+		ret = 0; /* Silently ignore, might be for unknown connection */
+		goto out;
+	}
 
 	quic_endpoint_note_unvalidated_rx(target_ep, len);
-
-	/* Update idle timer on ANY received packet */
-	if (!ep->idle.idle_timeout_disabled) {
-		ep->idle.last_rx_time = k_uptime_get();
-	}
 
 	pn_offset = 1 + target_ep->my_cid_len;
 
@@ -7125,8 +9029,8 @@ static int process_short_header(struct quic_endpoint *ep,
 			NET_DBG("Cannot allocate QUIC packet for short header");
 			QUIC_EP_STAT_INC(target_ep, alloc_failed);
 			QUIC_EP_STAT_INC(target_ep, drop_rx);
-			quic_endpoint_unref(target_ep);
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto out;
 		}
 
 		pkt->ep = target_ep;
@@ -7139,33 +9043,46 @@ static int process_short_header(struct quic_endpoint *ep,
 		pkt->total_len = len;
 		memcpy(pkt->data, buf, len);
 
+		/* The queued packet needs its own reference; the lookup
+		 * reference is released through the out label below.
+		 */
 		quic_endpoint_ref(pkt->ep);
 
 		k_fifo_put(&quic_queue, pkt);
 		k_yield();
 
-		/* We don't unref, the packet struct holds the ref now */
-		return 0;
+		ret = 0;
+		goto out;
 	}
 
-	/* Decrypt the packet, use value > 3 to get application (1-RTT) crypto context */
+	/* Decrypt the packet, use value > 3 to get application (1-RTT) crypto
+	 * context. The lookup reference keeps the endpoint alive across the
+	 * decryption and frame handling below.
+	 */
 	ret = quic_decrypt_packet(target_ep, buf, len, pn_offset,
 				  QUIC_PACKET_TYPE_1RTT,
 				  plaintext, sizeof(plaintext),
 				  &decrypted);
 	if (ret != 0) {
+		if (ret == -EPROTO) {
+			/* Peer flipped the key phase before the handshake was
+			 * confirmed (RFC 9001 Section 6.1). Terminate the
+			 * connection instead of rotating keys.
+			 */
+			quic_endpoint_send_transport_close(
+				target_ep, QUIC_ERROR_KEY_UPDATE_ERROR, 0,
+				"Key update before handshake confirmed");
+		}
 		NET_ERR("[EP:%p/%d] Failed to decrypt short header packet: %d",
 			target_ep, quic_get_by_ep(target_ep), ret);
-		quic_endpoint_unref(target_ep);
-		return ret;
+		goto out;
 	}
+
+	quic_endpoint_restart_idle_timer(target_ep);
 
 	NET_DBG("[EP:%p/%d] Short header packet %" PRIu64 ", payload %zu bytes",
 		target_ep, quic_get_by_ep(target_ep), decrypted.packet_number,
 		decrypted.payload_len);
-
-	/* Keep endpoint alive for the duration of crypto API call */
-	quic_endpoint_ref(target_ep);
 
 	/* Process frames at APPLICATION level */
 	ret = handle_crypto_level_packet(target_ep, QUIC_SECRET_LEVEL_APPLICATION,
@@ -7176,7 +9093,6 @@ static int process_short_header(struct quic_endpoint *ep,
 		NET_DBG("Short header packet handling failure (%d)", ret);
 		QUIC_EP_STAT_INC(target_ep, drop_rx);
 		quic_endpoint_notify_streams_closed(target_ep);
-		quic_endpoint_unref(target_ep);
 		goto out;
 	} else if (ret > 0) {
 		QUIC_EP_STAT_INC(target_ep, valid_rx);
@@ -7187,7 +9103,6 @@ static int process_short_header(struct quic_endpoint *ep,
 		quic_send_ack(target_ep, QUIC_SECRET_LEVEL_APPLICATION,
 			      decrypted.packet_number);
 		quic_endpoint_notify_streams_closed(target_ep);
-		quic_endpoint_unref(target_ep);
 		ret = 0;
 		goto out;
 	}
@@ -7216,7 +9131,7 @@ static int process_short_header(struct quic_endpoint *ep,
 
 	ret = 0;
 out:
-	/* Release our ref we took before the crypto call */
+	/* Release the reference the lookup took for us. */
 	quic_endpoint_unref(target_ep);
 
 	return ret;
@@ -7256,7 +9171,7 @@ ZTESTABLE_STATIC int quic_parse_long_header(struct quic_long_header_info *info,
 
 	info->dst_conn_id = &data[pos];
 	pos += info->dst_conn_id_len;
-	if (pos > data_len) {
+	if (pos >= data_len) {
 		return -EINVAL;
 	}
 
@@ -7461,12 +9376,17 @@ static void receive_data(int sock, struct quic_endpoint *ep_hint)
 
 	/* The ep_hint from socket service user_data may not be correct if multiple
 	 * endpoints share the same socket service. Look up the endpoint by socket.
+	 * Both sources hand back a borrowed pointer, so take a reference that is
+	 * released on every path below; find_endpoint_by_sock() already did so for
+	 * the endpoint it returned.
 	 */
 	ep = find_endpoint_by_sock(sock);
 	if (ep == NULL) {
-		/* Fallback to hint if lookup fails */
+		/* Fall back to the hint, pinning it too, or give up if it is
+		 * already being torn down.
+		 */
 		ep = ep_hint;
-		if (ep == NULL) {
+		if (ep == NULL || !quic_endpoint_ref_unless_zero(ep)) {
 			NET_DBG("No endpoint found for socket %d", sock);
 			return;
 		}
@@ -7485,7 +9405,7 @@ static void receive_data(int sock, struct quic_endpoint *ep_hint)
 			NET_DBG("recv (%d)", -errno);
 		}
 
-		return;
+		goto out;
 	}
 
 	if (IS_ENABLED(CONFIG_QUIC_LOG_LEVEL_DBG)) {
@@ -7507,8 +9427,7 @@ static void receive_data(int sock, struct quic_endpoint *ep_hint)
 			ep, quic_get_by_ep(ep), ep->remote_addr.ss_family, addr.sin6_family);
 		QUIC_EP_STAT_INC(ep, invalid_packet);
 		QUIC_EP_STAT_INC(ep, drop_rx);
-		quic_endpoint_unref(ep);
-		return;
+		goto out;
 	}
 
 	ep->pending.len = len;
@@ -7540,6 +9459,10 @@ static void receive_data(int sock, struct quic_endpoint *ep_hint)
 			quic_get_by_ep(ep), packets,
 			packets > 1 ? "s " : " ");
 	}
+
+out:
+	/* Release the reference taken for this endpoint above. */
+	quic_endpoint_unref(ep);
 }
 
 static void quic_svc_handler(struct net_socket_service_event *pev)
@@ -7589,7 +9512,7 @@ static void init_quic_recovery_service(void)
 				 K_HIGHEST_APPLICATION_THREAD_PRIO,
 				 K_LOWEST_APPLICATION_THREAD_PRIO),
 			   NULL);
-	k_thread_name_set(&quic_recovery_work_q.thread, "quic_recovery");
+	k_thread_name_set(quic_recovery_work_q.thread_id, "quic_recovery");
 }
 
 /**
@@ -7602,10 +9525,6 @@ static void init_quic_recovery_service(void)
  */
 void net_quic_init(void)
 {
-	k_mutex_init(&contexts_lock);
-	k_mutex_init(&endpoints_lock);
-	k_mutex_init(&streams_lock);
-
 #if defined(CONFIG_NET_IPV4)
 	ARRAY_FOR_EACH_PTR(quic_ipv4_pollfds, sockfd) {
 		sockfd->fd = -1;
@@ -7621,7 +9540,10 @@ void net_quic_init(void)
 	tls_subsystem_init();
 	init_quic_recovery_service();
 	init_quic_service();
-	quic_token_ensure_secret();
+
+	if (quic_token_ensure_secret() != 0) {
+		NET_ERR("Cannot seed address validation token secret");
+	}
 }
 
 #if defined(CONFIG_QUIC_TLS_DEBUG_KEYLOG)

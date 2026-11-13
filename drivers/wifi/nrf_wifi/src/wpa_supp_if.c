@@ -1122,6 +1122,7 @@ int nrf_wifi_wpa_set_supp_port(void *if_priv, int authorized, char *bssid)
 	struct nrf_wifi_ctx_zep *rpu_ctx_zep = NULL;
 	struct nrf_wifi_sys_fmac_dev_ctx *sys_dev_ctx;
 	enum nrf_wifi_status status = NRF_WIFI_STATUS_FAIL;
+	bool update_dormant = false;
 	int ret = -1;
 
 	if (!if_priv || !bssid) {
@@ -1178,11 +1179,16 @@ int nrf_wifi_wpa_set_supp_port(void *if_priv, int authorized, char *bssid)
 
 	if (vif_ctx_zep->if_type == NRF_WIFI_IFTYPE_STATION) {
 		sys_dev_ctx->tx_config.peers[0].authorized = authorized;
+		update_dormant = true;
 	}
 
 	ret = 0;
 out:
 	k_mutex_unlock(&vif_ctx_zep->vif_lock);
+
+	if (update_dormant) {
+		nrf_wifi_refresh_oper_state(vif_ctx_zep);
+	}
 	return ret;
 }
 
@@ -1199,6 +1205,12 @@ int nrf_wifi_wpa_supp_signal_poll(void *if_priv, struct wpa_signal_info *si, uns
 		LOG_ERR("%s: Invalid params", __func__);
 		return ret;
 	}
+
+	/* Callers pass an uninitialized struct and not every field is filled in
+	 * below, so start from a known state.
+	 */
+	memset(si, 0, sizeof(*si));
+	si->current_noise = WPA_INVALID_NOISE;
 
 	vif_ctx_zep = if_priv;
 	rpu_ctx_zep = vif_ctx_zep->rpu_ctx_zep;
@@ -1830,6 +1842,11 @@ int nrf_wifi_supp_get_capa(void *if_priv, struct wpa_driver_capa *capa)
 	capa->flags |= WPA_DRIVER_FLAGS_SME;
 	capa->flags |= WPA_DRIVER_FLAGS_SAE;
 	capa->flags |= WPA_DRIVER_FLAGS_SET_KEYS_AFTER_ASSOC_DONE;
+	/* Route EAPOL TX through the driver control port (tx_control_port op)
+	 * instead of the networking stack, so the handshake is not gated by the
+	 * interface operational state.
+	 */
+	capa->flags |= WPA_DRIVER_FLAGS_CONTROL_PORT;
 	capa->rrm_flags |= WPA_DRIVER_FLAGS_SUPPORT_RRM;
 	capa->rrm_flags |= WPA_DRIVER_FLAGS_SUPPORT_BEACON_REPORT;
 	if (IS_ENABLED(CONFIG_NRF70_AP_MODE)) {
@@ -3047,6 +3064,22 @@ int nrf_wifi_wpa_supp_sta_set_flags(void *if_priv, const u8 *addr,
 
 	peer_id = nrf_wifi_fmac_peer_get_id(rpu_ctx_zep->rpu_ctx, chg_sta.mac_addr);
 	if (peer_id == -1) {
+		/*
+		 * hostapd clears flags (flags_or == 0) while a station is torn
+		 * down, e.g. the EAP-Failure that ends every WPS/WSC exchange.
+		 * The peer may already be gone from (or not yet added to) the
+		 * driver peer table by then. Clearing flags on an absent peer is
+		 * a harmless no-op, so don't treat it as an error. Only setting
+		 * flags on a missing peer is a genuine desync worth flagging.
+		 */
+		if (flags_or == 0) {
+			LOG_DBG("%s: Ignoring flag clear for absent PEER: %s",
+				__func__,
+				nrf_wifi_sprint_ll_addr_buf(chg_sta.mac_addr, 6,
+							    buf, sizeof(buf)));
+			ret = 0;
+			goto out;
+		}
 		LOG_ERR("%s: Unknown PEER: %s", __func__,
 			nrf_wifi_sprint_ll_addr_buf(chg_sta.mac_addr, 6, buf,
 						    sizeof(buf)));

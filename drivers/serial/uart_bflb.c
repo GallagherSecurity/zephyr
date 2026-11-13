@@ -347,8 +347,10 @@ static int uart_bflb_configure(const struct device *dev)
 		tx_cfg &= ~UART_CR_UTX_CTS_EN;
 	}
 
+#if !defined(CONFIG_SOC_SERIES_BL616CL)
 	/* disable de-glitch function */
 	rx_cfg &= ~UART_CR_URX_DEG_EN;
+#endif
 
 	/* Write config */
 	sys_write32(tx_cfg, cfg->base_reg + UART_UTX_CONFIG_OFFSET);
@@ -367,6 +369,10 @@ static int uart_bflb_configure(const struct device *dev)
 
 	/* disable inversion */
 	tmp = sys_read32(cfg->base_reg + UART_DATA_CONFIG_OFFSET);
+#if defined(CONFIG_SOC_SERIES_BL616CL)
+	/* disable de-glitch function */
+	tmp &= ~UART_CR_URX_DEG_EN;
+#endif
 	tmp &= ~UART_CR_UART_BIT_INV;
 	sys_write32(tmp, cfg->base_reg + UART_DATA_CONFIG_OFFSET);
 
@@ -515,6 +521,10 @@ static int uart_bflb_pm_control(const struct device *dev,
 		} else if (cfg->base_reg == UART1_BASE) {
 			tmp |= (1 << 17);
 #endif
+#ifdef UART2_BASE
+		} else if (cfg->base_reg == UART2_BASE) {
+			tmp |= (1 << 26);
+#endif
 		} else {
 			return -EINVAL;
 		}
@@ -532,6 +542,10 @@ static int uart_bflb_pm_control(const struct device *dev,
 #ifdef UART1_BASE
 		} else if (cfg->base_reg == UART1_BASE) {
 			tmp &= ~(1 << 17);
+#endif
+#ifdef UART2_BASE
+		} else if (cfg->base_reg == UART2_BASE) {
+			tmp |= (1 << 26);
 #endif
 		} else {
 			return -EINVAL;
@@ -617,7 +631,7 @@ static DEVICE_API(uart, uart_bflb_driver_api) = {
 		.rx_fifo_threshold = 0,						\
 		BFLB_UART_IRQ_HANDLER_FUNC(instance)				\
 	};									\
-	DEVICE_DT_INST_DEINIT_DEFINE(instance, &uart_bflb_init,			\
+	DEVICE_DT_INST_DEINIT_DEFINE(instance, uart_bflb_init,			\
 			      &uart_bflb_deinit,				\
 			      PM_DEVICE_DT_INST_GET(instance),			\
 			      &uart##instance##_bflb_data,			\

@@ -66,11 +66,15 @@
 	status = "okay";
 };
 
+&adc1_common {
+	st,adc-clock-source = "SYNC";
+	st,adc-prescaler = <4>;
+	status = "okay";
+};
+
 &adc1 {
 	pinctrl-0 = <&adc1_in3_pc2>;
 	pinctrl-names = "default";
-	st,adc-clock-source = "SYNC";
-	st,adc-prescaler = <4>;
 	status = "okay";
 };
 
@@ -103,6 +107,11 @@ zephyr_udc0: &usb {
 			compatible = "zephyr,mapped-partition";
 			label = "image-0";
 			reg = <0x0000c000 DT_SIZE_K(400)>;
+		};
+
+		slot1_partition: partition@70000 {
+			label = "image-1";
+			reg = <0x0070000 DT_SIZE_K(404)>;
 		};
 	};
 };

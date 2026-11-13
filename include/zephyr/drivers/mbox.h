@@ -132,9 +132,9 @@ struct mbox_dt_spec {
 	}
 
 /**
- * @brief Instance version of MBOX_DT_CHANNEL_GET()
+ * @brief Instance version of MBOX_DT_SPEC_GET()
  *
- * @param inst DT_DRV_COMPAT instance number
+ * @param inst @c DT_DRV_COMPAT instance number
  * @param name lowercase-and-underscores name of the mboxes element
  *
  * @return static initializer for a struct mbox_dt_spec
@@ -142,7 +142,11 @@ struct mbox_dt_spec {
 #define MBOX_DT_SPEC_INST_GET(inst, name)                                      \
 	MBOX_DT_SPEC_GET(DT_DRV_INST(inst), name)
 
-/** @cond INTERNAL_HIDDEN */
+/**
+ * @def_driverbackendgroup{MBOX,mbox_interface}
+ * @ingroup mbox_interface
+ * @{
+ */
 
 /**
  * @brief Callback API for incoming MBOX messages
@@ -225,15 +229,23 @@ typedef int (*mbox_set_enabled_t)(const struct device *dev,
  */
 typedef uint32_t (*mbox_max_channels_get_t)(const struct device *dev);
 
+/**
+ * @driver_ops{MBOX}
+ */
 __subsystem struct mbox_driver_api {
+	/** @driver_ops_optional @copybrief mbox_send */
 	mbox_send_t send;
+	/** @driver_ops_optional @copybrief mbox_register_callback */
 	mbox_register_callback_t register_callback;
+	/** @driver_ops_optional @copybrief mbox_mtu_get */
 	mbox_mtu_get_t mtu_get;
+	/** @driver_ops_optional @copybrief mbox_max_channels_get */
 	mbox_max_channels_get_t max_channels_get;
+	/** @driver_ops_optional @copybrief mbox_set_enabled */
 	mbox_set_enabled_t set_enabled;
 };
 
-/** @endcond */
+/** @} */
 
 /**
  * @brief Validate if MBOX device instance from a struct mbox_dt_spec is ready.
@@ -383,7 +395,7 @@ static inline int z_impl_mbox_mtu_get(const struct device *dev)
  *
  * @param spec MBOX specification from devicetree
  *
- * @return See return values for mbox_register_callback()
+ * @return See return values for mbox_mtu_get()
  */
 static inline int mbox_mtu_get_dt(const struct mbox_dt_spec *spec)
 {

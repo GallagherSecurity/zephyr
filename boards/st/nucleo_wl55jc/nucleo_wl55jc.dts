@@ -21,6 +21,7 @@
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 		zephyr,code-partition = &slot0_partition;
+		zephyr,system-timer = &lptim1;
 	};
 
 	leds: leds {
@@ -82,7 +83,7 @@
 	status = "okay";
 };
 
-stm32_lp_tick_source: &lptim1 {
+&lptim1 {
 	clocks = <&rcc STM32_CLOCK(APB1, 31)>,
 		 <&rcc STM32_SRC_LSI LPTIM1_SEL(1)>;
 	status = "okay";
@@ -101,6 +102,7 @@ stm32_lp_tick_source: &lptim1 {
 	mul-n = <6>;
 	div-r = <2>;
 	div-q = <2>;
+	div-p = <2>;
 	clocks = <&clk_hsi>;
 	status = "okay";
 };
@@ -125,6 +127,8 @@ stm32_lp_tick_source: &lptim1 {
 &i2c2 {
 	pinctrl-0 = <&i2c2_scl_pa12 &i2c2_sda_pa11>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpioa 12 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpioa 11 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 	clock-frequency = <I2C_BITRATE_FAST>;
 };
@@ -152,11 +156,15 @@ stm32_lp_tick_source: &lptim1 {
 	};
 };
 
+&adc1_common {
+	st,adc-clock-source = "SYNC";
+	st,adc-prescaler = <4>;
+	status = "okay";
+};
+
 &adc1 {
 	pinctrl-0 = <&adc_in5_pb1 &adc_in0_pb13>;
 	pinctrl-names = "default";
-	st,adc-clock-source = "SYNC";
-	st,adc-prescaler = <4>;
 	status = "okay";
 };
 

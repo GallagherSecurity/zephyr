@@ -16,7 +16,11 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
 
+#if defined(CONFIG_BT)
 LOG_MODULE_REGISTER(bt_bflb_shim, CONFIG_BT_HCI_DRIVER_LOG_LEVEL);
+#else
+LOG_MODULE_REGISTER(bt_bflb_shim, CONFIG_LOG_DEFAULT_LEVEL);
+#endif
 #include <stdint.h>
 #include <string.h>
 
@@ -188,7 +192,7 @@ void BL702_Delay_MS(uint32_t cnt)
 /* Wireless MAC address shims */
 
 static uint8_t wireless_mac_addr[8];
-static int8_t wireless_default_tx_power;
+static int8_t wireless_default_tx_power = 10; /* dBm */
 
 int bl_wireless_mac_addr_set(uint8_t mac[8])
 {

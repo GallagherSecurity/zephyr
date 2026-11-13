@@ -1,8 +1,11 @@
 /*
- * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
+ * Copyright (c) 2026 Philipp Steiner
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+
+#undef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(net_shell);
@@ -16,6 +19,8 @@ LOG_MODULE_DECLARE(net_shell);
 #include <zephyr/drivers/ptp_clock.h>
 #include "ptp/clock.h"
 #include "ptp/port.h"
+
+#include <time.h>
 #endif
 
 #include "net_shell_private.h"
@@ -165,12 +170,42 @@ static bool ptp_read_hw_timestamp(struct net_if *iface, struct net_ptp_time *ts)
 	return ptp_clock_get(phc, ts) == 0;
 }
 
+static void ptp_print_hw_timestamp_formated(const struct shell *sh, struct net_ptp_time ts,
+					    const char *name, const char *suffix)
+{
+	uint32_t ms = ts.nanosecond / NSEC_PER_MSEC;
+	uint32_t us = (ts.nanosecond / NSEC_PER_USEC) % USEC_PER_MSEC;
+	uint32_t ns = ts.nanosecond % NSEC_PER_USEC;
+	struct tm tm_timestamp = {0};
+	time_t time_seconds = ts.second;
+
+	gmtime_r(&time_seconds, &tm_timestamp);
+
+#if defined(CONFIG_REQUIRES_FULL_LIBC)
+	char time_str[sizeof("1970-01-01 00:00:00")];
+
+	strftime(time_str, sizeof(time_str), "%F %T", &tm_timestamp);
+
+	PR("%s: %s.%03u,%03u,%03u %s\n", name, time_str, ms, us, ns, suffix);
+#else  /* CONFIG_REQUIRES_FULL_LIBC */
+	PR("%s: %04u-%02u-%02u %02u:%02u:%02u.%03u,%03u,%03u %s\n", name,
+	   tm_timestamp.tm_year + 1900, tm_timestamp.tm_mon + 1, tm_timestamp.tm_mday,
+	   tm_timestamp.tm_hour, tm_timestamp.tm_min, tm_timestamp.tm_sec, ms, us, ns, suffix);
+#endif /* CONFIG_REQUIRES_FULL_LIBC */
+}
+
 static void ptp_print_hw_timestamp(const struct shell *sh, struct net_if *iface, const char *name)
 {
 	struct net_ptp_time ts;
 
 	if (ptp_read_hw_timestamp(iface, &ts)) {
 		PR("%s: %" PRIu64 ".%09u\n", name, ts.second, ts.nanosecond);
+
+		ptp_print_hw_timestamp_formated(sh, ts, name, "(TAI)");
+
+		ts.second -= ptp_clock_time_prop_ds()->current_utc_offset; /* TAI-UTC offset */
+
+		ptp_print_hw_timestamp_formated(sh, ts, name, "(UTC)");
 	} else {
 		PR("%s: unavailable\n", name);
 	}
@@ -282,32 +317,40 @@ static void ptp_print_port_info(const struct shell *sh, uint16_t port_id)
 	PR("port identity        : %s-%u\n", port_clock_id, port->port_ds.id.port_number);
 
 	PR("\nConfiguration:\n");
-	PR("state                : %s\n", ptp_port_state2str(ptp_port_state(port)));
-	PR("enabled              : %s\n", port->port_ds.enable ? "yes" : "no");
-	PR("protocol             : %s\n", ptp_net_protocol2str());
-	PR("time transmitter only: %s\n", port->port_ds.time_transmitter_only ? "yes" : "no");
-	PR("announce log itv     : %d\n", port->port_ds.log_announce_interval);
-	PR("announce timeout     : %u\n", port->port_ds.announce_receipt_timeout);
-	PR("sync log itv         : %d\n", port->port_ds.log_sync_interval);
-	PR("min delay_req log itv: %d\n", port->port_ds.log_min_delay_req_interval);
-	PR("delay mechanism      : %s\n", ptp_delay_mechanism2str(port->port_ds.delay_mechanism));
-	PR("delay asymmetry      : %" PRId64 " ns\n",
+	PR("state                 : %s\n", ptp_port_state2str(ptp_port_state(port)));
+	PR("enabled               : %s\n", port->port_ds.enable ? "yes" : "no");
+	PR("protocol              : %s\n", ptp_net_protocol2str());
+	PR("time transmitter only : %s\n", port->port_ds.time_transmitter_only ? "yes" : "no");
+	PR("announce log itv      : %d\n", port->port_ds.log_announce_interval);
+	PR("announce timeout      : %u\n", port->port_ds.announce_receipt_timeout);
+	PR("sync log itv          : %d\n", port->port_ds.log_sync_interval);
+	PR("min delay_req log itv : %d\n", port->port_ds.log_min_delay_req_interval);
+	PR("min pdelay_req log itv: %d\n", port->port_ds.log_min_pdelay_req_interval);
+	PR("delay mechanism       : %s\n", ptp_delay_mechanism2str(port->port_ds.delay_mechanism));
+	PR("delay asymmetry       : %" PRId64 " ns\n",
 	   ptp_timeinterval_to_ns(port->port_ds.delay_asymmetry));
-	PR("mean link delay      : %" PRId64 " ns\n",
+	PR("mean link delay       : %" PRId64 " ns\n",
 	   ptp_timeinterval_to_ns(port->port_ds.mean_link_delay));
+	PR("neighbor rate ratio   : %s (%" PRId64 " ppb)\n",
+	   port->neighbor_rate_ratio_valid ? "valid" : "nominal",
+	   (int64_t)((port->neighbor_rate_ratio - 1.0) * 1000000000.0));
 
 	PR("\nRuntime:\n");
-	PR("seq announce/delay/signaling/sync: %u / %u / %u / %u\n", port->seq_id.announce,
-	   port->seq_id.delay, port->seq_id.signaling, port->seq_id.sync);
-	PR("timeouts bits      : announce=%u delay=%u sync=%u qualification=%u\n",
+	PR("seq announce/delay/signaling/sync/pdelay: %u / %u / %u / %u / %u\n",
+	   port->seq_id.announce, port->seq_id.delay, port->seq_id.signaling, port->seq_id.sync,
+	   port->seq_id.pdelay);
+	PR("pdelay pending seq : %u\n", port->pdelay_req_sequence_id);
+	PR("timeouts bits      : announce=%u delay=%u sync=%u qualification=%u pdelay=%u\n",
 	   atomic_test_bit(&port->timeouts, PTP_PORT_TIMER_ANNOUNCE_TO),
 	   atomic_test_bit(&port->timeouts, PTP_PORT_TIMER_DELAY_TO),
 	   atomic_test_bit(&port->timeouts, PTP_PORT_TIMER_SYNC_TO),
-	   atomic_test_bit(&port->timeouts, PTP_PORT_TIMER_QUALIFICATION_TO));
-	PR("timer remaining ms : announce=%d delay=%d sync=%d qualification=%d\n",
+	   atomic_test_bit(&port->timeouts, PTP_PORT_TIMER_QUALIFICATION_TO),
+	   atomic_test_bit(&port->timeouts, PTP_PORT_TIMER_PDELAY_TO));
+	PR("timer remaining ms : announce=%d delay=%d sync=%d qualification=%d pdelay=%d\n",
 	   k_timer_remaining_get(&port->timers.announce),
 	   k_timer_remaining_get(&port->timers.delay), k_timer_remaining_get(&port->timers.sync),
-	   k_timer_remaining_get(&port->timers.qualification));
+	   k_timer_remaining_get(&port->timers.qualification),
+	   k_timer_remaining_get(&port->timers.pdelay));
 	ptp_print_hw_timestamp(sh, port->iface, "PHC now            ");
 
 	best = ptp_port_best_foreign_ds(port);

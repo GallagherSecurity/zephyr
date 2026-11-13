@@ -56,6 +56,10 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 {
 	uint8_t conn_index;
 
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
 	if (err != 0) {
 		bt_shell_error("Failed to connect to %s (%u)", bt_conn_dst_str(conn), err);
 		return;
@@ -73,12 +77,17 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 
 static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
-	uint8_t conn_index = bt_conn_index(conn);
+	uint8_t conn_index;
 
 	ARG_UNUSED(reason);
 
-	bt_conn_unref(conns[conn_index]);
-	conns[conn_index] = NULL;
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
+	conn_index = bt_conn_index(conn);
+
+	bt_conn_drop(&conns[conn_index]);
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -188,7 +197,7 @@ static bool csip_set_coordinator_oap_cb(const struct bt_csip_set_coordinator_set
 {
 	ARG_UNUSED(set_info);
 
-	for (size_t i = 0; i < count; i++) {
+	for (size_t i = 0U; i < count; i++) {
 		bt_shell_print("Ordered access for members[%zu]: %p", i, members[i]);
 	}
 
@@ -300,7 +309,7 @@ static int cmd_csip_set_coordinator_discover(const struct shell *sh,
 			return -ENOEXEC;
 		}
 
-		if (member_index > ARRAY_SIZE(conns)) {
+		if (member_index >= ARRAY_SIZE(conns)) {
 			shell_error(sh, "Invalid member_index: %lu",
 				    member_index);
 
@@ -347,7 +356,7 @@ static int cmd_csip_set_coordinator_discover_members(const struct shell *sh,
 
 	/* Reset and populate based on current connections */
 	memset(addr_found, 0, sizeof(addr_found));
-	members_found = 0;
+	members_found = 0U;
 	for (size_t i = 0U; i < ARRAY_SIZE(set_members); i++) {
 		const struct bt_csip_set_coordinator_set_member *set_member = set_members[i];
 
@@ -418,7 +427,7 @@ static int cmd_csip_set_coordinator_lock_set(const struct shell *sh,
 		return -ENOEXEC;
 	}
 
-	for (size_t i = 0; i < ARRAY_SIZE(locked_members); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(locked_members); i++) {
 		if (set_members[i] != NULL) {
 			locked_members[conn_count] = set_members[i];
 			conn_count++;
@@ -448,7 +457,7 @@ static int cmd_csip_set_coordinator_release_set(const struct shell *sh,
 		return -ENOEXEC;
 	}
 
-	for (size_t i = 0; i < ARRAY_SIZE(locked_members); i++) {
+	for (size_t i = 0U; i < ARRAY_SIZE(locked_members); i++) {
 		if (set_members[i] != NULL) {
 			locked_members[conn_count] = set_members[i];
 			conn_count++;
@@ -485,7 +494,7 @@ static int cmd_csip_set_coordinator_lock(const struct shell *sh, size_t argc,
 			return -ENOEXEC;
 		}
 
-		if (member_index > ARRAY_SIZE(set_members)) {
+		if (member_index >= ARRAY_SIZE(set_members)) {
 			shell_error(sh, "Invalid member_index: %lu",
 				    member_index);
 
@@ -524,7 +533,7 @@ static int cmd_csip_set_coordinator_release(const struct shell *sh, size_t argc,
 			return -ENOEXEC;
 		}
 
-		if (member_index > ARRAY_SIZE(set_members)) {
+		if (member_index >= ARRAY_SIZE(set_members)) {
 			shell_error(sh, "Invalid member_index: %lu",
 				    member_index);
 
@@ -567,7 +576,7 @@ static int cmd_csip_set_coordinator_ordered_access(const struct shell *sh,
 		}
 	}
 
-	for (size_t i = 0; i < (size_t)member_count; i++) {
+	for (size_t i = 0U; i < (size_t)member_count; i++) {
 		members[i] = set_members[i];
 	}
 

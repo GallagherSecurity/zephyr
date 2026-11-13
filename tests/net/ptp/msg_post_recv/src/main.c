@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
+ * Copyright (c) 2026 Philipp Steiner
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -39,17 +39,17 @@ void ptp_tlv_free(struct ptp_tlv_container *tlv_container)
 	tlv_free_calls++;
 }
 
-int ptp_tlv_post_recv(struct ptp_tlv *tlv)
+int ptp_tlv_post_recv(struct ptp_tlv **p_tlv)
 {
-	last_post_recv_tlv = tlv;
+	last_post_recv_tlv = *p_tlv;
 	tlv_post_recv_calls++;
 
 	return tlv_post_recv_ret;
 }
 
-void ptp_tlv_pre_send(struct ptp_tlv *tlv)
+void ptp_tlv_pre_send(struct ptp_tlv **p_tlv)
 {
-	last_pre_send_tlv = tlv;
+	last_pre_send_tlv = *p_tlv;
 	tlv_pre_send_calls++;
 }
 
@@ -171,8 +171,63 @@ ZTEST(ptp_msg_post_recv, test_unsupported_major_version_is_rejected)
 	init_header(&msg, PTP_MSG_SYNC, sizeof(struct ptp_sync_msg));
 	msg.header.version = 1;
 
-	zassert_equal(ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_sync_msg)), -EBADMSG,
+	zassert_equal(ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_sync_msg)), -EPROTONOSUPPORT,
 		      "unsupported PTP version should be rejected");
+}
+
+ZTEST(ptp_msg_post_recv, test_message_shorter_than_header_is_rejected)
+{
+	struct ptp_port port = {0};
+	struct ptp_msg msg;
+
+	init_msg_list(&msg);
+	init_header(&msg, PTP_MSG_SYNC, sizeof(struct ptp_sync_msg));
+
+	zassert_equal(ptp_msg_post_recv(&port, &msg, 0), -EBADMSG,
+		      "empty message should be rejected");
+	zassert_equal(ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_header) - 1), -EBADMSG,
+		      "message shorter than the header should be rejected");
+
+	/* The version field is not trusted before the header is complete */
+	msg.header.version = 1;
+	zassert_equal(ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_header) - 1), -EBADMSG,
+		      "truncated message of another version should be malformed");
+}
+
+ZTEST(ptp_msg_post_recv, test_version_is_checked_before_type_and_length)
+{
+	struct ptp_port port = {0};
+	struct ptp_msg msg;
+
+	/* Undefined type, other version: the type means nothing for this stack */
+	init_msg_list(&msg);
+	init_header(&msg, PTP_MSG_SYNC, sizeof(struct ptp_sync_msg));
+	msg.header.type_major_sdo_id = 0x0F;
+	msg.header.version = 1;
+
+	zassert_equal(ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_header)),
+		      -EPROTONOSUPPORT, "unsupported version with undefined type");
+
+	/* Defined type, other version, too short for this stack's Sync */
+	init_msg_list(&msg);
+	init_header(&msg, PTP_MSG_SYNC, sizeof(struct ptp_sync_msg));
+	msg.header.version = 1;
+
+	zassert_equal(ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_header)),
+		      -EPROTONOSUPPORT, "unsupported version with short length");
+}
+
+ZTEST(ptp_msg_post_recv, test_undefined_type_is_rejected)
+{
+	struct ptp_port port = {0};
+	struct ptp_msg msg;
+
+	init_msg_list(&msg);
+	init_header(&msg, PTP_MSG_SYNC, sizeof(struct ptp_sync_msg));
+	msg.header.type_major_sdo_id = 0x0F;
+
+	zassert_equal(ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_msg)), -EBADMSG,
+		      "undefined message type should be rejected");
 }
 
 ZTEST(ptp_msg_post_recv, test_delay_resp_post_recv_converts_header_timestamp_and_port)
@@ -200,6 +255,45 @@ ZTEST(ptp_msg_post_recv, test_delay_resp_post_recv_converts_header_timestamp_and
 		      "protocol timestamp nanoseconds mismatch");
 	zassert_equal(msg.delay_resp.req_port_id.port_number, 0x4567,
 		      "requesting port ID not converted");
+}
+
+ZTEST(ptp_msg_post_recv, test_pdelay_post_recv_converts_response_fields)
+{
+	struct ptp_port port = {0};
+	struct ptp_msg msg;
+
+	init_msg_list(&msg);
+	init_header(&msg, PTP_MSG_PDELAY_RESP, sizeof(struct ptp_pdelay_resp_msg));
+	msg.pdelay_resp.req_receipt_timestamp.seconds_high = net_htons(0x0002);
+	msg.pdelay_resp.req_receipt_timestamp.seconds_low = net_htonl(0x3456789A);
+	msg.pdelay_resp.req_receipt_timestamp.nanoseconds = net_htonl(123456789);
+	msg.pdelay_resp.req_port_id.port_number = net_htons(0x6789);
+
+	zassert_ok(ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_pdelay_resp_msg)),
+		   "Pdelay response post-receive failed");
+	zassert_equal(msg.timestamp.protocol.second, 0x00023456789AULL,
+		      "Pdelay response timestamp seconds mismatch");
+	zassert_equal(msg.timestamp.protocol.nanosecond, 123456789,
+		      "Pdelay response timestamp nanoseconds mismatch");
+	zassert_equal(msg.pdelay_resp.req_port_id.port_number, 0x6789,
+		      "Pdelay response request port not converted");
+
+	init_msg_list(&msg);
+	init_header(&msg, PTP_MSG_PDELAY_RESP_FOLLOW_UP,
+		    sizeof(struct ptp_pdelay_resp_follow_up_msg));
+	msg.pdelay_resp_follow_up.resp_origin_timestamp.seconds_high = net_htons(0x0003);
+	msg.pdelay_resp_follow_up.resp_origin_timestamp.seconds_low = net_htonl(0x456789AB);
+	msg.pdelay_resp_follow_up.resp_origin_timestamp.nanoseconds = net_htonl(987654321);
+	msg.pdelay_resp_follow_up.req_port_id.port_number = net_htons(0x789A);
+
+	zassert_ok(ptp_msg_post_recv(&port, &msg, sizeof(struct ptp_pdelay_resp_follow_up_msg)),
+		   "Pdelay follow-up post-receive failed");
+	zassert_equal(msg.timestamp.protocol.second, 0x0003456789ABULL,
+		      "Pdelay follow-up timestamp seconds mismatch");
+	zassert_equal(msg.timestamp.protocol.nanosecond, 987654321,
+		      "Pdelay follow-up timestamp nanoseconds mismatch");
+	zassert_equal(msg.pdelay_resp_follow_up.req_port_id.port_number, 0x789A,
+		      "Pdelay follow-up request port not converted");
 }
 
 ZTEST(ptp_msg_post_recv, test_valid_tlv_is_parsed_and_linked)
@@ -335,6 +429,24 @@ ZTEST(ptp_msg_post_recv, test_pre_send_converts_response_and_target_port_fields)
 		      "timestamp nanoseconds not converted");
 	zassert_equal(msg.delay_resp.req_port_id.port_number, net_htons(0x4567),
 		      "delay response request port not converted");
+
+	init_msg_list(&msg);
+	msg.header.type_major_sdo_id = PTP_MSG_PDELAY_RESP_FOLLOW_UP;
+	msg.header.version = PTP_VERSION;
+	msg.header.msg_length = sizeof(struct ptp_pdelay_resp_follow_up_msg);
+	msg.pdelay_resp_follow_up.resp_origin_timestamp.seconds_high = 0x0002;
+	msg.pdelay_resp_follow_up.resp_origin_timestamp.seconds_low = 0x3456789A;
+	msg.pdelay_resp_follow_up.resp_origin_timestamp.nanoseconds = 123456789;
+	msg.pdelay_resp_follow_up.req_port_id.port_number = 0x5678;
+	ptp_msg_pre_send(&msg);
+	zassert_equal(msg.pdelay_resp_follow_up.resp_origin_timestamp.seconds_high,
+		      net_htons(0x0002), "Pdelay follow-up high seconds not converted");
+	zassert_equal(msg.pdelay_resp_follow_up.resp_origin_timestamp.seconds_low,
+		      net_htonl(0x3456789A), "Pdelay follow-up low seconds not converted");
+	zassert_equal(msg.pdelay_resp_follow_up.resp_origin_timestamp.nanoseconds,
+		      net_htonl(123456789), "Pdelay follow-up nanoseconds not converted");
+	zassert_equal(msg.pdelay_resp_follow_up.req_port_id.port_number, net_htons(0x5678),
+		      "Pdelay follow-up request port not converted");
 
 	init_msg_list(&msg);
 	msg.header.type_major_sdo_id = PTP_MSG_SIGNALING;

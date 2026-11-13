@@ -53,6 +53,11 @@ struct led_info {
 };
 
 /**
+ * @def_driverbackendgroup{LED,led_interface}
+ * @{
+ */
+
+/**
  * @brief Callback API for blinking an LED
  *
  * @see led_blink() for argument descriptions.
@@ -100,7 +105,7 @@ typedef int (*led_api_off)(const struct device *dev, uint32_t led);
 /**
  * @brief Callback API for writing a strip of LED channels
  *
- * @see led_api_write_channels() for arguments descriptions.
+ * @see led_write_channels() for arguments descriptions.
  */
 typedef int (*led_api_write_channels)(const struct device *dev,
 				      uint32_t start_channel,
@@ -108,19 +113,43 @@ typedef int (*led_api_write_channels)(const struct device *dev,
 				      const uint8_t *buf);
 
 /**
- * @brief LED driver API
+ * @driver_ops{LED}
+ *
+ * @note A driver must implement at least @ref led_driver_api.set_brightness, or both
+ * @ref led_driver_api.on and @ref led_driver_api.off. The subsystem emulates each of these
+ * operations with the other(s) when it is not provided.
  */
 __subsystem struct led_driver_api {
-	/* Mandatory callbacks, either on/off or set_brightness. */
+	/**
+	 * @driver_ops_optional @copybrief led_on
+	 *
+	 * Mandatory if @ref led_driver_api.set_brightness is not implemented.
+	 */
 	led_api_on on;
+	/**
+	 * @driver_ops_optional @copybrief led_off
+	 *
+	 * Mandatory if @ref led_driver_api.set_brightness is not implemented.
+	 */
 	led_api_off off;
+	/**
+	 * @driver_ops_optional @copybrief led_set_brightness
+	 *
+	 * Mandatory if @ref led_driver_api.on and @ref led_driver_api.off are not
+	 * implemented.
+	 */
 	led_api_set_brightness set_brightness;
-	/* Optional callbacks. */
+	/** @driver_ops_optional @copybrief led_blink */
 	led_api_blink blink;
+	/** @driver_ops_optional @copybrief led_get_info */
 	led_api_get_info get_info;
+	/** @driver_ops_optional @copybrief led_set_color */
 	led_api_set_color set_color;
+	/** @driver_ops_optional @copybrief led_write_channels */
 	led_api_write_channels write_channels;
 };
+
+/** @} */
 
 /**
  * @brief Blink an LED
@@ -380,6 +409,36 @@ struct led_dt_spec {
 };
 
 /**
+ * @brief Blink an LED from a led_dt_spec.
+ *
+ * @param spec LED device specification from devicetree.
+ * @param delay_on Time period (in milliseconds) an LED should be ON
+ * @param delay_off Time period (in milliseconds) an LED should be OFF
+ * @return 0 on success, negative on error
+ *
+ * @see led_blink()
+ */
+static inline int led_blink_dt(const struct led_dt_spec *spec, uint32_t delay_on,
+			       uint32_t delay_off)
+{
+	return led_blink(spec->dev, spec->index, delay_on, delay_off);
+}
+
+/**
+ * @brief Get LED information from a led_dt_spec.
+ *
+ * @param spec LED device specification from devicetree.
+ * @param info Pointer to a pointer filled with LED information
+ * @return 0 on success, negative on error
+ *
+ * @see led_get_info()
+ */
+static inline int led_get_info_dt(const struct led_dt_spec *spec, const struct led_info **info)
+{
+	return led_get_info(spec->dev, spec->index, info);
+}
+
+/**
  * @brief Set LED brightness from a led_dt_spec.
  *
  * @param spec LED device specification from devicetree.
@@ -392,6 +451,24 @@ static inline int led_set_brightness_dt(const struct led_dt_spec *spec,
 					uint8_t value)
 {
 	return led_set_brightness(spec->dev, spec->index, value);
+}
+
+/**
+ * @brief Set LED color from a struct led_dt_spec.
+ *
+ * @param spec LED device specification from devicetree.
+ * @param num_colors Number of colors in the array.
+ * @param color Array of colors. It must be ordered following the color
+ *        mapping of the LED controller. See the color_mapping member
+ *        in struct led_info.
+ * @return 0 on success, negative on error
+ *
+ * @see led_set_color()
+ */
+static inline int led_set_color_dt(const struct led_dt_spec *spec, uint8_t num_colors,
+				   const uint8_t *color)
+{
+	return led_set_color(spec->dev, spec->index, num_colors, color);
 }
 
 /**

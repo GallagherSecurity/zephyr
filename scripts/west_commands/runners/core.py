@@ -37,6 +37,7 @@ from typing import NamedTuple, NoReturn
 
 try:
     from elftools.elf.elffile import ELFFile
+    from elftools.elf.sections import SymbolTableSection
     ELFTOOLS_MISSING = False
 except ImportError:
     ELFTOOLS_MISSING = True
@@ -65,6 +66,8 @@ def find_rtt_block(elf_file: str) -> int | None:
     with open(elf_file, 'rb') as f:
         elffile = ELFFile(f)
         for sect in elffile.iter_sections('SHT_SYMTAB'):
+            if not isinstance(sect, SymbolTableSection):
+                continue
             symbols = sect.get_symbol_by_name('_SEGGER_RTT')
             if symbols is None:
                 continue
@@ -347,6 +350,10 @@ class RunnerCaps:
       can be given multiple times and is passed on to the underlying tool
       that the runner wraps.
 
+    - gdb_init: whether the runner supports a --gdb-init option, which can be
+      given multiple times and appends commands, in the order given, to the GDB
+      client invocation, after the ones the runner issues itself.
+
     - file: whether the runner supports a --file option, which specifies
       exactly the file that should be used to flash, overriding any default
       discovered in the build directory.
@@ -371,6 +378,7 @@ class RunnerCaps:
     reset_types_supported: list[str] | None = None
     extload: bool = False
     tool_opt: bool = False
+    gdb_init: bool = False
     file: bool = False
     hide_load_files: bool = False
     rtt: bool = False  # This capability exists separately from the rtt command
@@ -697,6 +705,14 @@ class ZephyrBinaryRunner(abc.ABC):
                             help=(cls.tool_opt_help() if caps.tool_opt
                                   else argparse.SUPPRESS))
 
+        parser.add_argument('--gdb-init', dest='gdb_init',
+                            default=[], action='append',
+                            metavar='COMMAND',
+                            help=('command to run in the GDB client, after the '
+                                  'ones the runner issues itself; may be given '
+                                  'multiple times, in order'
+                                  if caps.gdb_init else argparse.SUPPRESS))
+
         if caps.rtt:
             parser.add_argument('--rtt-address', dest='rtt_address',
                                 type=lambda x: int(x, 0),
@@ -757,6 +773,8 @@ class ZephyrBinaryRunner(abc.ABC):
             _missing_cap(cls, '--extload')
         if args.tool_opt and not caps.tool_opt:
             _missing_cap(cls, '--tool-opt')
+        if args.gdb_init and not caps.gdb_init:
+            _missing_cap(cls, '--gdb-init')
         if args.file and not caps.file:
             _missing_cap(cls, '--file')
         if args.file_type and not caps.file:
@@ -824,6 +842,53 @@ class ZephyrBinaryRunner(abc.ABC):
                 raise ValueError('Required devicetree chosen node `zephyr,sram` is not set')
             return sram_node.regs[0].addr
 
+    @staticmethod
+    def normalize_chip(name: str) -> str:
+        '''Normalize a chip name for case- and dash-insensitive matching.'''
+        return name.lower().replace('-', '')
+
+    @staticmethod
+    def resolve_port_by_chip(detect_func, target, logger, priority_vids=None):
+        '''Probe serial ports and return the first one whose connected chip
+        matches the normalized target name.
+
+        :param detect_func: callable taking a port device path and returning
+                             the chip name reported by that port, or None if
+                             no chip could be identified. It is responsible
+                             for opening and closing the port.
+        :param target:      normalized chip name to match against.
+        :param logger:      Python logger for progress and diagnostics, see
+                            ZephyrBinaryRunner class.
+        :param priority_vids: optional list of USB VIDs whose ports are
+                             probed first, to avoid resetting unrelated
+                             serial adapters.
+
+        Returns the matching port device path, or None when no match is
+        found.'''
+        try:
+            import serial.tools.list_ports
+        except ImportError as err:
+            logger.error(f'serial port matching unavailable: {err}')
+            return None
+
+        priority_vids = priority_vids or []
+        ports = sorted(serial.tools.list_ports.comports(),
+                       key=lambda p: (p.vid not in priority_vids, p.device))
+
+        for info in ports:
+            port = info.device
+            try:
+                name = detect_func(port)
+            except Exception as err:
+                logger.debug(f'{port}: skipped ({err})')
+                continue
+            if name is not None and ZephyrBinaryRunner.normalize_chip(name) == target:
+                logger.info(f'Auto-selected {port} for {target}')
+                return port
+
+        logger.debug(f'no port with a {target} chip found')
+        return None
+
     def run(self, command: str, **kwargs):
         '''Runs command ('flash', 'debug', 'debugserver', 'attach').
 
@@ -887,6 +952,13 @@ class ZephyrBinaryRunner(abc.ABC):
                   by this runner. This can be given multiple times;
                   the resulting arguments will be given to the tool
                   in the order they appear on the command line.'''
+
+    @staticmethod
+    def gdb_ex_args(commands: list[str] | None) -> list[str]:
+        '''Turn GDB commands into '-ex', <command> pairs for a GDB argv.
+
+        The commands are passed on verbatim.'''
+        return [arg for command in (commands or []) for arg in ('-ex', command)]
 
     @staticmethod
     def require(program: str, path: str | None = None) -> str:

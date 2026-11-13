@@ -21,7 +21,6 @@ comment "Available modules."
 osource "$(KCONFIG_BINARY_DIR)/Kconfig.modules"
 
 source "modules/Kconfig.atmel"
-source "modules/Kconfig.chre"
 source "modules/Kconfig.cypress"
 source "modules/Kconfig.eos_s3"
 source "modules/Kconfig.esp32"
@@ -32,6 +31,7 @@ source "modules/Kconfig.microchip"
 source "modules/Kconfig.mspm0"
 source "modules/Kconfig.nuvoton"
 source "modules/Kconfig.open-amp"
+source "modules/Kconfig.rpmsg-lite"
 source "modules/Kconfig.picolibc"
 source "modules/Kconfig.renesas"
 source "modules/Kconfig.rust"
@@ -39,6 +39,7 @@ source "modules/Kconfig.simplelink"
 source "modules/Kconfig.stm32"
 source "modules/Kconfig.syst"
 source "modules/Kconfig.telink"
+source "modules/Kconfig.tiva_c"
 source "modules/Kconfig.vega"
 source "modules/Kconfig.wurthelektronik"
 source "modules/Kconfig.xtensa"
@@ -101,9 +102,6 @@ comment "LoRa Basics Modem module not available."
 
 comment "zcbor module not available."
 	depends on !ZEPHYR_ZCBOR_MODULE
-
-comment "CHRE module not available."
-	depends on !ZEPHYR_CHRE_MODULE
 
 comment "Segger module not available."
 	depends on !ZEPHYR_SEGGER_MODULE

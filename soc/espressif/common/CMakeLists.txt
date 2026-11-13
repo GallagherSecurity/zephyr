@@ -14,7 +14,7 @@ endif()
 # Continue to prepare the build environment
 zephyr_include_directories(include)
 
-if(NOT CONFIG_MCUBOOT AND NOT CONFIG_SOC_ESP32_APPCPU AND NOT CONFIG_SOC_ESP32S3_APPCPU)
+if(NOT CONFIG_MCUBOOT AND NOT CONFIG_SOC_ESP32_APPCPU_TARGET)
   zephyr_sources_ifdef(CONFIG_ESP_SPIRAM esp_psram.c)
 endif()
 
@@ -57,12 +57,10 @@ else()
   file(WRITE "${_extram_inc}" "")
 endif()
 
-if(NOT (CONFIG_SOC_ESP32C5_LPCORE OR CONFIG_SOC_ESP32C6_LPCORE OR CONFIG_SOC_ESP32P4_LPCORE))
-  # Get flash size in MB for esptool from the chosen zephyr,flash node
-  dt_chosen(dts_flash PROPERTY "zephyr,flash")
-  dt_reg_size(flash_size_bytes PATH ${dts_flash})
-  math(EXPR esptoolpy_flashsize "${flash_size_bytes} / 0x100000")
-endif()
+# Get flash size in MB for esptool from the chosen zephyr,flash node
+dt_chosen(dts_flash PROPERTY "zephyr,flash")
+dt_reg_size(flash_size_bytes PATH ${dts_flash})
+math(EXPR esptoolpy_flashsize "${flash_size_bytes} / 0x100000")
 
 # Get UART baudrate from DT
 dt_chosen(dts_shell_uart PROPERTY "zephyr,shell-uart")
@@ -90,8 +88,6 @@ if((CONFIG_ESP_SIMPLE_BOOT OR CONFIG_MCUBOOT) AND NOT (CONFIG_SOC_ESP32C5_LPCORE
   endif()
 endif()
 
-set_property(TARGET bintools PROPERTY disassembly_flag_inline_source)
-
 if(CONFIG_ESP_SIMPLE_BOOT AND NOT (CONFIG_SOC_ESP32C5_LPCORE OR CONFIG_SOC_ESP32C6_LPCORE OR CONFIG_SOC_ESP32P4_LPCORE))
   dt_nodelabel(image_part_path NODELABEL "boot_partition")
 else()
@@ -112,6 +108,26 @@ board_finalize_runner_args(esp32 "--esp-monitor-baud=${monitor_baud}")
 
 message(STATUS "Image partition address: ${image_off}")
 
+# Publish the flash layout needed to assemble an Espressif QEMU image. The
+# merge itself happens in cmake/emu/espressif_qemu.cmake: under MCUboot
+# the application is signed by a post-build command that is appended to
+# extra_post_build_commands after this file is processed, so the image can only
+# be assembled once the whole ELF target (including that step) has completed.
+if(CONFIG_ESPRESSIF_QEMU AND CONFIG_BUILD_OUTPUT_BIN AND NOT CONFIG_MCUBOOT)
+  # Pad to the board flash size from DT so the image header and QEMU MTD match.
+  set_property(GLOBAL PROPERTY espressif_qemu_flash_size_mb ${esptoolpy_flashsize})
+  set_property(GLOBAL PROPERTY espressif_qemu_image_off ${image_off})
+
+  if(CONFIG_BOOTLOADER_MCUBOOT)
+    dt_nodelabel(_qemu_boot_path NODELABEL "boot_partition" REQUIRED)
+    dt_reg_addr(_qemu_boot_off PATH ${_qemu_boot_path} REQUIRED)
+    dt_nodelabel(_qemu_slot0_path NODELABEL "slot0_partition" REQUIRED)
+    dt_reg_addr(_qemu_slot0_off PATH ${_qemu_slot0_path} REQUIRED)
+    set_property(GLOBAL PROPERTY espressif_qemu_mcuboot_off ${_qemu_boot_off})
+    set_property(GLOBAL PROPERTY espressif_qemu_slot0_off ${_qemu_slot0_off})
+  endif()
+endif()
+
 # Look for cross references between bootloader sections
 if(CONFIG_MCUBOOT)
     message("check_callgraph using: ${ESP_IDF_PATH}/tools/ci/check_callgraph.py")
@@ -121,15 +137,16 @@ if(CONFIG_MCUBOOT)
       ARGS
         --rtl-dirs ${CMAKE_BINARY_DIR}/zephyr
         --elf-file ${CMAKE_BINARY_DIR}/zephyr/${KERNEL_ELF_NAME}
-        find-refs
-        --from-section='.iram0.loader_text'
-        --to-section='.iram0.text'
-        --exit-code)
+        find-reachable-from-loader-func
+        --map ${CMAKE_BINARY_DIR}/zephyr/${KERNEL_MAP_NAME}
+        --roots='do_boot,start_cpu0_image'
+        --outplacers
+        --summary)
 endif()
 
 if(CONFIG_MCUBOOT)
   set(SOC_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../${CONFIG_SOC}/mcuboot.ld CACHE INTERNAL "")
-elseif(CONFIG_SOC_ESP32_APPCPU OR CONFIG_SOC_ESP32S3_APPCPU)
+elseif(CONFIG_SOC_ESP32_APPCPU_TARGET)
   set(SOC_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../${CONFIG_SOC}/default_appcpu.ld CACHE INTERNAL "")
 elseif(CONFIG_SOC_ESP32C5_LPCORE OR CONFIG_SOC_ESP32C6_LPCORE OR CONFIG_SOC_ESP32P4_LPCORE)
   set(SOC_LINKER_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../${CONFIG_SOC}/default_lpcore.ld CACHE INTERNAL "")
@@ -138,3 +155,13 @@ else()
 endif()
 
 zephyr_sources_ifdef(CONFIG_ESP32_LCD_CAM esp_lcd_cam.c)
+zephyr_sources_ifdef(CONFIG_ESP32_ETM esp_etm_alloc.c)
+if(NOT CONFIG_SOC_ESP32C5_LPCORE AND NOT CONFIG_SOC_ESP32C6_LPCORE AND NOT CONFIG_SOC_ESP32P4_LPCORE)
+  zephyr_sources_ifdef(CONFIG_SOC_ESP32_PM_SLEEP_STATS pmstats.c)
+endif()
+zephyr_sources_ifdef(CONFIG_ESP32_PPA esp_ppa.c)
+zephyr_sources(instr_mem.c)
+
+if(CONFIG_SOC_HAS_TIMING_FUNCTIONS AND NOT CONFIG_BOARD_HAS_TIMING_FUNCTIONS)
+  zephyr_sources_ifdef(CONFIG_TIMING_FUNCTIONS soc_timing.c)
+endif()

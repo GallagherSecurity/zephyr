@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <kernel_internal.h>
 #include <zephyr/sys/__assert.h>
@@ -200,6 +199,7 @@ unlock_out:
 out:
 	return ret;
 #else  /* CONFIG_ARCH_MEM_DOMAIN_SUPPORTS_DEINIT */
+	ARG_UNUSED(domain);
 	return -ENOTSUP;
 #endif /* CONFIG_ARCH_MEM_DOMAIN_SUPPORTS_DEINIT */
 }
@@ -361,7 +361,7 @@ void z_mem_domain_init_thread(struct k_thread *thread)
 	k_spin_unlock(&z_mem_domain_lock, key);
 }
 
-/* Called when thread aborts during teardown tasks. _sched_spinlock is held */
+/* Called when thread aborts during teardown tasks. The scheduler's spinlock is held */
 void z_mem_domain_exit_thread(struct k_thread *thread)
 {
 	int ret;
@@ -393,7 +393,7 @@ int k_mem_domain_add_thread(struct k_mem_domain *domain, k_tid_t thread)
 	return ret;
 }
 
-static int init_mem_domain_module(void)
+static void init_mem_domain_module(void)
 {
 	int ret;
 
@@ -415,9 +415,6 @@ static int init_mem_domain_module(void)
 					 &z_libc_partition);
 	__ASSERT(ret == 0, "failed to add default libc mem partition");
 #endif /* Z_LIBC_PARTITION_EXISTS */
-
-	return 0;
 }
 
-SYS_INIT(init_mem_domain_module, PRE_KERNEL_1,
-	 CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
+K_KERNEL_INIT_PRE(init_mem_domain_module);

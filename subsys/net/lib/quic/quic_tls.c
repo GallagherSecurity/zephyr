@@ -17,6 +17,67 @@
 #define TLS_ALERT_NO_APPLICATION_PROTOCOL	120
 
 static int build_default_transport_params(struct quic_tls_context *ctx);
+static int quic_derive_secret(struct quic_tls_context *ctx,
+			      const uint8_t *secret,
+			      const char *label,
+			      uint8_t *out);
+static int tls_emit_client_early_traffic_secret(struct quic_tls_context *ctx);
+
+#define QUIC_SESSION_TICKET_NONCE_LEN 8U
+#define QUIC_SESSION_TICKET_ID_LEN 32U
+#define QUIC_SESSION_TICKET_LIFETIME_SEC 86400U
+#define QUIC_SESSION_TICKET_CACHE_SIZE 8U
+/* RFC 8446 8.2: window around the expected ticket age within which a 0-RTT
+ * resumption is considered fresh enough to accept early data.
+ */
+#define QUIC_SESSION_TICKET_AGE_WINDOW_MS 10000U
+/* RFC 9001 4.6.1: in QUIC the NewSessionTicket early_data extension
+ * max_early_data_size MUST be 0xffffffff. The real amount of early data a
+ * client may send is bounded by the connection's flow-control limits
+ * (transport parameters), not by this field. A client MUST treat any other
+ * value as a connection error. The server's configured value is only an
+ * enable signal used to decide whether to offer 0-RTT on issued tickets.
+ */
+#define QUIC_TLS_EARLY_DATA_SENTINEL 0xFFFFFFFFU
+/* Maximum negotiated ALPN protocol name remembered per server ticket so that
+ * 0-RTT can be refused if a resuming ClientHello negotiates a different ALPN
+ * (RFC 8446 4.2.11 / RFC 9001 4.6.1). Longer names disable 0-RTT for the
+ * ticket rather than being truncated.
+ */
+#define QUIC_SESSION_TICKET_ALPN_MAX_LEN 32U
+/* Wire bytes the ClientHello writes between the pre_shared_key identities field
+ * and the first PskBinderEntry value: a 2-byte binders vector length plus a
+ * 1-byte binder length prefix. RFC 8446 4.2.11.2 computes the binder over the
+ * ClientHello truncated at the end of the identities field, i.e. before these
+ * bytes, so the transcript ends this many bytes before the binder value.
+ */
+#define QUIC_TLS_PSK_BINDERS_HEADER_LEN 3U
+
+struct quic_server_ticket_entry {
+	uint8_t ticket[QUIC_SESSION_TICKET_ID_LEN];
+	uint8_t psk[QUIC_MAX_RESUMPTION_PSK_LEN];
+	uint64_t issued_at_ms;
+	uint32_t ticket_lifetime;
+	uint32_t ticket_age_add;
+	uint32_t max_early_data_size;
+	uint16_t cipher_suite;
+	uint16_t ticket_len;
+	uint16_t psk_len;
+	bool valid;
+	/* Negotiated ALPN when the ticket was issued (empty if none). A resuming
+	 * ClientHello that negotiates a different ALPN must not get 0-RTT.
+	 */
+	char negotiated_alpn[QUIC_SESSION_TICKET_ALPN_MAX_LEN];
+};
+
+static struct quic_server_ticket_entry quic_server_ticket_cache[QUIC_SESSION_TICKET_CACHE_SIZE];
+static uint8_t quic_server_ticket_cache_replace_idx;
+static K_MUTEX_DEFINE(quic_server_ticket_cache_lock);
+
+static bool quic_0rtt_enabled(void)
+{
+	return IS_ENABLED(CONFIG_QUIC_0RTT);
+}
 
 /**
  * Add intermediate certificate to chain by sec_tag
@@ -151,8 +212,22 @@ static int verify_peer_certificate(struct quic_tls_context *ctx,
 
 	/* Verify against CA chain if available */
 	if (ctx->ca_cert) {
+		const char *cn = NULL;
+
+		/* Match the certificate against the name we asked for. Only a
+		 * client has a name to check; a server authenticates its peer
+		 * by the certificate alone.
+		 */
+		if (!ctx->ep->is_server && ctx->options.hostname[0] != '\0') {
+			cn = ctx->options.hostname;
+		} else if (!ctx->ep->is_server &&
+			   verify_level == MBEDTLS_SSL_VERIFY_REQUIRED) {
+			NET_WARN("No TLS_HOSTNAME set, peer certificate is accepted for "
+				 "any name it was issued for");
+		}
+
 		ret = mbedtls_x509_crt_verify(&peer_crt, &ctx->ca_chain, NULL,
-					      NULL, &flags, NULL, NULL);
+					      cn, &flags, NULL, NULL);
 		if (ret != 0) {
 			NET_WARN("Certificate verification failed: -0x%04x, flags=0x%08x",
 				 -ret, flags);
@@ -266,6 +341,504 @@ static int transcript_hash_get(struct quic_tls_context *ctx,
 	return 0;
 }
 
+static int tls_cipher_suite_hash_params(uint16_t cipher_suite,
+					psa_algorithm_t *hash_alg,
+					size_t *hash_len)
+{
+	switch (cipher_suite) {
+	case TLS_AES_128_GCM_SHA256:
+	case TLS_CHACHA20_POLY1305_SHA256:
+		*hash_alg = PSA_ALG_SHA_256;
+		*hash_len = 32;
+		return 0;
+	case TLS_AES_256_GCM_SHA384:
+		*hash_alg = PSA_ALG_SHA_384;
+		*hash_len = 48;
+		return 0;
+	default:
+		return -ENOTSUP;
+	}
+}
+
+static bool tls_external_psk_cipher_supported(uint16_t cipher_suite)
+{
+	return cipher_suite == TLS_AES_128_GCM_SHA256;
+}
+
+/*
+ * Check a cipher suite against the list the application set with
+ * TLS_CIPHERSUITE_LIST. An empty list means the application did not restrict
+ * anything, so every suite we implement is allowed.
+ */
+static bool tls_suite_allowed(const struct quic_tls_context *ctx, uint16_t cipher_suite)
+{
+	if (ctx->options.ciphersuites[0] == 0) {
+		return true;
+	}
+
+	ARRAY_FOR_EACH(ctx->options.ciphersuites, i) {
+		if (ctx->options.ciphersuites[i] == 0) {
+			break;
+		}
+
+		if ((uint16_t)ctx->options.ciphersuites[i] == cipher_suite) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Check a cipher suite against those offered in the ClientHello we sent.
+ * The offer can be narrower than the configured list: an external PSK
+ * excludes suites whose hash does not match the key.
+ */
+static bool tls_suite_offered(const struct quic_tls_context *ctx, uint16_t cipher_suite)
+{
+	for (uint8_t i = 0; i < ctx->offered_suite_count; i++) {
+		if (ctx->offered_suites[i] == cipher_suite) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static int tls_compute_hmac(psa_algorithm_t hash_alg,
+			    const uint8_t *key, size_t key_len,
+			    const uint8_t *data, size_t data_len,
+			    uint8_t *out, size_t out_size, size_t *out_len)
+{
+	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+	psa_key_id_t hmac_key_id = 0;
+	psa_status_t status;
+
+	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
+	psa_set_key_algorithm(&attr, PSA_ALG_HMAC(hash_alg));
+	psa_set_key_type(&attr, PSA_KEY_TYPE_HMAC);
+
+	status = psa_import_key(&attr, key, key_len, &hmac_key_id);
+	if (status != PSA_SUCCESS) {
+		NET_DBG("Failed to import HMAC key: %d", status);
+		return -EIO;
+	}
+
+	status = psa_mac_compute(hmac_key_id, PSA_ALG_HMAC(hash_alg),
+				 data, data_len,
+				 out, out_size, out_len);
+	psa_destroy_key(hmac_key_id);
+
+	if (status != PSA_SUCCESS) {
+		NET_DBG("Failed to compute HMAC: %d", status);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int tls_compute_psk_binder(const uint8_t *psk, size_t psk_len,
+				  bool resumption,
+				  psa_algorithm_t hash_alg,
+				  size_t hash_len,
+				  const uint8_t *truncated_ch,
+				  size_t truncated_ch_len,
+				  uint8_t *binder, size_t binder_len)
+{
+	/* RFC 8446 Section 7.1: the binder key label depends on where the
+	 * PSK came from - "res binder" for a session ticket PSK and
+	 * "ext binder" for an externally provisioned one.
+	 */
+	const char *label = resumption ? TLS13_LABEL_RES_BINDER : TLS13_LABEL_EXT_BINDER;
+	uint8_t early_secret[QUIC_HASH_MAX_LEN];
+	uint8_t binder_key[QUIC_HASH_MAX_LEN];
+	uint8_t finished_key[QUIC_HASH_MAX_LEN];
+	uint8_t transcript_hash[QUIC_HASH_MAX_LEN];
+	uint8_t empty_hash[QUIC_HASH_MAX_LEN];
+	size_t empty_hash_len;
+	size_t transcript_hash_len;
+	size_t computed_len;
+	psa_status_t status;
+	int ret;
+
+	if (binder_len < hash_len) {
+		return -ENOBUFS;
+	}
+
+	status = psa_hash_compute(hash_alg, NULL, 0,
+				  empty_hash, sizeof(empty_hash),
+				  &empty_hash_len);
+	if (status != PSA_SUCCESS) {
+		return -EIO;
+	}
+
+	ret = quic_hkdf_extract_ex(hash_alg, NULL, 0,
+				   psk, psk_len,
+				   early_secret, hash_len);
+	if (ret != 0) {
+		goto cleanup;
+	}
+
+	ret = quic_hkdf_expand_label_ex(hash_alg,
+					early_secret, hash_len,
+					(const uint8_t *)label, strlen(label),
+					empty_hash, empty_hash_len,
+					binder_key, hash_len);
+	if (ret != 0) {
+		goto cleanup;
+	}
+
+	ret = quic_hkdf_expand_label_ex(hash_alg,
+					binder_key, hash_len,
+					(const uint8_t *)TLS13_LABEL_FINISHED,
+					strlen(TLS13_LABEL_FINISHED),
+					NULL, 0,
+					finished_key, hash_len);
+	if (ret != 0) {
+		goto cleanup;
+	}
+
+	status = psa_hash_compute(hash_alg,
+				  truncated_ch, truncated_ch_len,
+				  transcript_hash, sizeof(transcript_hash),
+				  &transcript_hash_len);
+	if (status != PSA_SUCCESS) {
+		ret = -EIO;
+		goto cleanup;
+	}
+
+	ret = tls_compute_hmac(hash_alg, finished_key, hash_len,
+			       transcript_hash, transcript_hash_len,
+			       binder, binder_len, &computed_len);
+	if (ret != 0) {
+		goto cleanup;
+	}
+
+	if (computed_len != hash_len) {
+		ret = -EIO;
+	}
+
+cleanup:
+	/* The intermediate PSK-derived key material must not linger on the
+	 * stack after the binder is computed.
+	 */
+	crypto_zero(early_secret, sizeof(early_secret));
+	crypto_zero(binder_key, sizeof(binder_key));
+	crypto_zero(finished_key, sizeof(finished_key));
+
+	return ret;
+}
+
+static int tls_derive_resumption_psk(struct quic_tls_context *ctx,
+				     const uint8_t *ticket_nonce,
+				     size_t ticket_nonce_len,
+				     uint8_t *psk,
+				     size_t psk_size)
+{
+	if (ctx->resumption_master_secret_len == 0U) {
+		return -EINVAL;
+	}
+
+	if (psk_size < ctx->ks.hash_len) {
+		return -ENOBUFS;
+	}
+
+	return quic_hkdf_expand_label_ex(ctx->ks.hash_alg,
+					 ctx->resumption_master_secret,
+					 ctx->resumption_master_secret_len,
+					 (const uint8_t *)TLS13_LABEL_RESUMPTION,
+					 strlen(TLS13_LABEL_RESUMPTION),
+					 ticket_nonce, ticket_nonce_len,
+					 psk, ctx->ks.hash_len);
+}
+
+static uint32_t tls_client_ticket_age(const struct quic_tls_context *ctx)
+{
+	uint64_t now_ms;
+	uint64_t age_ms;
+
+	if (!ctx->session_state_valid) {
+		return 0U;
+	}
+
+	now_ms = k_uptime_get();
+	if (now_ms <= ctx->session_state.issue_time_ms) {
+		age_ms = 0U;
+	} else {
+		age_ms = now_ms - ctx->session_state.issue_time_ms;
+	}
+
+	if (age_ms > UINT32_MAX) {
+		age_ms = UINT32_MAX;
+	}
+
+	return (uint32_t)age_ms + ctx->session_state.ticket_age_add;
+}
+
+static bool tls_server_ticket_entry_expired(const struct quic_server_ticket_entry *entry)
+{
+	uint64_t age_ms;
+
+	if (!entry->valid) {
+		return true;
+	}
+
+	age_ms = k_uptime_get() - entry->issued_at_ms;
+
+	return age_ms > ((uint64_t)entry->ticket_lifetime * MSEC_PER_SEC);
+}
+
+ZTESTABLE_STATIC bool tls_server_ticket_cache_lookup(const uint8_t *ticket, size_t ticket_len,
+						     struct quic_server_ticket_entry *match)
+{
+	bool found = false;
+
+	k_mutex_lock(&quic_server_ticket_cache_lock, K_FOREVER);
+
+	for (size_t i = 0; i < ARRAY_SIZE(quic_server_ticket_cache); i++) {
+		struct quic_server_ticket_entry *entry = &quic_server_ticket_cache[i];
+
+		if (!entry->valid) {
+			continue;
+		}
+
+		if (tls_server_ticket_entry_expired(entry)) {
+			entry->valid = false;
+			crypto_zero(entry->psk, sizeof(entry->psk));
+			continue;
+		}
+
+		if (entry->ticket_len == ticket_len &&
+		    mbedtls_ct_memcmp(entry->ticket, ticket, ticket_len) == 0) {
+			if (match != NULL) {
+				*match = *entry;
+			}
+			found = true;
+			break;
+		}
+	}
+
+	k_mutex_unlock(&quic_server_ticket_cache_lock);
+
+	return found;
+}
+
+ZTESTABLE_STATIC int tls_server_ticket_cache_store(const uint8_t *ticket, size_t ticket_len,
+					 const uint8_t *psk, size_t psk_len,
+					 uint16_t cipher_suite,
+					 uint32_t ticket_lifetime,
+					 uint32_t ticket_age_add,
+					 uint32_t max_early_data_size,
+					 const char *alpn)
+{
+	struct quic_server_ticket_entry *entry;
+
+	if (ticket_len > QUIC_SESSION_TICKET_ID_LEN || psk_len > QUIC_MAX_RESUMPTION_PSK_LEN) {
+		return -ENOBUFS;
+	}
+
+	k_mutex_lock(&quic_server_ticket_cache_lock, K_FOREVER);
+
+	entry = &quic_server_ticket_cache[quic_server_ticket_cache_replace_idx];
+	quic_server_ticket_cache_replace_idx =
+		(quic_server_ticket_cache_replace_idx + 1U) % ARRAY_SIZE(quic_server_ticket_cache);
+
+	memset(entry, 0, sizeof(*entry));
+	memcpy(entry->ticket, ticket, ticket_len);
+	memcpy(entry->psk, psk, psk_len);
+	entry->issued_at_ms = k_uptime_get();
+	entry->ticket_lifetime = ticket_lifetime;
+	entry->ticket_age_add = ticket_age_add;
+	entry->max_early_data_size = max_early_data_size;
+	entry->cipher_suite = cipher_suite;
+	entry->ticket_len = ticket_len;
+	entry->psk_len = psk_len;
+	entry->valid = true;
+
+	/* Remember the negotiated ALPN so 0-RTT can be refused on a resuming
+	 * ClientHello that negotiates a different one. A name that does not fit
+	 * is left empty, which disables 0-RTT for this ticket rather than
+	 * risking a truncated match.
+	 */
+	if (alpn != NULL && strlen(alpn) < sizeof(entry->negotiated_alpn)) {
+		strcpy(entry->negotiated_alpn, alpn);
+	}
+
+	k_mutex_unlock(&quic_server_ticket_cache_lock);
+
+	return 0;
+}
+
+/* Invalidate a server session ticket so it can only be used once. Called after
+ * the PSK binder is verified, making resumption (and hence 0-RTT) single-use:
+ * a replayed ClientHello will no longer find the ticket (RFC 8446 8.1).
+ *
+ * Note: the lookup (during ClientHello parsing) and this consume are separate
+ * locked operations. Their single-use guarantee relies on QUIC packets being
+ * processed one at a time on the quic_service thread, so a replayed ClientHello
+ * is only handled after the original has already consumed the ticket. If packet
+ * processing ever becomes multi-threaded, the lookup and consume must be merged
+ * into a single atomic claim.
+ */
+ZTESTABLE_STATIC void tls_server_ticket_cache_consume(const uint8_t *ticket, size_t ticket_len)
+{
+	k_mutex_lock(&quic_server_ticket_cache_lock, K_FOREVER);
+
+	for (size_t i = 0; i < ARRAY_SIZE(quic_server_ticket_cache); i++) {
+		struct quic_server_ticket_entry *entry = &quic_server_ticket_cache[i];
+
+		if (entry->valid && entry->ticket_len == ticket_len &&
+		    mbedtls_ct_memcmp(entry->ticket, ticket, ticket_len) == 0) {
+			entry->valid = false;
+			crypto_zero(entry->psk, sizeof(entry->psk));
+			break;
+		}
+	}
+
+	k_mutex_unlock(&quic_server_ticket_cache_lock);
+}
+
+/* RFC 8446 8.2: a resumed 0-RTT is only fresh enough to accept early data if
+ * the age the client reports for the ticket is close to the age the server
+ * expects. Returns true when the reported age is within the allowed window.
+ */
+ZTESTABLE_STATIC bool tls_ticket_age_acceptable(uint64_t issued_at_ms,
+						uint32_t ticket_age_add,
+						uint32_t obfuscated_ticket_age,
+						uint64_t now_ms)
+{
+	uint32_t reported_age_ms = obfuscated_ticket_age - ticket_age_add;
+	uint64_t actual_age_ms = (now_ms > issued_at_ms) ? (now_ms - issued_at_ms) : 0U;
+	uint64_t diff;
+
+	if ((uint64_t)reported_age_ms > actual_age_ms) {
+		diff = (uint64_t)reported_age_ms - actual_age_ms;
+	} else {
+		diff = actual_age_ms - (uint64_t)reported_age_ms;
+	}
+
+	return diff <= QUIC_SESSION_TICKET_AGE_WINDOW_MS;
+}
+
+static int tls_derive_resumption_master_secret(struct quic_tls_context *ctx)
+{
+	int ret;
+
+	if (ctx->resumption_master_secret_len == ctx->ks.hash_len &&
+	    ctx->resumption_master_secret_len != 0U) {
+		return 0;
+	}
+
+	ret = quic_derive_secret(ctx, ctx->ks.master_secret, TLS13_LABEL_RES_MASTER,
+				 ctx->resumption_master_secret);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ctx->resumption_master_secret_len = ctx->ks.hash_len;
+
+	return 0;
+}
+
+static int quic_tls_get_session_state(struct quic_tls_context *ctx,
+				      struct quic_session_state *state)
+{
+	if (!ctx->session_state_valid) {
+		return -ENOENT;
+	}
+
+	*state = ctx->session_state;
+	if (!quic_0rtt_enabled()) {
+		state->max_early_data_size = 0U;
+	}
+
+	return 0;
+}
+
+static void quic_tls_snapshot_session_transport_params(struct quic_tls_context *ctx)
+{
+	struct quic_endpoint *ep = ctx->ep;
+	struct quic_session_transport_params *params = &ctx->session_state.transport_params;
+
+	memset(params, 0, sizeof(*params));
+
+	if (ep == NULL || !ep->peer_params.parsed) {
+		return;
+	}
+
+	params->valid = true;
+	params->initial_max_data = ep->peer_params.initial_max_data;
+	params->initial_max_stream_data_bidi_local =
+		ep->peer_params.initial_max_stream_data_bidi_local;
+	params->initial_max_stream_data_bidi_remote =
+		ep->peer_params.initial_max_stream_data_bidi_remote;
+	params->initial_max_stream_data_uni = ep->peer_params.initial_max_stream_data_uni;
+	params->initial_max_streams_bidi = ep->peer_params.initial_max_streams_bidi;
+	params->initial_max_streams_uni = ep->peer_params.initial_max_streams_uni;
+	params->max_idle_timeout = ep->peer_params.max_idle_timeout;
+	params->max_udp_payload_size = ep->peer_params.max_udp_payload_size;
+}
+
+static void quic_tls_restore_session_transport_params(struct quic_tls_context *ctx)
+{
+	struct quic_endpoint *ep = ctx->ep;
+	const struct quic_session_transport_params *params = &ctx->session_state.transport_params;
+
+	if (ep == NULL || !params->valid) {
+		return;
+	}
+
+	ep->peer_params.initial_max_data = params->initial_max_data;
+	ep->peer_params.initial_max_stream_data_bidi_local =
+		params->initial_max_stream_data_bidi_local;
+	ep->peer_params.initial_max_stream_data_bidi_remote =
+		params->initial_max_stream_data_bidi_remote;
+	ep->peer_params.initial_max_stream_data_uni = params->initial_max_stream_data_uni;
+	ep->peer_params.initial_max_streams_bidi = params->initial_max_streams_bidi;
+	ep->peer_params.initial_max_streams_uni = params->initial_max_streams_uni;
+	ep->peer_params.max_idle_timeout = params->max_idle_timeout;
+	ep->peer_params.max_udp_payload_size = params->max_udp_payload_size;
+	ep->peer_params.parsed = true;
+	ep->tx_fc.max_data = params->initial_max_data;
+}
+
+static int quic_tls_set_session_state(struct quic_tls_context *ctx,
+				      const struct quic_session_state *state)
+{
+	if (ctx->ep->is_server) {
+		return -EINVAL;
+	}
+
+	if (state->version != QUIC_SESSION_STATE_VERSION) {
+		return -EINVAL;
+	}
+
+	if (state->ticket_len == 0U || state->ticket_len > QUIC_MAX_SESSION_TICKET_LEN ||
+	    state->psk_len == 0U || state->psk_len > QUIC_MAX_RESUMPTION_PSK_LEN) {
+		return -EINVAL;
+	}
+
+	if (state->transport_params.valid &&
+	    state->transport_params.max_udp_payload_size < 1200U) {
+		return -EINVAL;
+	}
+
+	ctx->session_state = *state;
+	if (!quic_0rtt_enabled()) {
+		ctx->session_state.max_early_data_size = 0U;
+	}
+	ctx->session_state_valid = true;
+	ctx->psk = ctx->session_state.psk;
+	ctx->psk_len = ctx->session_state.psk_len;
+	ctx->psk_identity = ctx->session_state.ticket;
+	ctx->psk_identity_len = ctx->session_state.ticket_len;
+	ctx->psk_configured = true;
+	ctx->psk_is_resumption = true;
+	quic_tls_restore_session_transport_params(ctx);
+
+	return 0;
+}
+
 /*
  * Derive-Secret (RFC 8446 Section 7.1)
  * Derive-Secret(Secret, Label, Messages) =
@@ -307,57 +880,102 @@ static int quic_derive_secret_ex(struct quic_tls_context *ctx,
 					 out, ctx->ks.hash_len);
 }
 
+static int tls_emit_client_early_traffic_secret(struct quic_tls_context *ctx)
+{
+	uint8_t client_early_traffic_secret[QUIC_HASH_MAX_LEN];
+	int ret;
+
+	if (!quic_0rtt_enabled() || ctx->secret_cb == NULL) {
+		return 0;
+	}
+
+	if ((!ctx->ep->is_server && !ctx->early_data_offered) ||
+	    (ctx->ep->is_server && !ctx->early_data_accepted)) {
+		return 0;
+	}
+
+	ret = quic_derive_secret(ctx, ctx->ks.early_secret,
+				 TLS13_LABEL_C_E_TRAFFIC,
+				 client_early_traffic_secret);
+	if (ret == 0) {
+		ret = ctx->secret_cb(ctx->user_data, QUIC_SECRET_LEVEL_EARLY,
+				     client_early_traffic_secret,
+				     client_early_traffic_secret,
+				     ctx->ks.hash_len);
+	}
+
+	crypto_zero(client_early_traffic_secret, sizeof(client_early_traffic_secret));
+
+	return ret;
+}
+
 /*
- * Generate ECDH key pair
+ * Generate an ephemeral ECDH key pair for a specific named group into the
+ * provided key id / public-key buffer.
  */
-static int generate_ecdh_keypair(struct quic_tls_context *ctx)
+static int generate_ecdh_keypair_group(uint16_t group, psa_key_id_t *key_id,
+				       uint8_t *pub, size_t pub_size, size_t *pub_len)
 {
 	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
 	psa_status_t status;
-	size_t pubkey_len;
-	uint16_t group = ctx->ks.key_exchange_group;
 
 	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DERIVE);
 	psa_set_key_algorithm(&attr, PSA_ALG_ECDH);
 
 	if (group == MBEDTLS_SSL_IANA_TLS_GROUP_X25519) {
-		NET_DBG("Setting up x25519 key (Montgomery, 255 bits)");
 		psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
 		psa_set_key_bits(&attr, 255);
 	} else if (group == MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1) {
-		NET_DBG("Setting up secp256r1 key (SECP_R1, 256 bits)");
 		psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1));
 		psa_set_key_bits(&attr, 256);
 	} else {
-		NET_DBG("Unknown group 0x%04x, defaulting to secp256r1", group);
-		/* Default to secp256r1 for client-initiated connections */
-		psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1));
-		psa_set_key_bits(&attr, 256);
-		ctx->ks.key_exchange_group = MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1;
+		return -ENOTSUP;
 	}
 
-	status = psa_generate_key(&attr, &ctx->ecdh_key_id);
+	status = psa_generate_key(&attr, key_id);
 	if (status != PSA_SUCCESS) {
-		NET_DBG("Failed to generate ECDH key (%d)", status);
+		NET_DBG("Failed to generate ECDH key for group 0x%04x (%d)", group, status);
 		return -EIO;
 	}
 
-	NET_DBG("Generated key with id=%u", (unsigned int)ctx->ecdh_key_id);
-
-	/* Export public key */
-	status = psa_export_public_key(ctx->ecdh_key_id,
-				       ctx->ecdh_public_key,
-				       sizeof(ctx->ecdh_public_key),
-				       &pubkey_len);
+	status = psa_export_public_key(*key_id, pub, pub_size, pub_len);
 	if (status != PSA_SUCCESS) {
 		NET_DBG("Failed to export public key (%d)", status);
-		psa_destroy_key(ctx->ecdh_key_id);
+		psa_destroy_key(*key_id);
+		*key_id = 0;
 		return -EIO;
 	}
 
-	ctx->ecdh_public_key_len = pubkey_len;
+	return 0;
+}
+
+/*
+ * Generate ECDH key pair for the context's selected group into ctx->ecdh_*.
+ * Used by the server (for the client-selected group) and as the client's
+ * primary offer.
+ */
+static int generate_ecdh_keypair(struct quic_tls_context *ctx)
+{
+	uint16_t group = ctx->ks.key_exchange_group;
+	int ret;
+
+	if (group != MBEDTLS_SSL_IANA_TLS_GROUP_X25519 &&
+	    group != MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1) {
+		/* Default to secp256r1 for client-initiated connections */
+		group = MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1;
+		ctx->ks.key_exchange_group = group;
+	}
+
+	ret = generate_ecdh_keypair_group(group, &ctx->ecdh_key_id,
+					  ctx->ecdh_public_key,
+					  sizeof(ctx->ecdh_public_key),
+					  &ctx->ecdh_public_key_len);
+	if (ret != 0) {
+		return ret;
+	}
+
 	NET_DBG("Generated ECDH keypair for group 0x%04x, pubkey len %zu",
-		ctx->ks.key_exchange_group, pubkey_len);
+		group, ctx->ecdh_public_key_len);
 
 	return 0;
 }
@@ -390,6 +1008,13 @@ static int compute_shared_secret(struct quic_tls_context *ctx)
 		NET_DBG("ECDH key agreement failed (%d)", status);
 		return -EIO;
 	}
+
+	/* The ephemeral private key has no use after the key agreement.
+	 * Release it now instead of holding its key slot for the lifetime
+	 * of the connection.
+	 */
+	(void)psa_destroy_key(ctx->ecdh_key_id);
+	ctx->ecdh_key_id = 0;
 
 	if (IS_ENABLED(CONFIG_QUIC_TXRX_DEBUG)) {
 		NET_HEXDUMP_DBG(ctx->shared_secret, secret_len, "ECDH shared secret:");
@@ -491,17 +1116,236 @@ static bool handle_key_share_ext(struct quic_tls_context *ctx,
 /*
  * Parse ClientHello message
  */
-static int parse_client_hello(struct quic_tls_context *ctx,
-			      const uint8_t *data, size_t len)
+/* Result of parsing the pre_shared_key ClientHello extension. */
+struct quic_psk_offer {
+	bool matched_session_ticket;
+	bool verified_binder;
+	uint32_t matched_max_early_data_size;
+	uint32_t obfuscated_ticket_age;
+	struct quic_server_ticket_entry matched_entry;
+};
+
+/*
+ * Parse the pre_shared_key ClientHello extension: locate a matching PSK
+ * identity (an external PSK or a cached session ticket) and verify its binder
+ * against the truncated ClientHello transcript. On a verified match the
+ * resumption PSK is installed into ctx and the outcome is reported through
+ * "offer" so the caller can apply the resumption/0-RTT policy. Returns 0 on
+ * success (including "no matching identity"), or a negative error on a
+ * malformed extension or binder failure.
+ */
+static int parse_pre_shared_key_ext(struct quic_tls_context *ctx,
+				    const uint8_t *data, size_t pos, size_t ext_len,
+				    const uint8_t *full_msg, size_t full_msg_len,
+				    bool offered_psk_dhe,
+				    uint16_t selected_psk_cipher_suite,
+				    struct quic_psk_offer *offer)
+{
+	size_t identities_len;
+	size_t identities_pos;
+	size_t identities_end;
+	size_t binders_len;
+	size_t binders_pos;
+	size_t binders_end;
+	size_t matched_binder_offset = SIZE_MAX;
+	size_t matched_binder_len = 0U;
+	uint16_t matched_identity_idx = UINT16_MAX;
+	uint16_t identity_idx = 0U;
+	psa_algorithm_t psk_hash_alg;
+	size_t psk_hash_len;
+	uint8_t expected_binder[QUIC_HASH_MAX_LEN];
+	uint8_t matched_ticket_psk[QUIC_MAX_RESUMPTION_PSK_LEN];
+	size_t matched_ticket_psk_len = 0U;
+	const uint8_t *matched_psk;
+	size_t matched_psk_len;
+	int ret = 0;
+
+	if (ext_len < 4U) {
+		return -EINVAL;
+	}
+
+	identities_len = ((size_t)data[pos] << 8) | data[pos + 1];
+	identities_pos = pos + 2;
+	identities_end = identities_pos + identities_len;
+
+	if (identities_end + 2U > pos + ext_len) {
+		return -EINVAL;
+	}
+
+	while (identities_pos + 6U <= identities_end) {
+		size_t identity_len = ((size_t)data[identities_pos] << 8) |
+				      data[identities_pos + 1];
+		const uint8_t *age;
+		struct quic_server_ticket_entry entry;
+
+		identities_pos += 2;
+		if (identities_pos + identity_len + 4U > identities_end) {
+			ret = -EINVAL;
+			goto out;
+		}
+
+		/* Obfuscated ticket age follows the identity. */
+		age = &data[identities_pos + identity_len];
+
+		if (matched_identity_idx != UINT16_MAX) {
+			identities_pos += identity_len + 4;
+			identity_idx++;
+			continue;
+		}
+
+		if (ctx->psk_configured && identity_len == ctx->psk_identity_len &&
+		    memcmp(&data[identities_pos], ctx->psk_identity, identity_len) == 0) {
+			matched_identity_idx = identity_idx;
+		} else if (tls_server_ticket_cache_lookup(&data[identities_pos],
+							  identity_len, &entry)) {
+			matched_identity_idx = identity_idx;
+			offer->matched_session_ticket = true;
+			offer->matched_max_early_data_size = entry.max_early_data_size;
+			matched_ticket_psk_len = entry.psk_len;
+			memcpy(matched_ticket_psk, entry.psk, matched_ticket_psk_len);
+
+			/* Keep the matched ticket (for single-use consume and the
+			 * expected age) and the client's obfuscated ticket age (4
+			 * bytes after the identity, bounds-checked above) for the
+			 * freshness check.
+			 */
+			offer->matched_entry = entry;
+			offer->obfuscated_ticket_age = sys_get_be32(age);
+
+			/* Drop the transient PSK copy in the lookup scratch entry;
+			 * the persistent copies (matched_ticket_psk and
+			 * offer->matched_entry.psk) are wiped at "out".
+			 */
+			crypto_zero(entry.psk, sizeof(entry.psk));
+		}
+
+		identities_pos += identity_len + 4;
+		identity_idx++;
+	}
+
+	if (identities_pos != identities_end) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	binders_len = ((size_t)data[identities_end] << 8) | data[identities_end + 1];
+	binders_pos = identities_end + 2;
+	binders_end = binders_pos + binders_len;
+	identity_idx = 0U;
+
+	if (binders_end > pos + ext_len) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	while (binders_pos + 1U <= binders_end) {
+		size_t binder_len = data[binders_pos++];
+
+		if (binders_pos + binder_len > binders_end) {
+			ret = -EINVAL;
+			goto out;
+		}
+
+		if (identity_idx == matched_identity_idx) {
+			matched_binder_offset = binders_pos;
+			matched_binder_len = binder_len;
+		}
+
+		binders_pos += binder_len;
+		identity_idx++;
+	}
+
+	if (binders_pos != binders_end) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (matched_identity_idx == UINT16_MAX) {
+		goto out;
+	}
+
+	psk_hash_alg = PSA_ALG_SHA_256;
+	psk_hash_len = 32U;
+
+	if (matched_binder_len != psk_hash_len) {
+		ret = -EBADMSG;
+		goto out;
+	}
+
+	if (4U + matched_binder_offset > full_msg_len) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	if (!offered_psk_dhe || selected_psk_cipher_suite == 0U) {
+		ret = -ENOTSUP;
+		goto out;
+	}
+
+	matched_psk = offer->matched_session_ticket ? matched_ticket_psk : ctx->psk;
+	matched_psk_len = offer->matched_session_ticket ? matched_ticket_psk_len : ctx->psk_len;
+
+	/* RFC 8446 4.2.11.2: the binder covers the ClientHello truncated at the
+	 * end of the identities field (before the binders vector), regardless of
+	 * which identity matched.
+	 */
+	if (tls_compute_psk_binder(matched_psk, matched_psk_len,
+				   offer->matched_session_ticket,
+				   psk_hash_alg, psk_hash_len,
+				   full_msg, 4U + identities_end,
+				   expected_binder, sizeof(expected_binder)) != 0) {
+		ret = -EIO;
+		goto out;
+	}
+
+	if (mbedtls_ct_memcmp(expected_binder, &data[matched_binder_offset],
+			      psk_hash_len) != 0) {
+		ret = -EBADMSG;
+		goto out;
+	}
+
+	offer->verified_binder = true;
+	if (offer->matched_session_ticket) {
+		memcpy(ctx->session_state.psk, matched_ticket_psk, matched_ticket_psk_len);
+		ctx->psk = ctx->session_state.psk;
+		ctx->psk_len = matched_ticket_psk_len;
+		ctx->psk_configured = true;
+		ctx->psk_is_resumption = true;
+	}
+
+out:
+	/* The resumption PSK must not linger on the handshake stack after use.
+	 * matched_ticket_psk holds the working copy; offer->matched_entry.psk is
+	 * the copy propagated to the caller, which only needs the ticket id, age
+	 * and ALPN from that entry, not the PSK.
+	 */
+	crypto_zero(matched_ticket_psk, sizeof(matched_ticket_psk));
+	crypto_zero(offer->matched_entry.psk, sizeof(offer->matched_entry.psk));
+
+	return ret;
+}
+
+ZTESTABLE_STATIC int parse_client_hello(struct quic_tls_context *ctx,
+					const uint8_t *data, size_t len,
+					const uint8_t *full_msg, size_t full_msg_len)
 {
 #define MIN_TLS_CLIENT_HELLO_SIZE 38
 	size_t pos = 0;
 	uint16_t legacy_version;
 	uint8_t session_id_len;
 	uint16_t cipher_suites_len;
+	uint16_t selected_cipher_suite = 0;
+	uint16_t selected_psk_cipher_suite = 0;
 	uint8_t compression_len;
 	uint16_t extensions_len;
 	size_t ext_end;
+	bool saw_psk_ke_modes = false;
+	bool offered_psk_dhe = false;
+	bool got_pre_shared_key = false;
+	bool offered_early_data = false;
+	struct quic_psk_offer psk_offer = {0};
+	const char *psk_mode = "";
+	int ret;
 
 	if (len < MIN_TLS_CLIENT_HELLO_SIZE) {
 		return -EINVAL;
@@ -521,6 +1365,10 @@ static int parse_client_hello(struct quic_tls_context *ctx,
 	pos += 32;
 
 	/* Legacy session ID */
+	if (pos + 1 > len) {
+		return -EINVAL;
+	}
+
 	session_id_len = data[pos++];
 	if (pos + session_id_len > len) {
 		return -EINVAL;
@@ -528,39 +1376,57 @@ static int parse_client_hello(struct quic_tls_context *ctx,
 	pos += session_id_len;
 
 	/* Cipher suites */
+	if (pos + 2 > len) {
+		return -EINVAL;
+	}
+
 	cipher_suites_len = (data[pos] << 8) | data[pos + 1];
 	pos += 2;
 
-	if (pos + cipher_suites_len > len) {
+	/* The list is a sequence of 2-byte suites, so an odd length is
+	 * malformed and would make the loop below read one byte too far.
+	 */
+	if ((cipher_suites_len % 2U) != 0U || pos + cipher_suites_len > len) {
 		return -EINVAL;
 	}
 
 	/* Find a supported cipher suite */
-	ctx->ks.cipher_suite = 0;
 	for (size_t i = 0; i < cipher_suites_len; i += 2) {
 		uint16_t suite = (data[pos + i] << 8) | data[pos + i + 1];
 
+		if (!tls_suite_allowed(ctx, suite)) {
+			continue;
+		}
+
 		if (suite == TLS_AES_128_GCM_SHA256 ||
-		    suite == TLS_AES_256_GCM_SHA384 ||
-		    suite == TLS_CHACHA20_POLY1305_SHA256) {
-			ctx->ks.cipher_suite = suite;
-			break;
+		    suite == TLS_AES_256_GCM_SHA384) {
+			if (selected_cipher_suite == 0U) {
+				selected_cipher_suite = suite;
+			}
+
+			if (selected_psk_cipher_suite == 0U &&
+			    tls_external_psk_cipher_supported(suite)) {
+				selected_psk_cipher_suite = suite;
+			}
 		}
 	}
 
-	if (ctx->ks.cipher_suite == 0) {
+	if (selected_cipher_suite == 0U) {
 		NET_DBG("No supported cipher suite found");
 		return -ENOTSUP;
 	}
 
-	NET_DBG("Selected cipher suite %s (0x%04x)",
-		cipher_suite_name(ctx->ks.cipher_suite),
-		ctx->ks.cipher_suite);
-
 	pos += cipher_suites_len;
 
 	/* Legacy compression methods */
+	if (pos + 1 > len) {
+		return -EINVAL;
+	}
+
 	compression_len = data[pos++];
+	if (pos + compression_len > len) {
+		return -EINVAL;
+	}
 	pos += compression_len;
 
 	/* Extensions */
@@ -571,8 +1437,17 @@ static int parse_client_hello(struct quic_tls_context *ctx,
 	extensions_len = (data[pos] << 8) | data[pos + 1];
 	pos += 2;
 
+	if (pos + extensions_len > len) {
+		return -EINVAL;
+	}
+
 	/* Parse extensions */
 	ext_end = pos + extensions_len;
+	ctx->psk_offered = false;
+	ctx->use_psk_key_schedule = false;
+	ctx->early_data_offered = false;
+	ctx->early_data_accepted = false;
+	ctx->early_data_rejected = false;
 
 	while (pos + 4 <= ext_end) {
 		uint16_t ext_type = (data[pos] << 8) | data[pos + 1];
@@ -665,6 +1540,32 @@ static int parse_client_hello(struct quic_tls_context *ctx,
 			}
 			break;
 
+		case TLS_EXT_PSK_KEY_EXCHANGE_MODES:
+			saw_psk_ke_modes = true;
+			for (size_t mode_pos = pos + 1; mode_pos < pos + ext_len; mode_pos++) {
+				if (data[mode_pos] == TLS_PSK_KE_MODE_PSK_DHE_KE) {
+					offered_psk_dhe = true;
+					break;
+				}
+			}
+			break;
+
+		case TLS_EXT_EARLY_DATA:
+			offered_early_data = true;
+			break;
+
+		case TLS_EXT_PRE_SHARED_KEY:
+			got_pre_shared_key = true;
+			ret = parse_pre_shared_key_ext(ctx, data, pos, ext_len,
+						       full_msg, full_msg_len,
+						       offered_psk_dhe,
+						       selected_psk_cipher_suite,
+						       &psk_offer);
+			if (ret != 0) {
+				return ret;
+			}
+			break;
+
 		default:
 			break;
 		}
@@ -677,6 +1578,76 @@ static int parse_client_hello(struct quic_tls_context *ctx,
 		NET_DBG("No matching ALPN protocol found");
 		return -ENOPROTOOPT;  /* Specific error for ALPN mismatch */
 	}
+
+	if (offered_early_data && !got_pre_shared_key) {
+		return -EINVAL;
+	}
+
+	if (psk_offer.verified_binder) {
+		if (!saw_psk_ke_modes || !offered_psk_dhe) {
+			return -ENOTSUP;
+		}
+
+		ctx->psk_offered = true;
+		ctx->use_psk_key_schedule = true;
+		ctx->early_data_offered = quic_0rtt_enabled() && offered_early_data;
+		ctx->early_data_accepted = quic_0rtt_enabled() &&
+			offered_early_data &&
+			psk_offer.matched_session_ticket &&
+			psk_offer.matched_max_early_data_size > 0U &&
+			ctx->max_early_data_size >= psk_offer.matched_max_early_data_size;
+
+		if (psk_offer.matched_session_ticket) {
+			const char *cur_alpn =
+				ctx->negotiated_alpn != NULL ? ctx->negotiated_alpn : "";
+
+			/* Single-use: now that the binder is verified, drop the
+			 * ticket so a replayed ClientHello cannot resume or
+			 * replay 0-RTT (RFC 8446 8.1).
+			 */
+			tls_server_ticket_cache_consume(psk_offer.matched_entry.ticket,
+							psk_offer.matched_entry.ticket_len);
+
+			/* RFC 8446 8.2: only accept 0-RTT within a freshness
+			 * window around the expected ticket age.
+			 */
+			if (ctx->early_data_accepted &&
+			    !tls_ticket_age_acceptable(psk_offer.matched_entry.issued_at_ms,
+						       psk_offer.matched_entry.ticket_age_add,
+						       psk_offer.obfuscated_ticket_age,
+						       k_uptime_get())) {
+				ctx->early_data_accepted = false;
+			}
+
+			/* RFC 8446 4.2.11 / RFC 9001 4.6.1: 0-RTT is only valid if
+			 * the resuming handshake negotiates the same ALPN as the
+			 * connection that issued the ticket.
+			 */
+			if (ctx->early_data_accepted &&
+			    strcmp(cur_alpn, psk_offer.matched_entry.negotiated_alpn) != 0) {
+				NET_DBG("Refusing 0-RTT: ALPN changed on resumption");
+				ctx->early_data_accepted = false;
+			}
+		}
+
+		ctx->early_data_rejected = offered_early_data && !ctx->early_data_accepted;
+	}
+
+	ctx->ks.cipher_suite = ctx->use_psk_key_schedule ?
+		selected_psk_cipher_suite : selected_cipher_suite;
+
+	if (ctx->ks.cipher_suite == 0U) {
+		return -ENOTSUP;
+	}
+
+	if (ctx->use_psk_key_schedule) {
+		psk_mode = psk_offer.matched_session_ticket ?
+			" with resumed PSK" : " with external PSK";
+	}
+
+	NET_DBG("Selected cipher suite %s (0x%04x)%s",
+		cipher_suite_name(ctx->ks.cipher_suite),
+		ctx->ks.cipher_suite, psk_mode);
 
 	return 0;
 }
@@ -694,16 +1665,23 @@ static int parse_client_hello(struct quic_tls_context *ctx,
  * }
  */
 static int build_client_hello(struct quic_tls_context *ctx,
-			      uint8_t *buf, size_t buf_size, size_t *out_len)
+			      uint8_t *buf, size_t buf_size, size_t *out_len,
+			      size_t *binder_offset)
 {
 	size_t pos = 0;
 	size_t ext_start;
 	size_t ext_len;
 	size_t ks_ext_len;
+	size_t cipher_suites_len;
+	bool have_x25519;
 	int ret;
 
 	if (buf_size < 256) {
 		return -ENOBUFS;
+	}
+
+	if (binder_offset != NULL) {
+		*binder_offset = SIZE_MAX;
 	}
 
 	/* Legacy version: TLS 1.2 (0x0303) */
@@ -712,7 +1690,10 @@ static int build_client_hello(struct quic_tls_context *ctx,
 
 	/* Client random (32 bytes) */
 	if (!ctx->client_hello_prepared) {
-		sys_rand_get(ctx->client_random, 32);
+		ret = sys_csrand_get(ctx->client_random, 32);
+		if (ret != 0) {
+			return ret;
+		}
 	}
 	memcpy(&buf[pos], ctx->client_random, 32);
 	pos += 32;
@@ -720,15 +1701,51 @@ static int build_client_hello(struct quic_tls_context *ctx,
 	/* Legacy session ID (empty for QUIC) */
 	buf[pos++] = 0;
 
-	/* Cipher suites (2 bytes length + suites) */
-	buf[pos++] = 0x00;
-	buf[pos++] = 0x06;  /* 3 cipher suites = 6 bytes */
-	buf[pos++] = (TLS_AES_128_GCM_SHA256 >> 8) & 0xFF;
-	buf[pos++] = TLS_AES_128_GCM_SHA256 & 0xFF;
-	buf[pos++] = (TLS_AES_256_GCM_SHA384 >> 8) & 0xFF;
-	buf[pos++] = TLS_AES_256_GCM_SHA384 & 0xFF;
-	buf[pos++] = (TLS_CHACHA20_POLY1305_SHA256 >> 8) & 0xFF;
-	buf[pos++] = TLS_CHACHA20_POLY1305_SHA256 & 0xFF;
+	/* Cipher suites (2 bytes length + suites).
+	 * TLS_CHACHA20_POLY1305_SHA256 is deliberately not offered, see
+	 * quic_hp_mask().
+	 */
+	static const uint16_t candidate_suites[] = {
+		TLS_AES_128_GCM_SHA256,
+		TLS_AES_256_GCM_SHA384,
+	};
+	size_t suites_len_pos;
+
+	suites_len_pos = pos;
+	pos += 2;
+	cipher_suites_len = 0U;
+	ctx->offered_suite_count = 0U;
+
+	ARRAY_FOR_EACH(candidate_suites, i) {
+		/* An external PSK constrains the suite to one whose hash
+		 * matches the configured key.
+		 */
+		if (ctx->psk_configured &&
+		    !tls_external_psk_cipher_supported(candidate_suites[i])) {
+			continue;
+		}
+
+		if (!tls_suite_allowed(ctx, candidate_suites[i])) {
+			continue;
+		}
+
+		buf[pos++] = (candidate_suites[i] >> 8) & 0xFF;
+		buf[pos++] = candidate_suites[i] & 0xFF;
+		cipher_suites_len += 2U;
+
+		/* Record the offer so the ServerHello check can insist the
+		 * server picked one of these (RFC 8446 ch. 4.1.3).
+		 */
+		ctx->offered_suites[ctx->offered_suite_count++] = candidate_suites[i];
+	}
+
+	if (cipher_suites_len == 0U) {
+		NET_DBG("No cipher suite left after applying the configured list");
+		return -ENOTSUP;
+	}
+
+	buf[suites_len_pos] = (cipher_suites_len >> 8) & 0xFF;
+	buf[suites_len_pos + 1] = cipher_suites_len & 0xFF;
 
 	/* Legacy compression methods (single null byte) */
 	buf[pos++] = 0x01;  /* length */
@@ -737,6 +1754,36 @@ static int build_client_hello(struct quic_tls_context *ctx,
 	/* Extensions */
 	ext_start = pos;
 	pos += 2;  /* Reserve for extensions length */
+
+	/* server_name (SNI, RFC 6066) when a hostname has been configured. */
+	if (ctx->options.hostname[0] != '\0') {
+		size_t host_len = strlen(ctx->options.hostname);
+		size_t name_list_len = 1 + 2 + host_len; /* type + host_len + host */
+		size_t sni_needed = 9 + host_len; /* ext hdr + list len + name hdr + host */
+
+		if (pos + sni_needed > buf_size) {
+			return -ENOBUFS;
+		}
+
+		buf[pos++] = 0x00;
+		buf[pos++] = TLS_EXT_SERVER_NAME;
+		buf[pos++] = ((2 + name_list_len) >> 8) & 0xFF;
+		buf[pos++] = (2 + name_list_len) & 0xFF;
+		buf[pos++] = (name_list_len >> 8) & 0xFF;
+		buf[pos++] = name_list_len & 0xFF;
+		buf[pos++] = 0x00; /* NameType: host_name */
+		buf[pos++] = (host_len >> 8) & 0xFF;
+		buf[pos++] = host_len & 0xFF;
+		memcpy(&buf[pos], ctx->options.hostname, host_len);
+		pos += host_len;
+	}
+
+	/* supported_versions (7) and signature_algorithms (8) are fixed-size
+	 * and written back to back.
+	 */
+	if (pos + 15 > buf_size) {
+		return -ENOBUFS;
+	}
 
 	/* supported_versions extension (mandatory for TLS 1.3) */
 	buf[pos++] = 0x00;
@@ -757,40 +1804,92 @@ static int build_client_hello(struct quic_tls_context *ctx,
 	buf[pos++] = 0x04;
 	buf[pos++] = 0x03;  /* ecdsa_secp256r1_sha256 */
 
-	/* supported_groups extension */
-	buf[pos++] = 0x00;
-	buf[pos++] = 0x0a;  /* Extension type: supported_groups */
-	buf[pos++] = 0x00;
-	buf[pos++] = 0x04;  /* Extension length */
-	buf[pos++] = 0x00;
-	buf[pos++] = 0x02;  /* Groups length */
-	buf[pos++] = 0x00;
-	buf[pos++] = 0x17;  /* secp256r1 */
-
-	/* Generate ECDH key pair for key_share */
+	/* Generate the ECDH offers for key_share. secp256r1 (P-256) is
+	 * universally available and is the mandatory offer, kept in
+	 * ecdh_key_id2. x25519 is best-effort (some PSA backends lack it) and,
+	 * when available, is the primary offer in ecdh_key_id. The peer selects
+	 * one in its ServerHello; the other is destroyed there.
+	 */
 	if (!ctx->client_hello_prepared) {
-		ret = generate_ecdh_keypair(ctx);
+		ret = generate_ecdh_keypair_group(MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1,
+						  &ctx->ecdh_key_id2,
+						  ctx->ecdh_public_key2,
+						  sizeof(ctx->ecdh_public_key2),
+						  &ctx->ecdh_public_key2_len);
 		if (ret != 0) {
 			return ret;
 		}
+
+		ctx->ks.key_exchange_group = MBEDTLS_SSL_IANA_TLS_GROUP_X25519;
+		if (generate_ecdh_keypair(ctx) != 0) {
+			/* No x25519 support: fall back to a secp256r1-only offer. */
+			ctx->ecdh_key_id = 0;
+			ctx->ecdh_public_key_len = 0;
+			ctx->ks.key_exchange_group = MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1;
+		}
 	}
 
-	/* key_share extension */
-	buf[pos++] = 0x00;
-	buf[pos++] = 0x33;  /* Extension type: key_share */
-	ks_ext_len = 2 + 2 + 2 + ctx->ecdh_public_key_len;  /* list len + group + key len + key */
-	buf[pos++] = (ks_ext_len >> 8) & 0xFF;
-	buf[pos++] = ks_ext_len & 0xFF;
-	/* Client key share list length */
-	buf[pos++] = ((2 + 2 + ctx->ecdh_public_key_len) >> 8) & 0xFF;
-	buf[pos++] = (2 + 2 + ctx->ecdh_public_key_len) & 0xFF;
-	/* Key share entry */
-	buf[pos++] = 0x00;
-	buf[pos++] = 0x17;  /* secp256r1 */
-	buf[pos++] = (ctx->ecdh_public_key_len >> 8) & 0xFF;
-	buf[pos++] = ctx->ecdh_public_key_len & 0xFF;
-	memcpy(&buf[pos], ctx->ecdh_public_key, ctx->ecdh_public_key_len);
-	pos += ctx->ecdh_public_key_len;
+	have_x25519 = (ctx->ecdh_public_key_len > 0);
+
+	/* supported_groups extension: secp256r1 always, x25519 when available. */
+	{
+		size_t groups_len = (have_x25519 ? 2U : 0U) + 2U;
+
+		if (pos + 6 + groups_len > buf_size) {
+			return -ENOBUFS;
+		}
+
+		buf[pos++] = 0x00;
+		buf[pos++] = 0x0a;  /* Extension type: supported_groups */
+		buf[pos++] = ((2 + groups_len) >> 8) & 0xFF;
+		buf[pos++] = (2 + groups_len) & 0xFF;
+		buf[pos++] = (groups_len >> 8) & 0xFF;
+		buf[pos++] = groups_len & 0xFF;
+		if (have_x25519) {
+			buf[pos++] = 0x00;
+			buf[pos++] = 0x1d;  /* x25519 (preferred) */
+		}
+		buf[pos++] = 0x00;
+		buf[pos++] = 0x17;  /* secp256r1 */
+	}
+
+	/* key_share extension: secp256r1 always, x25519 when available. */
+	{
+		size_t entry_x25519 = have_x25519 ? (2 + 2 + ctx->ecdh_public_key_len) : 0;
+		size_t entry_secp = 2 + 2 + ctx->ecdh_public_key2_len;
+		size_t ks_list_len = entry_x25519 + entry_secp;
+		size_t ks_needed = 6 + ks_list_len; /* ext hdr + list len + entries */
+
+		if (pos + ks_needed > buf_size) {
+			return -ENOBUFS;
+		}
+
+		buf[pos++] = 0x00;
+		buf[pos++] = 0x33;  /* Extension type: key_share */
+		ks_ext_len = 2 + ks_list_len;  /* list len field + entries */
+		buf[pos++] = (ks_ext_len >> 8) & 0xFF;
+		buf[pos++] = ks_ext_len & 0xFF;
+		buf[pos++] = (ks_list_len >> 8) & 0xFF;
+		buf[pos++] = ks_list_len & 0xFF;
+
+		/* x25519 entry */
+		if (have_x25519) {
+			buf[pos++] = 0x00;
+			buf[pos++] = 0x1d;
+			buf[pos++] = (ctx->ecdh_public_key_len >> 8) & 0xFF;
+			buf[pos++] = ctx->ecdh_public_key_len & 0xFF;
+			memcpy(&buf[pos], ctx->ecdh_public_key, ctx->ecdh_public_key_len);
+			pos += ctx->ecdh_public_key_len;
+		}
+
+		/* secp256r1 entry */
+		buf[pos++] = 0x00;
+		buf[pos++] = 0x17;
+		buf[pos++] = (ctx->ecdh_public_key2_len >> 8) & 0xFF;
+		buf[pos++] = ctx->ecdh_public_key2_len & 0xFF;
+		memcpy(&buf[pos], ctx->ecdh_public_key2, ctx->ecdh_public_key2_len);
+		pos += ctx->ecdh_public_key2_len;
+	}
 
 	/* ALPN extension (if configured) */
 	if (ctx->options.alpn_list[0] != NULL) {
@@ -799,6 +1898,10 @@ static int build_client_hello(struct quic_tls_context *ctx,
 		/* Calculate total ALPN list length */
 		for (int i = 0; ctx->options.alpn_list[i] != NULL; i++) {
 			alpn_list_len += 1 + strlen(ctx->options.alpn_list[i]);
+		}
+
+		if (pos + 6 + alpn_list_len > buf_size) {
+			return -ENOBUFS;
 		}
 
 		buf[pos++] = 0x00;
@@ -826,12 +1929,82 @@ static int build_client_hello(struct quic_tls_context *ctx,
 	}
 
 	/* QUIC transport parameters extension */
+	if (pos + 4 + ctx->local_tp_len > buf_size) {
+		return -ENOBUFS;
+	}
+
 	buf[pos++] = 0x00;
 	buf[pos++] = 0x39;  /* Extension type: quic_transport_parameters */
 	buf[pos++] = (ctx->local_tp_len >> 8) & 0xFF;
 	buf[pos++] = ctx->local_tp_len & 0xFF;
 	memcpy(&buf[pos], ctx->local_tp, ctx->local_tp_len);
 	pos += ctx->local_tp_len;
+
+	if (ctx->psk_configured) {
+		size_t identities_len;
+		size_t ext_data_len;
+		uint32_t obfuscated_ticket_age = tls_client_ticket_age(ctx);
+
+		/* psk_key_exchange_modes extension (required with pre_shared_key) */
+		if (pos + 6 > buf_size) {
+			return -ENOBUFS;
+		}
+
+		buf[pos++] = 0x00;
+		buf[pos++] = TLS_EXT_PSK_KEY_EXCHANGE_MODES;
+		buf[pos++] = 0x00;
+		buf[pos++] = 0x02;
+		buf[pos++] = 0x01;
+		buf[pos++] = TLS_PSK_KE_MODE_PSK_DHE_KE;
+
+		if (quic_0rtt_enabled() && ctx->early_data_offered) {
+			/* early_data extension is advertised in ClientHello only when armed. */
+			if (pos + 4 > buf_size) {
+				return -ENOBUFS;
+			}
+
+			buf[pos++] = 0x00;
+			buf[pos++] = TLS_EXT_EARLY_DATA;
+			buf[pos++] = 0x00;
+			buf[pos++] = 0x00;
+		}
+
+		/* pre_shared_key MUST be the final ClientHello extension. */
+		identities_len = 2 + ctx->psk_identity_len + 4;
+		ext_data_len = 2 + identities_len + 2 + 1 + ctx->ks.hash_len;
+
+		if (pos + 4 + ext_data_len > buf_size) {
+			return -ENOBUFS;
+		}
+
+		buf[pos++] = 0x00;
+		buf[pos++] = TLS_EXT_PRE_SHARED_KEY;
+		buf[pos++] = (ext_data_len >> 8) & 0xFF;
+		buf[pos++] = ext_data_len & 0xFF;
+
+		buf[pos++] = (identities_len >> 8) & 0xFF;
+		buf[pos++] = identities_len & 0xFF;
+		buf[pos++] = (ctx->psk_identity_len >> 8) & 0xFF;
+		buf[pos++] = ctx->psk_identity_len & 0xFF;
+		memcpy(&buf[pos], ctx->psk_identity, ctx->psk_identity_len);
+		pos += ctx->psk_identity_len;
+
+		buf[pos++] = (obfuscated_ticket_age >> 24) & 0xFF;
+		buf[pos++] = (obfuscated_ticket_age >> 16) & 0xFF;
+		buf[pos++] = (obfuscated_ticket_age >> 8) & 0xFF;
+		buf[pos++] = obfuscated_ticket_age & 0xFF;
+
+		buf[pos++] = 0x00;
+		buf[pos++] = (1 + ctx->ks.hash_len) & 0xFF;
+		buf[pos++] = ctx->ks.hash_len;
+
+		if (binder_offset != NULL) {
+			*binder_offset = pos;
+		}
+
+		memset(&buf[pos], 0, ctx->ks.hash_len);
+		pos += ctx->ks.hash_len;
+	}
 
 	/* Fill in extensions length */
 	ext_len = pos - ext_start - 2;
@@ -856,6 +2029,7 @@ static int build_server_hello(struct quic_tls_context *ctx,
 	size_t ext_start;
 	size_t ks_len;
 	size_t ext_len;
+	int ret;
 
 	if (buf_size < 128) {
 		return -ENOBUFS;
@@ -866,7 +2040,10 @@ static int build_server_hello(struct quic_tls_context *ctx,
 	buf[pos++] = 0x03;
 
 	/* Server random */
-	sys_rand_get(ctx->server_random, 32);
+	ret = sys_csrand_get(ctx->server_random, 32);
+	if (ret != 0) {
+		return ret;
+	}
 	memcpy(&buf[pos], ctx->server_random, 32);
 	pos += 32;
 
@@ -905,6 +2082,15 @@ static int build_server_hello(struct quic_tls_context *ctx,
 	buf[pos++] = ctx->ecdh_public_key_len & 0xFF;
 	memcpy(&buf[pos], ctx->ecdh_public_key, ctx->ecdh_public_key_len);
 	pos += ctx->ecdh_public_key_len;
+
+	if (ctx->use_psk_key_schedule) {
+		buf[pos++] = 0x00;
+		buf[pos++] = TLS_EXT_PRE_SHARED_KEY;
+		buf[pos++] = 0x00;
+		buf[pos++] = 0x02;
+		buf[pos++] = 0x00;
+		buf[pos++] = 0x00;
+	}
 
 	/* Fill in extensions length */
 	ext_len = pos - ext_start - 2;
@@ -945,23 +2131,31 @@ static int key_schedule_init(struct quic_tls_context *ctx)
 {
 	psa_status_t status;
 	uint8_t zero_psk[QUIC_HASH_MAX_LEN] = {0};
+	const uint8_t *psk = zero_psk;
 	size_t psk_len;
+	int ret;
 
-	/* Determine hash algorithm based on cipher suite */
-	switch (ctx->ks.cipher_suite) {
-	case TLS_AES_128_GCM_SHA256:
-	case TLS_CHACHA20_POLY1305_SHA256:
-		ctx->ks.hash_alg = PSA_ALG_SHA_256;
-		ctx->ks.hash_len = 32;
-		psk_len = 32;
-		break;
-	case TLS_AES_256_GCM_SHA384:
-		ctx->ks.hash_alg = PSA_ALG_SHA_384;
-		ctx->ks.hash_len = 48;
-		psk_len = 48;
-		break;
-	default:
-		return -ENOTSUP;
+	ret = tls_cipher_suite_hash_params(ctx->ks.cipher_suite,
+					 &ctx->ks.hash_alg,
+					 &ctx->ks.hash_len);
+	if (ret != 0) {
+		return ret;
+	}
+
+	psk_len = ctx->ks.hash_len;
+
+	if (ctx->use_psk_key_schedule) {
+		if (!ctx->psk_configured || ctx->psk == NULL || ctx->psk_len == 0U) {
+			return -EINVAL;
+		}
+
+		if (!tls_external_psk_cipher_supported(ctx->ks.cipher_suite)) {
+			NET_DBG("External PSK requires a SHA-256 TLS 1.3 cipher suite");
+			return -ENOTSUP;
+		}
+
+		psk = ctx->psk;
+		psk_len = ctx->psk_len;
 	}
 
 	/* Initialize transcript hash operation to zero/clean state */
@@ -973,9 +2167,9 @@ static int key_schedule_init(struct quic_tls_context *ctx)
 		return -EIO;
 	}
 
-	/* Early Secret = HKDF-Extract(0, PSK), using zero PSK for now */
+	/* Early Secret = HKDF-Extract(0, PSK) */
 	if (quic_hkdf_extract_ex(ctx->ks.hash_alg, NULL, 0,
-				 zero_psk, psk_len,
+				 psk, psk_len,
 				 ctx->ks.early_secret, ctx->ks.hash_len) != 0) {
 		NET_DBG("Failed to derive early secret");
 		return -EIO;
@@ -1044,14 +2238,19 @@ static int derive_handshake_secrets(struct quic_tls_context *ctx)
 		return ret;
 	}
 
-	/* Notify QUIC layer of new secrets */
+	/* Notify QUIC layer of new secrets. Without the keys the handshake
+	 * cannot continue, so a failure here must end it.
+	 */
 	if (ctx->secret_cb != NULL) {
-		ctx->secret_cb(ctx->user_data, QUIC_SECRET_LEVEL_HANDSHAKE,
-			       ctx->ep->is_server ? ctx->ks.client_hs_traffic_secret :
-						    ctx->ks.server_hs_traffic_secret,
-			       ctx->ep->is_server ? ctx->ks.server_hs_traffic_secret :
-						    ctx->ks.client_hs_traffic_secret,
-			       ctx->ks.hash_len);
+		ret = ctx->secret_cb(ctx->user_data, QUIC_SECRET_LEVEL_HANDSHAKE,
+				     ctx->ep->is_server ? ctx->ks.client_hs_traffic_secret :
+							  ctx->ks.server_hs_traffic_secret,
+				     ctx->ep->is_server ? ctx->ks.server_hs_traffic_secret :
+							  ctx->ks.client_hs_traffic_secret,
+				     ctx->ks.hash_len);
+		if (ret != 0) {
+			return ret;
+		}
 	}
 
 	return 0;
@@ -1068,7 +2267,6 @@ static int build_default_transport_params(struct quic_tls_context *ctx)
 	size_t pos = 0;
 	size_t max_len = sizeof(ctx->local_tp);
 	size_t max_payload_size;
-	struct net_if *iface;
 	int val_size;
 	int ret;
 
@@ -1139,26 +2337,14 @@ static int build_default_transport_params(struct quic_tls_context *ctx)
 	}
 	pos += ret;
 
-	/* max_udp_payload_size (0x03)
-	 * We can only handle max size calculated from interface MTU.
-	 */
+	/* max_udp_payload_size (0x03) */
 	ret = quic_put_varint(&buf[pos], max_len - pos, 0x03);
 	if (ret <= 0) {
 		return -ENOBUFS;
 	}
 	pos += ret;
 
-	iface = net_if_select_src_iface((struct net_sockaddr *)&ctx->ep->remote_addr);
-	if (iface == NULL) {
-		max_payload_size = 1280;  /* Default minimum for QUIC */
-	} else {
-		max_payload_size =
-			net_if_get_mtu(iface) -
-			(ctx->ep->remote_addr.ss_family == NET_AF_INET ?
-			 sizeof(struct net_ipv4_hdr) : sizeof(struct net_ipv6_hdr)) -
-			sizeof(struct net_udp_hdr);
-		max_payload_size = MAX(max_payload_size, 1280);  /* Ensure we meet QUIC minimum */
-	}
+	max_payload_size = quic_get_local_max_udp_payload_size(ctx->ep);
 
 	val_size = quic_get_varint_size(max_payload_size);
 	ret = quic_put_varint(&buf[pos], max_len - pos, val_size);
@@ -1355,6 +2541,17 @@ static int build_encrypted_extensions(struct quic_tls_context *ctx,
 		pos += alpn_len;
 
 		NET_DBG("Added ALPN extension: %s", ctx->negotiated_alpn);
+	}
+
+	if (quic_0rtt_enabled() && ctx->early_data_accepted) {
+		if (pos + 4 > buf_size) {
+			return -ENOBUFS;
+		}
+
+		buf[pos++] = 0x00;
+		buf[pos++] = TLS_EXT_EARLY_DATA;
+		buf[pos++] = 0x00;
+		buf[pos++] = 0x00;
 	}
 
 	/* QUIC Transport Parameters extension (type 0x39) */
@@ -1794,11 +2991,17 @@ static int build_certificate_request(struct quic_tls_context *ctx,
 	size_t sig_algs_len_pos;
 	size_t sig_algs_data_len;
 	size_t ext_len;
+	int ret;
 
-	/* Certificate request context (can be used to correlate request/response) */
-	/* Using a random 8-byte context */
+	/* Certificate request context (can be used to correlate request/response).
+	 * Using a random 8-byte context. The peer echoes this back, so it must
+	 * not expose the state of a non-cryptographic generator.
+	 */
 	buf[pos++] = QUIC_CERT_REQ_CONTEXT_LEN;  /* context length */
-	sys_rand_get(&buf[pos], QUIC_CERT_REQ_CONTEXT_LEN);
+	ret = sys_csrand_get(&buf[pos], QUIC_CERT_REQ_CONTEXT_LEN);
+	if (ret != 0) {
+		return ret;
+	}
 
 	/* Save context for later verification */
 	memcpy(ctx->cert_request_context, &buf[pos], QUIC_CERT_REQ_CONTEXT_LEN);
@@ -1998,6 +3201,83 @@ static int build_client_finished(struct quic_tls_context *ctx,
 }
 
 /*
+ * Verify a Finished message received from the peer (RFC 8446 Section 4.4.4)
+ *
+ * verify_data = HMAC(finished_key, transcript_hash), where finished_key comes
+ * from the peer's handshake traffic secret and the transcript covers every
+ * handshake message up to but not including this one. The caller must not have
+ * added the Finished message to the transcript yet.
+ */
+static int verify_peer_finished(struct quic_tls_context *ctx,
+				const uint8_t *msg, size_t msg_len)
+{
+	const uint8_t *peer_secret;
+	uint8_t finished_key[QUIC_HASH_MAX_LEN];
+	uint8_t transcript[QUIC_HASH_MAX_LEN];
+	size_t transcript_len;
+	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+	psa_key_id_t hmac_key_id;
+	psa_status_t status;
+	int ret;
+
+	if (msg_len != ctx->ks.hash_len) {
+		NET_DBG("Finished is %zu bytes, expected %zu", msg_len, ctx->ks.hash_len);
+		return -EBADMSG;
+	}
+
+	/* A server verifies the client's Finished and vice versa. */
+	peer_secret = ctx->ep->is_server ? ctx->ks.client_hs_traffic_secret :
+					   ctx->ks.server_hs_traffic_secret;
+
+	ret = quic_hkdf_expand_label_ex(ctx->ks.hash_alg,
+					peer_secret, ctx->ks.hash_len,
+					(const uint8_t *)TLS13_LABEL_FINISHED,
+					strlen(TLS13_LABEL_FINISHED),
+					NULL, 0,
+					finished_key, ctx->ks.hash_len);
+	if (ret != 0) {
+		NET_DBG("Failed to derive peer finished_key: %d", ret);
+		return ret;
+	}
+
+	ret = transcript_hash_get(ctx, transcript, &transcript_len);
+	if (ret != 0) {
+		NET_DBG("Failed to get transcript hash: %d", ret);
+		goto out;
+	}
+
+	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_VERIFY_MESSAGE);
+	psa_set_key_algorithm(&attr, PSA_ALG_HMAC(ctx->ks.hash_alg));
+	psa_set_key_type(&attr, PSA_KEY_TYPE_HMAC);
+
+	status = psa_import_key(&attr, finished_key, ctx->ks.hash_len, &hmac_key_id);
+	if (status != PSA_SUCCESS) {
+		NET_DBG("Failed to import HMAC key: %d", status);
+		ret = -EIO;
+		goto out;
+	}
+
+	/* psa_mac_verify() compares in constant time. */
+	status = psa_mac_verify(hmac_key_id, PSA_ALG_HMAC(ctx->ks.hash_alg),
+				transcript, transcript_len, msg, msg_len);
+
+	psa_destroy_key(hmac_key_id);
+
+	if (status != PSA_SUCCESS) {
+		NET_DBG("Peer Finished did not verify (%d)", status);
+		ret = -EBADMSG;
+		goto out;
+	}
+
+	ret = 0;
+out:
+	crypto_zero(finished_key, sizeof(finished_key));
+	crypto_zero(transcript, sizeof(transcript));
+
+	return ret;
+}
+
+/*
  * Send client's Certificate and CertificateVerify messages
  * Called when server requested client authentication via CertificateRequest
  *
@@ -2158,6 +3438,257 @@ static int send_client_finished(struct quic_tls_context *ctx)
 	return 0;
 }
 
+ZTESTABLE_STATIC int parse_new_session_ticket(struct quic_tls_context *ctx,
+					      const uint8_t *msg, size_t msg_len)
+{
+	size_t pos = 0;
+	size_t ticket_nonce_pos;
+	size_t ticket_pos;
+	uint32_t ticket_lifetime;
+	uint32_t ticket_age_add;
+	uint32_t max_early_data_size = 0U;
+	uint8_t ticket_nonce_len;
+	uint16_t ticket_len;
+	uint16_t extensions_len;
+	size_t extensions_end;
+	int ret;
+
+	if (ctx->ep->is_server) {
+		return -EINVAL;
+	}
+
+	if (msg_len < 13U) {
+		return -EINVAL;
+	}
+
+	ret = tls_derive_resumption_master_secret(ctx);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ticket_lifetime = ((uint32_t)msg[pos] << 24) |
+			  ((uint32_t)msg[pos + 1] << 16) |
+			  ((uint32_t)msg[pos + 2] << 8) |
+			  (uint32_t)msg[pos + 3];
+	pos += 4;
+
+	ticket_age_add = ((uint32_t)msg[pos] << 24) |
+			 ((uint32_t)msg[pos + 1] << 16) |
+			 ((uint32_t)msg[pos + 2] << 8) |
+			 (uint32_t)msg[pos + 3];
+	pos += 4;
+
+	ticket_nonce_len = msg[pos++];
+	ticket_nonce_pos = pos;
+	if (pos + ticket_nonce_len + 2U > msg_len) {
+		return -EINVAL;
+	}
+
+	ticket_len = ((uint16_t)msg[pos + ticket_nonce_len] << 8) |
+		     msg[pos + ticket_nonce_len + 1];
+	if (ticket_len == 0U || ticket_len > QUIC_MAX_SESSION_TICKET_LEN) {
+		return -EINVAL;
+	}
+
+	if (pos + ticket_nonce_len + 2U + ticket_len + 2U > msg_len) {
+		return -EINVAL;
+	}
+
+	pos += ticket_nonce_len;
+	pos += 2;
+	ticket_pos = pos;
+
+	pos += ticket_len;
+
+	extensions_len = ((uint16_t)msg[pos] << 8) | msg[pos + 1];
+	pos += 2;
+	if (pos + extensions_len > msg_len) {
+		return -EINVAL;
+	}
+
+	extensions_end = pos + extensions_len;
+	while (pos + 4U <= extensions_end) {
+		uint16_t ext_type = ((uint16_t)msg[pos] << 8) | msg[pos + 1];
+		uint16_t ext_len = ((uint16_t)msg[pos + 2] << 8) | msg[pos + 3];
+
+		pos += 4;
+		if (pos + ext_len > extensions_end) {
+			return -EINVAL;
+		}
+
+		if (ext_type == TLS_EXT_EARLY_DATA) {
+			if (ext_len != 4U) {
+				return -EINVAL;
+			}
+
+			max_early_data_size = ((uint32_t)msg[pos] << 24) |
+					      ((uint32_t)msg[pos + 1] << 16) |
+					      ((uint32_t)msg[pos + 2] << 8) |
+					      (uint32_t)msg[pos + 3];
+
+			/* RFC 9001 4.6.1: in QUIC this MUST be the fixed sentinel;
+			 * any other value is a PROTOCOL_VIOLATION.
+			 */
+			if (max_early_data_size != QUIC_TLS_EARLY_DATA_SENTINEL) {
+				NET_DBG("Invalid NewSessionTicket max_early_data_size %u",
+					max_early_data_size);
+				return -EPROTO;
+			}
+		}
+
+		pos += ext_len;
+	}
+
+	if (pos != extensions_end) {
+		return -EINVAL;
+	}
+
+	memset(&ctx->session_state, 0, sizeof(ctx->session_state));
+	ctx->session_state.version = QUIC_SESSION_STATE_VERSION;
+	ctx->session_state.cipher_suite = ctx->ks.cipher_suite;
+	ctx->session_state.ticket_lifetime = ticket_lifetime;
+	ctx->session_state.ticket_age_add = ticket_age_add;
+	ctx->session_state.max_early_data_size =
+		quic_0rtt_enabled() ? max_early_data_size : 0U;
+	ctx->session_state.issue_time_ms = k_uptime_get();
+	ctx->session_state.ticket_len = ticket_len;
+	ctx->session_state.psk_len = ctx->ks.hash_len;
+	memcpy(ctx->session_state.ticket, &msg[ticket_pos], ticket_len);
+	ret = tls_derive_resumption_psk(ctx, &msg[ticket_nonce_pos], ticket_nonce_len,
+					ctx->session_state.psk,
+					sizeof(ctx->session_state.psk));
+	if (ret != 0) {
+		memset(&ctx->session_state, 0, sizeof(ctx->session_state));
+		return ret;
+	}
+
+	quic_tls_snapshot_session_transport_params(ctx);
+	ctx->session_state_valid = true;
+
+	NET_DBG("[EP:%p/%d] Stored session ticket (%u bytes)",
+		ctx->ep, quic_get_by_ep(ctx->ep), ticket_len);
+
+	return 0;
+}
+
+static int quic_tls_send_new_session_ticket(struct quic_tls_context *ctx)
+{
+	uint8_t msg[96];
+	uint8_t wrapped[104];
+	uint8_t ticket_nonce[QUIC_SESSION_TICKET_NONCE_LEN];
+	uint8_t ticket[QUIC_SESSION_TICKET_ID_LEN];
+	uint8_t ticket_psk[QUIC_MAX_RESUMPTION_PSK_LEN];
+	size_t pos = 0;
+	size_t wrapped_len;
+	uint32_t ticket_age_add;
+	int ret;
+
+	if (!tls_external_psk_cipher_supported(ctx->ks.cipher_suite)) {
+		return -ENOTSUP;
+	}
+
+	ret = tls_derive_resumption_master_secret(ctx);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sys_csrand_get(ticket_nonce, sizeof(ticket_nonce));
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sys_csrand_get(ticket, sizeof(ticket));
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = sys_csrand_get(&ticket_age_add, sizeof(ticket_age_add));
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = tls_derive_resumption_psk(ctx, ticket_nonce, sizeof(ticket_nonce),
+					ticket_psk, sizeof(ticket_psk));
+	if (ret != 0) {
+		crypto_zero(ticket_psk, sizeof(ticket_psk));
+		return ret;
+	}
+
+	ret = tls_server_ticket_cache_store(ticket, sizeof(ticket),
+					    ticket_psk, ctx->ks.hash_len,
+					    ctx->ks.cipher_suite,
+					    QUIC_SESSION_TICKET_LIFETIME_SEC,
+					    ticket_age_add,
+					    quic_0rtt_enabled() ?
+					    ctx->max_early_data_size : 0U,
+					    ctx->negotiated_alpn);
+
+	/* The resumption PSK now lives in the ticket cache; drop the stack copy. */
+	crypto_zero(ticket_psk, sizeof(ticket_psk));
+
+	if (ret != 0) {
+		return ret;
+	}
+
+	msg[pos++] = (QUIC_SESSION_TICKET_LIFETIME_SEC >> 24) & 0xFF;
+	msg[pos++] = (QUIC_SESSION_TICKET_LIFETIME_SEC >> 16) & 0xFF;
+	msg[pos++] = (QUIC_SESSION_TICKET_LIFETIME_SEC >> 8) & 0xFF;
+	msg[pos++] = QUIC_SESSION_TICKET_LIFETIME_SEC & 0xFF;
+	msg[pos++] = (ticket_age_add >> 24) & 0xFF;
+	msg[pos++] = (ticket_age_add >> 16) & 0xFF;
+	msg[pos++] = (ticket_age_add >> 8) & 0xFF;
+	msg[pos++] = ticket_age_add & 0xFF;
+	msg[pos++] = sizeof(ticket_nonce);
+	memcpy(&msg[pos], ticket_nonce, sizeof(ticket_nonce));
+	pos += sizeof(ticket_nonce);
+	msg[pos++] = 0x00;
+	msg[pos++] = sizeof(ticket);
+	memcpy(&msg[pos], ticket, sizeof(ticket));
+	pos += sizeof(ticket);
+
+	if (quic_0rtt_enabled() && ctx->max_early_data_size > 0U) {
+		/* RFC 9001 4.6.1: QUIC always advertises the fixed sentinel; the
+		 * server's configured byte cap is kept locally in the ticket
+		 * cache and enforced per received early-data STREAM frame.
+		 */
+		msg[pos++] = 0x00;
+		msg[pos++] = 0x08;
+		msg[pos++] = 0x00;
+		msg[pos++] = TLS_EXT_EARLY_DATA;
+		msg[pos++] = 0x00;
+		msg[pos++] = 0x04;
+		msg[pos++] = (QUIC_TLS_EARLY_DATA_SENTINEL >> 24) & 0xFF;
+		msg[pos++] = (QUIC_TLS_EARLY_DATA_SENTINEL >> 16) & 0xFF;
+		msg[pos++] = (QUIC_TLS_EARLY_DATA_SENTINEL >> 8) & 0xFF;
+		msg[pos++] = QUIC_TLS_EARLY_DATA_SENTINEL & 0xFF;
+	} else {
+		msg[pos++] = 0x00;
+		msg[pos++] = 0x00;
+	}
+
+	ret = wrap_handshake_message(TLS_HS_NEW_SESSION_TICKET,
+				     msg, pos,
+				     wrapped, sizeof(wrapped), &wrapped_len);
+	if (ret != 0) {
+		return ret;
+	}
+
+	if (ctx->send_cb != NULL) {
+		ret = ctx->send_cb(ctx->user_data, QUIC_SECRET_LEVEL_APPLICATION,
+				   wrapped, wrapped_len);
+		if (ret != 0) {
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+static int quic_tls_note_handshake_complete(struct quic_tls_context *ctx)
+{
+	return tls_derive_resumption_master_secret(ctx);
+}
+
 /*
  * Build and send EncryptedExtensions, Certificate, CertificateVerify, Finished
  *
@@ -2204,7 +3735,7 @@ static int send_server_handshake_flight(struct quic_tls_context *ctx)
 	}
 
 	/* 2. CertificateRequest (optional, if we want client cert) */
-	if (ctx->options.verify_level > 0) {
+	if (!ctx->use_psk_key_schedule && ctx->options.verify_level > 0) {
 		ret = build_certificate_request(ctx, msg_buf, msg_buf_size, &msg_len);
 		if (ret != 0) {
 			return ret;
@@ -2237,7 +3768,8 @@ static int send_server_handshake_flight(struct quic_tls_context *ctx)
 	}
 
 	/* 3. Certificate (if we have one with a valid signing key) */
-	if (ctx->my_cert != NULL && ctx->my_cert_len > 0 && ctx->signing_key_id != 0) {
+	if (!ctx->use_psk_key_schedule &&
+	    ctx->my_cert != NULL && ctx->my_cert_len > 0 && ctx->signing_key_id != 0) {
 		ret = build_certificate(ctx, msg_buf, msg_buf_size, &msg_len);
 		if (ret != 0) {
 			return ret;
@@ -2349,8 +3881,8 @@ static int send_server_handshake_flight(struct quic_tls_context *ctx)
  * - legacy_compression_method: 1 byte (0x00)
  * - extensions: 2 bytes length + extension data
  */
-static int parse_server_hello(struct quic_tls_context *ctx,
-			      const uint8_t *msg, size_t msg_len)
+ZTESTABLE_STATIC int parse_server_hello(struct quic_tls_context *ctx,
+					const uint8_t *msg, size_t msg_len)
 {
 	size_t pos = 0;
 	uint8_t session_id_len;
@@ -2359,6 +3891,7 @@ static int parse_server_hello(struct quic_tls_context *ctx,
 	size_t extensions_end;
 	bool got_key_share = false;
 	bool got_version = false;
+	bool server_selected_psk = false;
 
 	if (msg_len < 38) {
 		NET_DBG("ServerHello too short");
@@ -2388,9 +3921,21 @@ static int parse_server_hello(struct quic_tls_context *ctx,
 
 	/* Verify cipher suite matches what we offered */
 	if (cipher_suite != TLS_AES_128_GCM_SHA256 &&
-	    cipher_suite != TLS_AES_256_GCM_SHA384 &&
-	    cipher_suite != TLS_CHACHA20_POLY1305_SHA256) {
+	    cipher_suite != TLS_AES_256_GCM_SHA384) {
 		NET_DBG("Unsupported cipher suite 0x%04x", cipher_suite);
+		return -ENOTSUP;
+	}
+
+	/* RFC 8446 ch. 4.1.3: the server must select a suite from our offer.
+	 * The offer already excludes suites the application filtered out
+	 * and, with an external PSK, suites whose hash does not match the
+	 * key, so checking the recorded offer covers the configured list and
+	 * keeps a server that declines the PSK from picking a suite the PSK
+	 * offer left out.
+	 */
+	if (!tls_suite_offered(ctx, cipher_suite)) {
+		NET_DBG("Server selected cipher suite 0x%04x which was not offered",
+			cipher_suite);
 		return -ENOTSUP;
 	}
 	ctx->ks.cipher_suite = cipher_suite;
@@ -2444,26 +3989,58 @@ static int parse_server_hello(struct quic_tls_context *ctx,
 				uint16_t group = (msg[pos] << 8) | msg[pos + 1];
 				uint16_t key_len = (msg[pos + 2] << 8) | msg[pos + 3];
 
-				if (group != 0x0017) {  /* secp256r1 */
-					NET_DBG("Unsupported key share group 0x%04x", group);
-					return -ENOTSUP;
-				}
-
 				if (pos + 4 + key_len > extensions_end) {
 					return -EINVAL;
 				}
 
-				/* Store server's public key */
 				if (key_len > sizeof(ctx->peer_public_key)) {
 					return -ENOBUFS;
 				}
 
+				/* Select the offered ephemeral matching the server's
+				 * chosen group and destroy the unused one.
+				 */
+				if (group == MBEDTLS_SSL_IANA_TLS_GROUP_X25519) {
+					if (ctx->ecdh_key_id2 != 0) {
+						psa_destroy_key(ctx->ecdh_key_id2);
+						ctx->ecdh_key_id2 = 0;
+					}
+				} else if (group == MBEDTLS_SSL_IANA_TLS_GROUP_SECP256R1 &&
+					   ctx->ecdh_key_id2 != 0) {
+					if (ctx->ecdh_key_id != 0) {
+						psa_destroy_key(ctx->ecdh_key_id);
+					}
+					ctx->ecdh_key_id = ctx->ecdh_key_id2;
+					ctx->ecdh_key_id2 = 0;
+					memcpy(ctx->ecdh_public_key, ctx->ecdh_public_key2,
+					       ctx->ecdh_public_key2_len);
+					ctx->ecdh_public_key_len = ctx->ecdh_public_key2_len;
+				} else {
+					NET_DBG("Unsupported key share group 0x%04x", group);
+					return -ENOTSUP;
+				}
+				ctx->ks.key_exchange_group = group;
+
+				/* Store server's public key */
 				memcpy(ctx->peer_public_key, &msg[pos + 4], key_len);
 				ctx->peer_public_key_len = key_len;
 				got_key_share = true;
 
-				NET_DBG("Got server key share, len: %u", key_len);
+				NET_DBG("Got server key share group 0x%04x, len: %u",
+					group, key_len);
 			}
+			break;
+
+		case TLS_EXT_PRE_SHARED_KEY:
+			if (!ctx->psk_offered || ext_len != 2U) {
+				return -EINVAL;
+			}
+
+			if (((uint16_t)msg[pos] << 8) | msg[pos + 1]) {
+				return -ENOTSUP;
+			}
+
+			server_selected_psk = true;
 			break;
 
 		default:
@@ -2484,6 +4061,12 @@ static int parse_server_hello(struct quic_tls_context *ctx,
 		return -EINVAL;
 	}
 
+	if (server_selected_psk && !tls_external_psk_cipher_supported(cipher_suite)) {
+		return -ENOTSUP;
+	}
+
+	ctx->use_psk_key_schedule = server_selected_psk;
+
 	return 0;
 }
 
@@ -2496,12 +4079,13 @@ static int parse_server_hello(struct quic_tls_context *ctx,
  *
  * For QUIC, the transport parameters extension is critical.
  */
-static int parse_encrypted_extensions(struct quic_tls_context *ctx,
-				      const uint8_t *msg, size_t msg_len)
+ZTESTABLE_STATIC int parse_encrypted_extensions(struct quic_tls_context *ctx,
+						const uint8_t *msg, size_t msg_len)
 {
 	size_t pos = 0;
 	size_t extensions_len;
 	size_t extensions_end;
+	bool saw_early_data = false;
 
 	if (msg_len < 2) {
 		NET_DBG("EncryptedExtensions too short");
@@ -2528,6 +4112,15 @@ static int parse_encrypted_extensions(struct quic_tls_context *ctx,
 		}
 
 		switch (ext_type) {
+		case TLS_EXT_EARLY_DATA:
+			if (!quic_0rtt_enabled() || !ctx->early_data_offered ||
+			    ext_len != 0U) {
+				return -EINVAL;
+			}
+
+			saw_early_data = true;
+			break;
+
 		case TLS_EXT_QUIC_TRANSPORT_PARAMS:
 			if (ext_len <= sizeof(ctx->peer_tp)) {
 				NET_DBG("Got server transport params, len: %u", ext_len);
@@ -2562,6 +4155,10 @@ static int parse_encrypted_extensions(struct quic_tls_context *ctx,
 		pos += ext_len;
 	}
 
+	ctx->early_data_accepted = quic_0rtt_enabled() &&
+		ctx->early_data_offered && saw_early_data;
+	ctx->early_data_rejected = ctx->early_data_offered && !saw_early_data;
+
 	return 0;
 }
 
@@ -2574,6 +4171,7 @@ static int handle_server_hello(struct quic_tls_context *ctx,
 {
 	uint16_t old_cipher_suite = ctx->ks.cipher_suite;
 	psa_algorithm_t old_hash_alg = ctx->ks.hash_alg;
+	bool old_use_psk = ctx->use_psk_key_schedule;
 	size_t saved_transcript_len;
 	int ret;
 
@@ -2590,7 +4188,8 @@ static int handle_server_hello(struct quic_tls_context *ctx,
 	 * If so, we need to reinitialize the key schedule with the new hash
 	 * algorithm and re-hash the ClientHello from the transcript buffer.
 	 */
-	if (ctx->ks.cipher_suite != old_cipher_suite) {
+	if (ctx->ks.cipher_suite != old_cipher_suite ||
+	    ctx->use_psk_key_schedule != old_use_psk) {
 		psa_algorithm_t new_hash_alg;
 
 		/* Determine new hash algorithm */
@@ -2605,7 +4204,8 @@ static int handle_server_hello(struct quic_tls_context *ctx,
 			break;
 		}
 
-		if (new_hash_alg != old_hash_alg) {
+		if (new_hash_alg != old_hash_alg ||
+		    ctx->use_psk_key_schedule != old_use_psk) {
 			psa_status_t status;
 
 			NET_DBG("Cipher suite changed from 0x%04x to 0x%04x, "
@@ -2676,7 +4276,7 @@ static int handle_client_hello(struct quic_tls_context *ctx,
 	size_t sh_len, wrapped_len;
 	int ret;
 
-	ret = parse_client_hello(ctx, msg, msg_len);
+	ret = parse_client_hello(ctx, msg, msg_len, full_msg, full_msg_len);
 	if (ret != 0) {
 		/* In QUIC, TLS alerts are sent via CONNECTION_CLOSE frames
 		 * with error code 0x100 + TLS_alert_code (RFC 9001 Section 4.8)
@@ -2726,6 +4326,11 @@ static int handle_client_hello(struct quic_tls_context *ctx,
 
 	/* Update transcript with ClientHello (full message with header) */
 	ret = transcript_update(ctx, full_msg, full_msg_len);
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = tls_emit_client_early_traffic_secret(ctx);
 	if (ret != 0) {
 		return ret;
 	}
@@ -2800,6 +4405,9 @@ ZTESTABLE_STATIC int parse_certificate(struct quic_tls_context *ctx,
 
 	/* Certificate request context */
 	context_len = data[pos++];
+	if (pos + context_len > len) {
+		return -EINVAL;
+	}
 
 	/* If we sent a CertificateRequest, verify the context matches */
 	if (ctx->expecting_client_cert && ctx->cert_request_context_len > 0) {
@@ -2828,6 +4436,7 @@ ZTESTABLE_STATIC int parse_certificate(struct quic_tls_context *ctx,
 	}
 
 	ctx->peer_cert_len = 0;
+	ctx->peer_cert_verified = false;
 
 	/* Empty certificate list is only valid when peer auth is optional. */
 	if (cert_list_len == 0) {
@@ -2940,6 +4549,10 @@ static int parse_certificate_request(struct quic_tls_context *ctx,
 
 	extensions_len = ((uint16_t)data[pos] << 8) | data[pos + 1];
 	pos += 2;
+
+	if (pos + extensions_len > len) {
+		return -EINVAL;
+	}
 
 	/* Parse extensions to find signature_algorithms */
 	ext_end = pos + extensions_len;
@@ -3350,6 +4963,8 @@ ZTESTABLE_STATIC int process_handshake_message(struct quic_tls_context *ctx,
 			return ret;
 		}
 
+		ctx->peer_cert_verified = true;
+
 		ret = transcript_update(ctx, full_msg, full_msg_len);
 		if (ret != 0) {
 			return ret;
@@ -3377,11 +4992,32 @@ ZTESTABLE_STATIC int process_handshake_message(struct quic_tls_context *ctx,
 
 	case TLS_HS_FINISHED:
 		NET_DBG("[%p] HS finished", ctx);
-		if (quic_tls_effective_verify_level(ctx) == MBEDTLS_SSL_VERIFY_REQUIRED &&
+		if (!ctx->use_psk_key_schedule &&
+		    quic_tls_effective_verify_level(ctx) == MBEDTLS_SSL_VERIFY_REQUIRED &&
 		    ctx->peer_cert_len == 0) {
 			NET_DBG("Peer certificate required but not provided");
 			return -EACCES;
 		}
+
+		/* A certificate on its own proves nothing: it is public, so
+		 * anyone can replay it. Only CertificateVerify shows the peer
+		 * holds the matching private key, and nothing else in this
+		 * switch enforces that it arrived.
+		 */
+		if (ctx->peer_cert_len > 0 && !ctx->peer_cert_verified) {
+			NET_DBG("Peer sent a certificate but no CertificateVerify");
+			return -EACCES;
+		}
+
+		/* Verify before the transcript is extended, since verify_data
+		 * covers everything up to but not including this message.
+		 */
+		ret = verify_peer_finished(ctx, msg, msg_len);
+		if (ret != 0) {
+			NET_DBG("Finished verification failed: %d", ret);
+			return ret;
+		}
+
 		/* Update transcript with Finished message */
 		ret = transcript_update(ctx, full_msg, full_msg_len);
 		if (ret != 0) {
@@ -3420,6 +5056,23 @@ ZTESTABLE_STATIC int process_handshake_message(struct quic_tls_context *ctx,
 		ctx->state = QUIC_TLS_STATE_CONNECTED;
 		return 1;  /* Handshake complete */
 
+	case TLS_HS_NEW_SESSION_TICKET:
+		ret = parse_new_session_ticket(ctx, msg, msg_len);
+		if (ret != 0) {
+			NET_DBG("Failed to parse NewSessionTicket: %d", ret);
+			return ret;
+		}
+		break;
+
+	case TLS_HS_KEY_UPDATE:
+		/* RFC 9001 Section 6: the TLS KeyUpdate message MUST NOT be used
+		 * in QUIC; treat it as a protocol violation rather than silently
+		 * ignoring it (QUIC does its own key update via the key phase
+		 * bit).
+		 */
+		NET_DBG("[%p] Rejecting TLS KeyUpdate (prohibited in QUIC)", ctx);
+		return -EPROTO;
+
 	default:
 		NET_DBG("Unknown handshake message type (%d)", msg_type);
 		break;
@@ -3432,6 +5085,15 @@ static void quic_tls_free(struct quic_tls_context *ctx)
 {
 	if (ctx->ecdh_key_id != 0) {
 		psa_destroy_key(ctx->ecdh_key_id);
+		ctx->ecdh_key_id = 0;
+	}
+
+	if (ctx->ecdh_key_id2 != 0) {
+		/* Unselected client key_share offer (handshake aborted before
+		 * ServerHello selected a group).
+		 */
+		psa_destroy_key(ctx->ecdh_key_id2);
+		ctx->ecdh_key_id2 = 0;
 	}
 
 	if (ctx->signing_key_id != 0) {
@@ -3443,9 +5105,16 @@ static void quic_tls_free(struct quic_tls_context *ctx)
 	}
 
 	/* Clear sensitive data */
-	memset(ctx->shared_secret, 0, sizeof(ctx->shared_secret));
-	memset(&ctx->ks, 0, sizeof(ctx->ks));
+	/* These are the last writes to this memory before the endpoint slot is
+	 * released, so a plain memset() is a dead store the compiler may drop.
+	 */
+	crypto_zero(ctx->shared_secret, sizeof(ctx->shared_secret));
+	crypto_zero(ctx->resumption_master_secret, sizeof(ctx->resumption_master_secret));
+	crypto_zero(&ctx->session_state, sizeof(ctx->session_state));
+	crypto_zero(&ctx->ks, sizeof(ctx->ks));
 	ctx->client_hello_prepared = false;
+	ctx->session_state_valid = false;
+	ctx->resumption_master_secret_len = 0U;
 }
 
 /*
@@ -3464,6 +5133,7 @@ static uint64_t get_next_packet_number(struct quic_endpoint *ep,
 	case QUIC_SECRET_LEVEL_HANDSHAKE:
 		pn = ep->tx_pn.handshake++;
 		break;
+	case QUIC_SECRET_LEVEL_EARLY:
 	case QUIC_SECRET_LEVEL_APPLICATION:
 	default:
 		pn = ep->tx_pn.application++;
@@ -3526,7 +5196,7 @@ static size_t calculate_padding_for_level(struct quic_endpoint *ep,
 	}
 
 	/* Only client Initial packets require padding to 1200 bytes */
-	if (level != 0 || ep->is_server) {
+	if (level != QUIC_SECRET_LEVEL_INITIAL || ep->is_server) {
 		return padding;
 	}
 
@@ -3814,6 +5484,100 @@ static int build_handshake_header(struct quic_endpoint *ep,
 }
 
 /*
+ * Build 0-RTT packet header (RFC 9000 Section 17.2.3)
+ *
+ * 0-RTT Packet {
+ *   Header Form (1) = 1,
+ *   Fixed Bit (1) = 1,
+ *   Long Packet Type (2) = 1,
+ *   Reserved Bits (2),
+ *   Packet Number Length (2),
+ *   Version (32),
+ *   Destination Connection ID Length (8),
+ *   Destination Connection ID (0..160),
+ *   Source Connection ID Length (8),
+ *   Source Connection ID (0..160),
+ *   Length (i),
+ *   Packet Number (8..32),
+ * }
+ */
+static int build_0rtt_header(struct quic_endpoint *ep,
+			     uint64_t packet_number,
+			     size_t pn_len,
+			     size_t payload_len,
+			     uint8_t *out, size_t out_size,
+			     size_t *out_len, size_t *pn_offset)
+{
+	size_t pos = 0;
+	size_t length_val;
+
+	if (pos >= out_size) {
+		return -ENOBUFS;
+	}
+
+	out[pos++] = QUIC_LONG_HEADER_0RTT | ((pn_len - 1) & 0x03);
+
+	if (pos + 4 > out_size) {
+		return -ENOBUFS;
+	}
+	out[pos++] = (QUIC_VERSION_1 >> 24) & 0xFF;
+	out[pos++] = (QUIC_VERSION_1 >> 16) & 0xFF;
+	out[pos++] = (QUIC_VERSION_1 >> 8) & 0xFF;
+	out[pos++] = QUIC_VERSION_1 & 0xFF;
+
+	if (pos + 1 + ep->peer_cid_len > out_size) {
+		return -ENOBUFS;
+	}
+
+	out[pos++] = ep->peer_cid_len;
+	if (ep->peer_cid_len > 0) {
+		memcpy(&out[pos], ep->peer_cid, ep->peer_cid_len);
+		pos += ep->peer_cid_len;
+	}
+
+	if (pos + 1 + ep->my_cid_len > out_size) {
+		return -ENOBUFS;
+	}
+
+	out[pos++] = ep->my_cid_len;
+	if (ep->my_cid_len > 0) {
+		memcpy(&out[pos], ep->my_cid, ep->my_cid_len);
+		pos += ep->my_cid_len;
+	}
+
+	length_val = pn_len + payload_len;
+	if (length_val > 0x3FFF) {
+		if (pos + 4 > out_size) {
+			return -ENOBUFS;
+		}
+		out[pos++] = 0x80 | ((length_val >> 24) & 0x3F);
+		out[pos++] = (length_val >> 16) & 0xFF;
+		out[pos++] = (length_val >> 8) & 0xFF;
+		out[pos++] = length_val & 0xFF;
+	} else {
+		if (pos + 2 > out_size) {
+			return -ENOBUFS;
+		}
+		out[pos++] = 0x40 | ((length_val >> 8) & 0x3F);
+		out[pos++] = length_val & 0xFF;
+	}
+
+	*pn_offset = pos;
+
+	if (pos + pn_len > out_size) {
+		return -ENOBUFS;
+	}
+
+	for (size_t i = 0; i < pn_len; i++) {
+		out[pos++] = (packet_number >> (8 * (pn_len - 1 - i))) & 0xFF;
+	}
+
+	*out_len = pos;
+
+	return 0;
+}
+
+/*
  * Build short (1-RTT) packet header (RFC 9000 Section 17.3)
  *
  * 1-RTT Packet {
@@ -3840,14 +5604,16 @@ static int build_short_header(struct quic_endpoint *ep,
 	 * Fixed Bit = 1
 	 * Spin Bit = 0 (TODO: implement latency spin bit)
 	 * Reserved = 0 (will be protected)
-	 * Key Phase = 0 (TODO: implement key update)
+	 * Key Phase = current TX key phase (RFC 9001 Section 6)
 	 * Packet Number Length = pn_len - 1
 	 */
 	if (pos >= out_size) {
 		return -ENOBUFS;
 	}
 
-	out[pos++] = 0x40 | ((pn_len - 1) & 0x03);
+	out[pos++] = 0x40 |
+		     (ep->crypto.ku.tx_phase != 0U ? QUIC_SHORT_KEY_PHASE_MASK : 0U) |
+		     ((pn_len - 1) & 0x03);
 
 	/* Destination Connection ID (no length prefix in short header) */
 	if (pos + ep->peer_cid_len > out_size) {
@@ -3902,6 +5668,11 @@ static int build_packet_header(struct quic_endpoint *ep,
 					      payload_len,
 					      out, out_size,
 					      header_len, pn_offset);
+	case QUIC_SECRET_LEVEL_EARLY:
+		return build_0rtt_header(ep, packet_number, pn_len,
+					 payload_len,
+					 out, out_size,
+					 header_len, pn_offset);
 	case QUIC_SECRET_LEVEL_APPLICATION:
 		return build_short_header(ep, packet_number, pn_len,
 					  out, out_size,
@@ -3928,6 +5699,9 @@ quic_get_crypto_context_by_level(struct quic_endpoint *ep,
 		break;
 	case QUIC_SECRET_LEVEL_HANDSHAKE:
 		ctx = &ep->crypto.handshake;
+		break;
+	case QUIC_SECRET_LEVEL_EARLY:
+		ctx = &ep->crypto.early;
 		break;
 	case QUIC_SECRET_LEVEL_APPLICATION:
 		ctx = &ep->crypto.application;
@@ -4013,10 +5787,15 @@ static int quic_apply_header_protection_split(uint8_t *header, size_t header_len
 	return 0;
 }
 
-static int quic_send_packet(struct quic_endpoint *ep,
-			    enum quic_secret_level level,
-			    const uint8_t *payload,
-			    size_t payload_len);
+ZTESTABLE_STATIC int quic_send_packet(struct quic_endpoint *ep,
+				      enum quic_secret_level level,
+				      const uint8_t *payload,
+				      size_t payload_len);
+static int quic_send_packet_with_pn(struct quic_endpoint *ep,
+				    enum quic_secret_level level,
+				    const uint8_t *payload,
+				    size_t payload_len,
+				    uint64_t *sent_pn_out);
 
 #if defined(CONFIG_QUIC_SERVER_ANTI_AMPLIFICATION_LIMIT)
 static struct quic_deferred_crypto_payload *
@@ -4146,17 +5925,19 @@ static uint8_t *quic_prepare_crypto_frame(struct quic_endpoint *ep,
 }
 
 /*
- * Send a QUIC packet using scatter-gather I/O
+ * Send a QUIC packet using scatter-gather I/O.
  *
- * Uses zsock_sendmsg() to avoid copying header and payload into
- * a single buffer. The header is built in a small stack buffer,
- * and the encrypted payload uses the endpoint's tx_buffer.
- * Encrypt and send ep->crypto.tx_buffer[0..plaintext_len).
- * Called by both quic_send_packet() and quic_send_packet_sg().
+ * Plaintext is assembled in ep->crypto.tx_buffer by the caller while
+ * holding ep->send_lock. Uses zsock_sendmsg() so the stack copies header
+ * and ciphertext into a net_pkt before this call returns.
  */
-static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
-				       enum quic_secret_level level,
-				       size_t payload_len)
+static int quic_send_packet_from_txbuf_ex(struct quic_endpoint *ep,
+					  enum quic_secret_level level,
+					  size_t payload_len,
+					  size_t target_datagram_len,
+					  bool dont_fragment,
+					  bool dplpmtud_probe,
+					  uint64_t *sent_pn_out)
 {
 	struct quic_crypto_context *crypto_ctx;
 	uint8_t header[MAX_QUIC_HEADER_SIZE];
@@ -4167,10 +5948,14 @@ static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
 	uint64_t packet_number;
 	size_t pn_len;
 	size_t padding;
+	size_t extra_padding = 0;
 	int ret;
 	ssize_t sent;
 	size_t total_len;
 	bool ack_eliciting;
+	uint8_t control[NET_CMSG_SPACE(sizeof(int))] = { 0 };
+	struct net_cmsghdr *cmsg;
+	int dont_fragment_value = 1;
 
 	/* Encrypted payload goes into endpoint's tx_buffer */
 	uint8_t *ciphertext = ep->crypto.tx_buffer;
@@ -4199,13 +5984,26 @@ static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
 		}
 	}
 
+	/* Nothing is sent at a level whose keys were discarded (RFC 9001
+	 * ch. 4.9), and nothing sent there could still matter to the peer.
+	 * This has to be checked on the context itself: the lookup below
+	 * does not return a context without keys.
+	 */
+	if ((level == QUIC_SECRET_LEVEL_INITIAL && ep->crypto.initial.discarded) ||
+	    (level == QUIC_SECRET_LEVEL_HANDSHAKE && ep->crypto.handshake.discarded)) {
+		NET_DBG("[EP:%p/%d] Not sending at discarded level %d",
+			ep, quic_get_by_ep(ep), level);
+		return 0;
+	}
+
 	/* Get crypto context */
 	crypto_ctx = quic_get_crypto_context_by_level(ep, level);
 	if (crypto_ctx == NULL || !crypto_ctx->initialized) {
 		NET_DBG("Crypto context not initialized for level %d", level);
 
 		if (level == QUIC_SECRET_LEVEL_HANDSHAKE ||
-		    level == QUIC_SECRET_LEVEL_APPLICATION) {
+		    level == QUIC_SECRET_LEVEL_APPLICATION ||
+		    level == QUIC_SECRET_LEVEL_EARLY) {
 			return -EAGAIN;
 		}
 
@@ -4223,12 +6021,6 @@ static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
 	padding = calculate_padding_for_level(ep, level, payload_len, pn_len);
 	plaintext_len += padding;
 
-	/* Verify we have space for ciphertext */
-	if (plaintext_len + QUIC_AEAD_TAG_LEN > ciphertext_size) {
-		QUIC_EP_STAT_INC(ep, drop_tx);
-		return -ENOBUFS;
-	}
-
 	/* Build header */
 	ret = build_packet_header(ep, level, packet_number, pn_len,
 				  plaintext_len + QUIC_AEAD_TAG_LEN,
@@ -4238,6 +6030,44 @@ static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
 		NET_DBG("Failed to build packet header (%d)", ret);
 		QUIC_EP_STAT_INC(ep, drop_tx);
 		return ret;
+	}
+
+	if (target_datagram_len > 0U) {
+		size_t current_total = header_len + plaintext_len + QUIC_AEAD_TAG_LEN;
+
+		if (target_datagram_len < current_total) {
+			return -EMSGSIZE;
+		}
+
+		extra_padding = target_datagram_len - current_total;
+		plaintext_len += extra_padding;
+		padding += extra_padding;
+
+		if (extra_padding > 0U) {
+			ret = build_packet_header(ep, level, packet_number, pn_len,
+						  plaintext_len + QUIC_AEAD_TAG_LEN,
+						  header, sizeof(header),
+						  &header_len, &pn_offset);
+			if (ret != 0) {
+				NET_DBG("Failed to rebuild packet header (%d)", ret);
+				return ret;
+			}
+
+			current_total = header_len + plaintext_len + QUIC_AEAD_TAG_LEN;
+			if (target_datagram_len < current_total) {
+				return -EMSGSIZE;
+			}
+
+			extra_padding = target_datagram_len - current_total;
+			plaintext_len += extra_padding;
+			padding += extra_padding;
+		}
+	}
+
+	/* Verify we have space for ciphertext */
+	if (plaintext_len + QUIC_AEAD_TAG_LEN > ciphertext_size) {
+		QUIC_EP_STAT_INC(ep, drop_tx);
+		return -ENOBUFS;
 	}
 
 	/*
@@ -4326,13 +6156,28 @@ static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
 		      net_sin6(net_sad(&ep->remote_addr))->sin6_port),
 		ep->sock);
 
+	if (dont_fragment) {
+		msg.msg_control = control;
+		msg.msg_controllen = sizeof(control);
+
+		cmsg = NET_CMSG_FIRSTHDR(&msg);
+		if (cmsg == NULL) {
+			return -EINVAL;
+		}
+
+		cmsg->cmsg_len = NET_CMSG_LEN(sizeof(dont_fragment_value));
+		cmsg->cmsg_level = ep->remote_addr.ss_family == NET_AF_INET ?
+				   NET_IPPROTO_IP : NET_IPPROTO_IPV6;
+		cmsg->cmsg_type = ep->remote_addr.ss_family == NET_AF_INET ?
+				  ZSOCK_IP_DONTFRAG : ZSOCK_IPV6_DONTFRAG;
+		memcpy(NET_CMSG_DATA(cmsg), &dont_fragment_value,
+		       sizeof(dont_fragment_value));
+	}
+
 	sent = zsock_sendmsg(ep->sock, &msg, 0);
 	if (sent < 0) {
 		ret = -errno;
-
-		NET_DBG("Failed to send packet (%d)", ret);
-		QUIC_EP_STAT_INC(ep, drop_tx);
-		return ret;
+		goto out;
 	}
 
 	/* XXX: TODO: Handle partial sends properly */
@@ -4343,7 +6188,11 @@ static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
 
 	quic_endpoint_note_unvalidated_tx(ep, MIN((size_t)sent, total_len));
 
-	quic_recovery_on_packet_sent(ep, level, packet_number, total_len, ack_eliciting);
+	quic_recovery_on_packet_sent(ep, level, packet_number, total_len, ack_eliciting,
+				      dplpmtud_probe, dplpmtud_probe ? total_len : 0U);
+	if (sent_pn_out != NULL) {
+		*sent_pn_out = packet_number;
+	}
 
 	switch (level) {
 	case QUIC_SECRET_LEVEL_INITIAL:
@@ -4352,6 +6201,7 @@ static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
 	case QUIC_SECRET_LEVEL_HANDSHAKE:
 		QUIC_EP_STAT_INC(ep, handshake_resp_tx);
 		break;
+	case QUIC_SECRET_LEVEL_EARLY:
 	case QUIC_SECRET_LEVEL_APPLICATION:
 		QUIC_EP_STAT_INC(ep, valid_tx);
 		break;
@@ -4362,20 +6212,67 @@ static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
 	NET_DBG("[EP:%p/%d] Sent %zd bytes at level %d, pn=%" PRIu64 ", ack-eliciting=%d",
 		ep, quic_get_by_ep(ep), sent, level, packet_number, ack_eliciting);
 
+	if (level == QUIC_SECRET_LEVEL_HANDSHAKE && !ep->is_server &&
+	    !ep->crypto.initial.discarded) {
+		/* RFC 9001 ch. 4.9.1: a client discards the Initial keys when
+		 * it first sends a Handshake packet.
+		 */
+		quic_endpoint_discard_keys(ep, QUIC_SECRET_LEVEL_INITIAL);
+	}
+
+	ret = 0;
+
+out:
+	if (ret < 0) {
+		NET_DBG("Failed to send packet (%d)", ret);
+		QUIC_EP_STAT_INC(ep, drop_tx);
+		return ret;
+	}
+
 	return 0;
 }
 
-static int quic_send_packet(struct quic_endpoint *ep,
-			    enum quic_secret_level level,
-			    const uint8_t *payload,
-			    size_t payload_len)
+static int quic_send_packet_from_txbuf(struct quic_endpoint *ep,
+				       enum quic_secret_level level,
+				       size_t payload_len,
+				       size_t target_datagram_len,
+				       bool dont_fragment,
+				       bool dplpmtud_probe)
 {
+	return quic_send_packet_from_txbuf_ex(ep, level, payload_len,
+					      target_datagram_len, dont_fragment,
+					      dplpmtud_probe, NULL);
+}
+
+ZTESTABLE_STATIC int quic_send_packet(struct quic_endpoint *ep,
+				      enum quic_secret_level level,
+				      const uint8_t *payload,
+				      size_t payload_len)
+{
+	return quic_send_packet_with_pn(ep, level, payload, payload_len, NULL);
+}
+
+static int quic_send_packet_with_pn(struct quic_endpoint *ep,
+				    enum quic_secret_level level,
+				    const uint8_t *payload,
+				    size_t payload_len,
+				    uint64_t *sent_pn_out)
+{
+	int ret;
+
 	if (payload_len > sizeof(ep->crypto.tx_buffer)) {
 		return -ENOBUFS;
 	}
 
+	k_mutex_lock(&ep->send_lock, K_FOREVER);
 	memcpy(ep->crypto.tx_buffer, payload, payload_len);
-	return quic_send_packet_from_txbuf(ep, level, payload_len);
+
+	ret = quic_send_packet_from_txbuf_ex(ep, level, payload_len, 0U, false, false,
+					     sent_pn_out);
+
+	k_mutex_unlock(&ep->send_lock);
+
+	return ret;
 }
 
 /*
@@ -4389,7 +6286,7 @@ static int quic_send_prepared_frame(struct quic_endpoint *ep,
 	size_t total_frame_len = frame_header_len + data_len;
 	int ret;
 
-	ret = quic_send_packet(ep, level, ep->crypto.tx_buffer, total_frame_len);
+	ret = quic_send_packet_from_txbuf(ep, level, total_frame_len, 0U, false, false);
 	if (ret == -EAGAIN) {
 #if defined(CONFIG_QUIC_SERVER_ANTI_AMPLIFICATION_LIMIT)
 		return quic_queue_deferred_crypto_payload(ep, level,
@@ -4415,6 +6312,7 @@ static int quic_tls_send_callback(void *user_data,
 	struct quic_endpoint *ep = user_data;
 	size_t frame_header_len;
 	uint8_t *dest;
+	int ret;
 
 	if (ep == NULL || data == NULL || len == 0) {
 		return -EINVAL;
@@ -4427,9 +6325,12 @@ static int quic_tls_send_callback(void *user_data,
 
 	NET_DBG("TLS send callback: level=%d, len=%zu", level, len);
 
+	k_mutex_lock(&ep->send_lock, K_FOREVER);
+
 	/* Prepare frame header, get destination for TLS data */
 	dest = quic_prepare_crypto_frame(ep, level, len, &frame_header_len);
 	if (dest == NULL) {
+		k_mutex_unlock(&ep->send_lock);
 		return -ENOBUFS;
 	}
 
@@ -4437,7 +6338,11 @@ static int quic_tls_send_callback(void *user_data,
 	memcpy(dest, data, len);
 
 	/* Send */
-	return quic_send_prepared_frame(ep, level, frame_header_len, len);
+	ret = quic_send_prepared_frame(ep, level, frame_header_len, len);
+
+	k_mutex_unlock(&ep->send_lock);
+
+	return ret;
 }
 
 static void quic_tls_set_callbacks(struct quic_tls_context *ctx,
@@ -4524,6 +6429,7 @@ static int quic_tls_send_client_hello(struct quic_tls_context *ctx,
 	size_t client_hello_size;
 	uint8_t *wrapped;
 	size_t wrapped_size;
+	size_t binder_offset;
 	size_t ch_len, wrapped_len;
 	int ret;
 
@@ -4544,7 +6450,8 @@ static int quic_tls_send_client_hello(struct quic_tls_context *ctx,
 	}
 
 	/* Build ClientHello */
-	ret = build_client_hello(ctx, client_hello, client_hello_size, &ch_len);
+	ret = build_client_hello(ctx, client_hello, client_hello_size, &ch_len,
+				 &binder_offset);
 	if (ret != 0) {
 		NET_DBG("Failed to build ClientHello: %d", ret);
 		return ret;
@@ -4559,10 +6466,39 @@ static int quic_tls_send_client_hello(struct quic_tls_context *ctx,
 		return ret;
 	}
 
+	if (binder_offset != SIZE_MAX) {
+		uint8_t binder[QUIC_HASH_MAX_LEN];
+
+		/* RFC 8446 4.2.11.2: truncate the transcript at the end of the
+		 * identities field, i.e. before the binders vector length and
+		 * binder length prefix that precede the binder value.
+		 */
+		ret = tls_compute_psk_binder(ctx->psk, ctx->psk_len,
+					     ctx->psk_is_resumption,
+					     ctx->ks.hash_alg, ctx->ks.hash_len,
+					     wrapped,
+					     4U + binder_offset -
+						     QUIC_TLS_PSK_BINDERS_HEADER_LEN,
+					     binder, sizeof(binder));
+		if (ret != 0) {
+			NET_DBG("Failed to compute PSK binder: %d", ret);
+			return ret;
+		}
+
+		memcpy(&client_hello[binder_offset], binder, ctx->ks.hash_len);
+		memcpy(&wrapped[4 + binder_offset], binder, ctx->ks.hash_len);
+	}
+
 	if (update_transcript) {
 		ret = transcript_update(ctx, wrapped, wrapped_len);
 		if (ret != 0) {
 			NET_DBG("Failed to update transcript: %d", ret);
+			return ret;
+		}
+
+		ret = tls_emit_client_early_traffic_secret(ctx);
+		if (ret != 0) {
+			NET_DBG("Failed to derive early traffic secret: %d", ret);
 			return ret;
 		}
 	}
@@ -4608,6 +6544,13 @@ static int quic_tls_client_start(struct quic_tls_context *ctx)
 
 	/* Initialize key schedule (will be updated when we receive ServerHello) */
 	ctx->ks.cipher_suite = TLS_AES_128_GCM_SHA256;
+	ctx->psk_offered = ctx->psk_configured;
+	ctx->use_psk_key_schedule = ctx->psk_configured;
+	ctx->early_data_offered = quic_0rtt_enabled() &&
+		ctx->session_state_valid &&
+		(ctx->session_state.max_early_data_size > 0U);
+	ctx->early_data_accepted = false;
+	ctx->early_data_rejected = false;
 	ret = key_schedule_init(ctx);
 	if (ret != 0) {
 		NET_DBG("Failed to initialize key schedule: %d", ret);
@@ -4803,8 +6746,18 @@ static int tls_set_psk(struct quic_tls_context *tls,
 		       struct tls_credential *psk,
 		       struct tls_credential *psk_id)
 {
-	/* TODO: Implement PSK support here and remove this stub function */
 #if defined(MBEDTLS_SSL_HANDSHAKE_WITH_PSK_ENABLED)
+	if (tls->psk_configured) {
+		return -EALREADY;
+	}
+
+	tls->psk = psk->buf;
+	tls->psk_len = psk->len;
+	tls->psk_identity = psk_id->buf;
+	tls->psk_identity_len = psk_id->len;
+	tls->psk_configured = true;
+	tls->psk_is_resumption = false;
+
 	return 0;
 #else
 	return -ENOTSUP;
@@ -5124,11 +7077,25 @@ static int tls_opt_sec_tag_list_set(struct quic_tls_context *context,
 static int tls_opt_hostname_set(struct quic_tls_context *context,
 				const void *optval, net_socklen_t optlen)
 {
-	ARG_UNUSED(optlen);
-	ARG_UNUSED(optval);
-	ARG_UNUSED(context);
+	if (context == NULL) {
+		return -EINVAL;
+	}
 
-	return -ENOPROTOOPT;
+	/* Clearing the hostname (NULL / zero length) disables SNI. */
+	if (optval == NULL || optlen == 0) {
+		context->options.hostname[0] = '\0';
+		return 0;
+	}
+
+	/* optlen counts the hostname bytes (not NUL-terminated by the caller). */
+	if (optlen >= sizeof(context->options.hostname)) {
+		return -EINVAL;
+	}
+
+	memcpy(context->options.hostname, optval, optlen);
+	context->options.hostname[optlen] = '\0';
+
+	return 0;
 }
 
 static int tls_opt_ciphersuite_list_set(struct quic_tls_context *context,
@@ -5176,8 +7143,8 @@ static int tls_opt_alpn_list_set(struct quic_tls_context *context,
 
 	alpn_cnt = optlen / sizeof(const char *);
 
-	/* alpn list must be NULL terminated. */
-	if (alpn_cnt > ARRAY_SIZE(context->options.alpn_list)) {
+	/* alpn list must be NULL terminated, so leave room for the terminator. */
+	if (alpn_cnt + 1 > ARRAY_SIZE(context->options.alpn_list)) {
 		return -EINVAL;
 	}
 
@@ -5329,6 +7296,8 @@ static int quic_tls_clone(struct quic_tls_context *target_tls,
 
 	target_tls->tls_version = source_tls->tls_version;
 	target_tls->type = source_tls->type;
+	target_tls->issue_session_tickets = source_tls->issue_session_tickets;
+	target_tls->max_early_data_size = source_tls->max_early_data_size;
 
 	memcpy(&target_tls->options, &source_tls->options,
 	       sizeof(target_tls->options));
@@ -5427,6 +7396,7 @@ static struct quic_tls_context *tls_init(struct quic_endpoint *ep)
 	struct quic_tls_context *tls = &ep->crypto.tls;
 
 	memset(&ep->crypto.initial, 0, sizeof(ep->crypto.initial));
+	memset(&ep->crypto.early, 0, sizeof(ep->crypto.early));
 
 	/* Clear and initialize the embedded TLS context */
 	memset(tls, 0, sizeof(*tls));

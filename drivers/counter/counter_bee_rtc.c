@@ -180,7 +180,7 @@ static int counter_bee_rtc_set_top_value(const struct device *dev,
 
 	LOG_DBG("ticks=%x\n", top_cfg->ticks);
 	if (top_cfg->ticks != cfg->counter_info.max_top_value) {
-		LOG_ERR("Unspported set top value");
+		LOG_ERR("Unsupported set top value");
 		return -ENOTSUP;
 	}
 
@@ -319,11 +319,11 @@ static DEVICE_API(counter, counter_bee_rtc_driver_api) = {
 	RTC_IRQ_CONFIG_FUNC(index);                                                                \
 	static void set_irq_pending_##index(void)                                                  \
 	{                                                                                          \
-		(NVIC_SetPendingIRQ(DT_INST_IRQN(index)));                                         \
+		(k_irq_set_pending(DT_INST_IRQN(index)));                                         \
 	}                                                                                          \
 	static uint32_t get_irq_pending_##index(void)                                              \
 	{                                                                                          \
-		return NVIC_GetPendingIRQ(DT_INST_IRQN(index));                                    \
+		return k_irq_is_pending(DT_INST_IRQN(index));                                    \
 	}
 
 #define BEE_RTC_INIT(index)                                                                        \

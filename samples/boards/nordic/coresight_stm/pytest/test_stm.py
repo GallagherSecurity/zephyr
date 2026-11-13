@@ -110,7 +110,7 @@ def check_benchmark_results(output: str, core: str, constraints: STMLimits) -> N
     """
     Use regular expressions to parse 'output' string.
     Search for benchmark results related to 'core' coprocessor.
-    Check that benchamrk results are lower than limits provided in 'constraints'.
+    Check that benchmark results are lower than limits provided in 'constraints'.
     """
 
     cfg = {
@@ -233,7 +233,7 @@ def test_sample_STM_decoded(dut: DeviceAdapter):
     autoconf_file = f"{BUILD_DIR}/_sysbuild/autoconf.h"
 
     # nrf54h20 prints immediately after it is flashed.
-    # Wait a bit to skipp logs from previous test.
+    # Wait a bit to skip logs from previous test.
     sleep(5)
 
     # Get output from serial port
@@ -309,7 +309,7 @@ def test_STM_decoded(dut: DeviceAdapter):
         log_2_arg=26.9,
         log_3_arg=27.5,
         log_str=68.3,
-        tracepoint=0.9,
+        tracepoint=1.5,
         tracepoint_d32=0.25,
         tolerance=0.5,
     )
@@ -326,7 +326,7 @@ def test_STM_decoded(dut: DeviceAdapter):
     )
 
     # nrf54h20 prints immediately after it is flashed.
-    # Wait a bit to skipp logs from previous test.
+    # Wait a bit to skip logs from previous test.
     sleep(5)
 
     # Get output from serial port

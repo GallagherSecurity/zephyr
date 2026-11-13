@@ -172,11 +172,7 @@ typedef struct s_isrList {
  */
 #define _VECTOR_ARG(irq_p)	(-1)
 
-#ifdef CONFIG_LINKER_USE_PINNED_SECTION
-#define IRQSTUBS_TEXT_SECTION	".pinned_text.irqstubs"
-#else
 #define IRQSTUBS_TEXT_SECTION	".text.irqstubs"
-#endif
 
 /* Internally this function does a few things:
  *
@@ -385,7 +381,7 @@ extern struct task_state_segment _main_tss;
  * cases a 4 byte boundary is sufficient.
  */
 #if defined(CONFIG_EAGER_FPU_SHARING) || defined(CONFIG_LAZY_FPU_SHARING)
-#ifdef CONFIG_SSE
+#ifdef CONFIG_X86_SSE
 #define ARCH_DYNAMIC_OBJ_K_THREAD_ALIGNMENT	16
 #else
 #define ARCH_DYNAMIC_OBJ_K_THREAD_ALIGNMENT	(sizeof(void *))

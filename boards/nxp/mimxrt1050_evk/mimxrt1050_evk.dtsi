@@ -6,7 +6,7 @@
 
 /dts-v1/;
 
-#include <nxp/imxrt/nxp_rt1050.dtsi>
+#include <nxp/imxrt/imxrt10xx/nxp_rt1050.dtsi>
 #include "mimxrt1050_evk-pinctrl.dtsi"
 #include <zephyr/dt-bindings/gpio/arduino-header-r3.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
@@ -118,6 +118,7 @@
 };
 
 arduino_serial: &lpuart3 {
+	current-speed = <115200>;
 	pinctrl-0 = <&pinmux_lpuart3>;
 	pinctrl-1 = <&pinmux_lpuart3_sleep>;
 	pinctrl-names = "default", "sleep";

@@ -25,6 +25,7 @@
 #include "userchan_bottom.h"
 
 #include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/buf.h>
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/drivers/bluetooth.h>
 
@@ -48,6 +49,12 @@ static unsigned short bt_dev_index;
 
 #define TCP_ADDR_BUFF_SIZE 16
 #define UNIX_ADDR_BUFF_SIZE 4096
+
+/* Fit the largest packet the host can receive. BT_BUF_RX_SIZE covers the H4
+ * type octet and the maximum of the ACL, event and ISO receive-buffer sizes,
+ * so it holds every packet type get_rx() accepts, including ISO.
+ */
+#define RX_FRAME_SIZE BT_BUF_RX_SIZE
 enum hci_connection_type {
 	HCI_USERCHAN,
 	HCI_TCP,
@@ -77,10 +84,10 @@ static bool is_hci_event_discardable(const struct bt_hci_evt_hdr *evt)
 		case BT_HCI_EVT_LE_EXT_ADVERTISING_REPORT: {
 			const struct bt_hci_evt_le_ext_advertising_report *ext_adv =
 				(const void *)meta_evt->data;
+			uint16_t adv_evt_type = sys_le16_to_cpu(ext_adv->adv_info[0].evt_type);
 
 			return (ext_adv->num_reports == 1) &&
-			       ((ext_adv->adv_info[0].evt_type & BT_HCI_LE_ADV_EVT_TYPE_LEGACY) !=
-				0);
+			       ((adv_evt_type & BT_HCI_LE_ADV_EVT_TYPE_LEGACY) != 0);
 		}
 #endif
 		default:
@@ -256,7 +263,7 @@ static void rx_thread(void *p1, void *p2, void *p3)
 	long frame_size = 0;
 
 	while (1) {
-		static uint8_t frame[512];
+		static uint8_t frame[RX_FRAME_SIZE];
 		struct net_buf *buf;
 		size_t buf_tailroom;
 		size_t buf_add_len;

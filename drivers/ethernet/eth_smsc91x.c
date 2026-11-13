@@ -6,7 +6,7 @@
 #include <zephyr/net/ethernet.h>
 #include <zephyr/net/phy.h>
 #include <zephyr/arch/cpu.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/drivers/mdio.h>
 #include <zephyr/logging/log.h>
 #include "eth_smsc91x_priv.h"
@@ -677,11 +677,7 @@ static void phy_link_state_changed(const struct device *phy_dev, struct phy_link
 	const struct device *dev = user_data;
 	struct eth_context *data = dev->data;
 
-	if (state->is_up) {
-		net_eth_carrier_on(data->iface);
-	} else {
-		net_eth_carrier_off(data->iface);
-	}
+	net_eth_carrier_set(data->iface, state->is_up);
 }
 
 static enum ethernet_hw_caps eth_smsc_get_caps(const struct device *dev __unused,
@@ -711,7 +707,7 @@ static int eth_tx(const struct device *dev, struct net_pkt *pkt)
 }
 
 static int eth_smsc_set_config(const struct device *dev,
-			       struct net_if *iface __unused
+			       struct net_if *iface __unused,
 			       enum ethernet_config_type type,
 			       const struct ethernet_config *config)
 {

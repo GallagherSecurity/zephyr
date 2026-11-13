@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2026 Philipp Steiner <philipp.steiner1987@gmail.com>
+ * Copyright (c) 2026 Philipp Steiner
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -526,6 +526,149 @@ ZTEST(ptp_foreign_master, test_best_foreign_cleanup_uses_local_uptime)
 	zassert_not_null(foreign, "foreign clock missing");
 	zassert_equal(foreign->messages_count, 0, "expired records should be removed");
 	zassert_true(k_fifo_is_empty(&foreign->messages), "foreign message queue should be empty");
+}
+
+ZTEST(ptp_foreign_master, test_best_foreign_cleanup_keeps_scaled_time_window)
+{
+	struct ptp_foreign_tt_clock *foreign;
+
+	/* log_msg_interval = 1 gives a 4 * 2^1 = 8 second time window.
+	 * Records aged 5 seconds must survive the cleanup. With 32-bit
+	 * arithmetic the window wraps to about 3.7 seconds and they are
+	 * dropped prematurely.
+	 */
+	init_announce_msg_ext(&msg1, 0x69, 1, 120, 128, 0, 1);
+	init_announce_msg_ext(&msg2, 0x69, 1, 120, 128, 0, 1);
+
+	zassert_equal(ptp_port_add_foreign_tt(&port, &msg1), 0, "first add failed");
+	zassert_equal(ptp_port_add_foreign_tt(&port, &msg2), 1, "second add failed");
+
+	msg1.local_uptime_ms = k_uptime_get() - (5 * MSEC_PER_SEC);
+	msg2.local_uptime_ms = k_uptime_get() - (5 * MSEC_PER_SEC);
+
+	zassert_not_null(ptp_port_best_foreign(&port),
+			 "records within the time window should produce best");
+
+	foreign = find_foreign_clock(&port, 0x69, 1);
+	zassert_not_null(foreign, "foreign clock missing");
+	zassert_equal(foreign->messages_count, FOREIGN_TIME_TRANSMITTER_THRESHOLD,
+		      "records within the time window should be kept");
+}
+
+/* Messages kept in the records of all foreign timeTransmitters of the port. */
+static int foreign_msgs_kept(struct ptp_port *port_ctx)
+{
+	struct ptp_foreign_tt_clock *foreign;
+	int count = 0;
+
+	SYS_SLIST_FOR_EACH_CONTAINER(&port_ctx->foreign_list, foreign, node) {
+		count += foreign->messages_count;
+	}
+
+	return count;
+}
+
+/* Announce messages from as many senders as there are records must not take
+ * more than half of the message pool, whatever their number.
+ */
+ZTEST(ptp_foreign_master, test_many_senders_keep_half_of_the_pool)
+{
+	static struct ptp_msg msgs[CONFIG_PTP_FOREIGN_TIME_TRANSMITTER_RECORD_SIZE *
+				   (FOREIGN_TIME_TRANSMITTER_THRESHOLD + 1)];
+	int idx = 0;
+
+	for (int round = 0; round <= FOREIGN_TIME_TRANSMITTER_THRESHOLD; round++) {
+		for (int sender = 0; sender < CONFIG_PTP_FOREIGN_TIME_TRANSMITTER_RECORD_SIZE;
+		     sender++) {
+			init_announce_msg(&msgs[idx], (uint8_t)(0xA0 + sender), 1, 120);
+			(void)ptp_port_add_foreign_tt(&port, &msgs[idx]);
+			idx++;
+
+			zassert_true(foreign_msgs_kept(&port) <= CONFIG_PTP_MSG_POLL_SIZE / 2,
+				     "%d messages kept, the limit is %d", foreign_msgs_kept(&port),
+				     CONFIG_PTP_MSG_POLL_SIZE / 2);
+		}
+	}
+
+	zassert_equal(foreign_clock_count(&port), CONFIG_PTP_FOREIGN_TIME_TRANSMITTER_RECORD_SIZE,
+		      "every sender should still have a record");
+	zassert_equal(foreign_msgs_kept(&port), CONFIG_PTP_MSG_POLL_SIZE / 2,
+		      "the records should use what they are allowed to");
+}
+
+/* At the limit a record follows the latest Announce message of its sender by
+ * giving up its oldest one.
+ */
+ZTEST(ptp_foreign_master, test_record_at_limit_keeps_latest_announce)
+{
+	static struct ptp_msg msgs[CONFIG_PTP_MSG_POLL_SIZE / 2];
+	static struct ptp_msg latest;
+	struct ptp_foreign_tt_clock *foreign;
+
+	for (int i = 0; i < ARRAY_SIZE(msgs); i++) {
+		init_announce_msg(&msgs[i], (uint8_t)(0xB0 + i), 1, 120);
+		(void)ptp_port_add_foreign_tt(&port, &msgs[i]);
+	}
+	zassert_equal(foreign_msgs_kept(&port), CONFIG_PTP_MSG_POLL_SIZE / 2, "limit not reached");
+
+	init_announce_msg(&latest, 0xB0, 1, 121);
+	zassert_not_equal(ptp_port_add_foreign_tt(&port, &latest), 0,
+			  "a changed Announce message should be reported");
+
+	foreign = find_foreign_clock(&port, 0xB0, 1);
+	zassert_not_null(foreign, "record missing");
+	zassert_equal(foreign->messages_count, 1, "the record should hold one message");
+	zassert_equal(k_fifo_peek_tail(&foreign->messages), &latest,
+		      "the record should hold the latest message");
+	zassert_equal(foreign_msgs_kept(&port), CONFIG_PTP_MSG_POLL_SIZE / 2,
+		      "the limit should still hold");
+}
+
+/* The current timeTransmitter is not locked out by other senders: at the limit
+ * its record takes the place of a message of another record.
+ */
+ZTEST(ptp_foreign_master, test_current_tt_is_kept_at_the_limit)
+{
+	static struct ptp_msg msgs[CONFIG_PTP_MSG_POLL_SIZE / 2];
+	static struct ptp_msg expired;
+	static struct ptp_msg renewed;
+	struct ptp_foreign_tt_clock *foreign;
+	int others = ARRAY_SIZE(msgs) - 1;
+
+	init_announce_msg(&expired, 0xC0, 1, 100);
+	zassert_equal(ptp_port_add_foreign_tt(&port, &expired), 0, "first add failed");
+	foreign = find_foreign_clock(&port, 0xC0, 1);
+	zassert_not_null(foreign, "record missing");
+	port.best = foreign;
+
+	for (int i = 0; i < others; i++) {
+		init_announce_msg(&msgs[i], (uint8_t)(0xC1 + i), 1, 120);
+		(void)ptp_port_add_foreign_tt(&port, &msgs[i]);
+	}
+
+	/* The message of the current timeTransmitter expires and its place is
+	 * taken by another sender. Selecting the best record releases the
+	 * expired message, and forgets the current timeTransmitter, which is
+	 * set again to model a port that has not run the selection since.
+	 */
+	set_local_uptime_expired(&expired);
+	(void)ptp_port_best_foreign(&port);
+	zassert_equal(foreign->messages_count, 0, "the expired message should be released");
+	port.best = foreign;
+
+	init_announce_msg(&msgs[others], 0xC1, 1, 120);
+	(void)ptp_port_add_foreign_tt(&port, &msgs[others]);
+	zassert_equal(foreign_msgs_kept(&port), CONFIG_PTP_MSG_POLL_SIZE / 2, "limit not reached");
+
+	init_announce_msg(&renewed, 0xC0, 1, 100);
+	(void)ptp_port_update_current_time_transmitter(&port, &renewed);
+
+	zassert_equal(foreign->messages_count, 1,
+		      "the current timeTransmitter should keep its message");
+	zassert_equal(k_fifo_peek_tail(&foreign->messages), &renewed,
+		      "the record should hold the new message");
+	zassert_equal(foreign_msgs_kept(&port), CONFIG_PTP_MSG_POLL_SIZE / 2,
+		      "the limit should still hold");
 }
 
 ZTEST_SUITE(ptp_foreign_master, NULL, NULL, foreign_master_before, foreign_master_after, NULL);

@@ -8,8 +8,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef ZEPHYR_INCLUDE_BLUETOOTH_PBAP_H_
-#define ZEPHYR_INCLUDE_BLUETOOTH_PBAP_H_
+#ifndef ZEPHYR_INCLUDE_BLUETOOTH_CLASSIC_PBAP_H_
+#define ZEPHYR_INCLUDE_BLUETOOTH_CLASSIC_PBAP_H_
 
 /**
  * @brief Phone Book Access Profile (PBAP)
@@ -957,55 +957,6 @@ int bt_pbap_pse_set_phone_book_rsp(struct bt_pbap_pse *pbap_pse, uint8_t rsp_cod
  */
 int bt_pbap_pse_abort_rsp(struct bt_pbap_pse *pbap_pse, uint8_t rsp_code, struct net_buf *buf);
 
-/** @brief Calculate authentication nonce for PBAP challenge.
- *
- *  Generates a random nonce value used in OBEX authentication challenges.
- *  The nonce is used to prevent replay attacks during authentication.
- *
- *  @param pwd Password string used for authentication (null-terminated).
- *  @param nonce Output buffer to store the generated nonce
- *               (@ref BT_OBEX_CHALLENGE_TAG_NONCE_LEN bytes).
- *
- *  @return 0 on success, negative error code on failure.
- */
-int bt_pbap_calculate_nonce(const uint8_t *pwd, uint8_t nonce[BT_OBEX_CHALLENGE_TAG_NONCE_LEN]);
-
-/** @brief Calculate response digest for PBAP authentication.
- *
- *  Computes the MD5 digest for an authentication response based on the password
- *  and received nonce. This digest is sent back to prove knowledge of the password
- *  without transmitting the password itself.
- *
- *  @param pwd Password string used for authentication (null-terminated).
- *  @param nonce Nonce value received in the authentication challenge
- *               (@ref BT_OBEX_CHALLENGE_TAG_NONCE_LEN bytes).
- *  @param rsp_digest Output buffer to store the calculated response digest
- *                    (@ref BT_OBEX_RESPONSE_TAG_REQ_DIGEST_LEN bytes).
- *
- *  @return 0 on success, negative error code on failure.
- */
-int bt_pbap_calculate_rsp_digest(const uint8_t *pwd,
-				 const uint8_t nonce[BT_OBEX_CHALLENGE_TAG_NONCE_LEN],
-				 uint8_t rsp_digest[BT_OBEX_RESPONSE_TAG_REQ_DIGEST_LEN]);
-
-/** @brief Verify authentication response.
- *
- *  Verifies that the received response digest matches the expected value based on
- *  the password and nonce. Used by the authenticating party to validate the
- *  authentication response.
- *
- *  @param nonce Nonce value that was sent in the authentication challenge
- *               (@ref BT_OBEX_CHALLENGE_TAG_NONCE_LEN bytes).
- *  @param rsp_digest Response digest received from the authenticating peer
- *                    (@ref BT_OBEX_RESPONSE_TAG_REQ_DIGEST_LEN bytes).
- *  @param pwd Password string used for authentication (null-terminated).
- *
- *  @return 0 if authentication is successful, negative error code on failure.
- */
-int bt_pbap_verify_authentication(uint8_t nonce[BT_OBEX_CHALLENGE_TAG_NONCE_LEN],
-				  uint8_t rsp_digest[BT_OBEX_RESPONSE_TAG_REQ_DIGEST_LEN],
-				  const uint8_t *pwd);
-
 #ifdef __cplusplus
 }
 #endif
@@ -1014,4 +965,4 @@ int bt_pbap_verify_authentication(uint8_t nonce[BT_OBEX_CHALLENGE_TAG_NONCE_LEN]
  * @}
  */
 
-#endif /* ZEPHYR_INCLUDE_BLUETOOTH_PBAP_H_ */
+#endif /* ZEPHYR_INCLUDE_BLUETOOTH_CLASSIC_PBAP_H_ */

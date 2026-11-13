@@ -23,16 +23,17 @@
 			compatible = "st,stm32u5-dma";
 			#dma-cells = <3>;
 			reg = <0x40020000 0x1000>;
-			interrupts = <28 0 29 0 30 0 31 0 32 0 33 0 34 0 35 0>;
+			interrupts = <28 0>, <29 0>, <30 0>, <31 0>, <32 0>, <33 0>, <34 0>, <35 0>;
 			clocks = <&rcc STM32_CLOCK(AHB1, 0)>;
 			dma-channels = <8>;
 			dma-requests = <52>;
-			dma-offset = <0>;
 			status = "disabled";
 		};
 
-		adc4: adc@46021000 {
-			interrupts = <59 0>;
+		adc4_common: adc@46021000 {
+			adc4: adc@46021000 {
+				interrupts = <59 0>;
+			};
 		};
 
 		i2c1: i2c@40005400 {
@@ -55,8 +56,16 @@
 			interrupts = <44 0>;
 		};
 
-		aes: aes@420c0000 {
+		aes: crypto@420c0000 {
 			interrupts = <52 0>;
+		};
+
+		hash: crypto@420c0400 {
+			interrupts = <55 0>;
+		};
+
+		pka: pka@420c2000 {
+			interrupts = <56 0>;
 		};
 
 		rng: rng@420c0800 {
@@ -82,15 +91,9 @@
 		usart1: serial@40013800 {
 			interrupts = <43 0>;
 		};
-	};
 
-	bt_hci_wba: bt_hci_wba {
-		interrupt-parent = <&nvic>;
-		interrupts = <60 0>;
-		interrupt-names = "radio";
-	};
-
-	ieee802154: ieee802154 {
-		interrupts = <60 0>;
+		radio: radio@48020000 {
+			interrupts = <60 0>;
+		};
 	};
 };

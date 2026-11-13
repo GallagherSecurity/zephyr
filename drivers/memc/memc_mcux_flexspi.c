@@ -295,15 +295,15 @@ int memc_flexspi_transfer(const struct device *dev,
 	flexspi_transfer_t tmp;
 	struct memc_flexspi_data *data = dev->data;
 	status_t status;
-	uint32_t seq_off, addr_offset = 0U;
-	int i;
+	uint32_t seq_off;
 
-	/* Calculate sequence offset and address offset based on port */
+	/*
+	 * Calculate sequence offset based on port. The port address offset
+	 * is applied by FLEXSPI_TransferBlocking() in the HAL, which adds the
+	 * sizes of all preceding ports from FLSHCR0.
+	 */
 	seq_off = data->port_luts[transfer->port].lut_offset /
 				MEMC_FLEXSPI_CMD_PER_SEQ;
-	for (i = 0; i < transfer->port; i++) {
-		addr_offset += data->size[i];
-	}
 
 	/*
 	 * Lock IRQs while an IP command is active. If an ISR fires and its handler
@@ -313,11 +313,10 @@ int memc_flexspi_transfer(const struct device *dev,
 #if CONFIG_FLASH_MCUX_FLEXSPI_XIP
 	unsigned int key = irq_lock();
 #endif
-	if ((seq_off != 0) || (addr_offset != 0)) {
-		/* Adjust device address and sequence index for transfer */
+	if (seq_off != 0) {
+		/* Adjust sequence index for transfer */
 		memcpy(&tmp, transfer, sizeof(tmp));
 		tmp.seqIndex += seq_off;
-		tmp.deviceAddress += addr_offset;
 		status = FLEXSPI_TransferBlocking(base, &tmp);
 	} else {
 		/* Transfer does not need adjustment */
@@ -491,6 +490,41 @@ FSL_FEATURE_FLEXSPI_SUPPORT_SEPERATE_RXCLKSRC_PORTB
 
 	return 0;
 }
+
+#ifdef CONFIG_PM_DEVICE
+/*
+ * Reset the LUT bookkeeping for one port after a power-domain power-down
+ * so the following memc_flexspi_set_device_config()/probe re-allocates the
+ * port's LUT slot from the correct offset.
+ *
+ * Only the caller's port is cleared: each child device in the domain
+ * re-probes its own port on TURN_ON, and the allocator places it after the
+ * ports that already re-allocated.
+ */
+void memc_flexspi_reset_lut_alloc(const struct device *dev, flexspi_port_t port)
+{
+	struct memc_flexspi_data *data = dev->data;
+	FLEXSPI_Type *base = get_base(dev);
+	uint32_t timeout = CONFIG_MEMC_MCUX_FLEXSPI_WAIT_BUS_IDLE_TIMEOUT;
+
+	if (port >= kFLEXSPI_PortCount) {
+		return;
+	}
+
+	/*
+	 * Wait for the bus to go idle before touching the LUT bookkeeping.
+	 * Bounded (CONFIG_MEMC_MCUX_FLEXSPI_WAIT_BUS_IDLE_TIMEOUT polls) so
+	 * a wedged controller cannot hang the PM wake path forever; if the
+	 * bus never idles, the following probe reports it.
+	 */
+	while (!FLEXSPI_GetBusIdleStatus(base) && (timeout-- > 0U)) {
+	}
+
+	data->port_luts[port].lut_offset = 0;
+	data->port_luts[port].lut_used = 0;
+	data->size[port] = 0;
+}
+#endif /* CONFIG_PM_DEVICE */
 
 #ifdef CONFIG_PM_DEVICE
 static int memc_flexspi_pm_action(const struct device *dev, enum pm_device_action action)

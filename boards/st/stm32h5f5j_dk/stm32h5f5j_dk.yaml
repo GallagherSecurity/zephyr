@@ -15,14 +15,19 @@ supported:
   - can
   - counter
   - dac
+  - display
   - dma
   - entropy
   - gpio
   - i2c
-  - octospi
+  - netif:eth
+  - ptp_clock
+  - mspi
   - pwm
   - rtc
+  - sdhc
   - spi
   - uart
+  - usbd
   - watchdog
 vendor: st

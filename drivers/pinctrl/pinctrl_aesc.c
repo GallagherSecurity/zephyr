@@ -11,25 +11,23 @@
 
 #include <zephyr/arch/cpu.h>
 #include <zephyr/drivers/pinctrl.h>
+#include <zephyr/sys/sys_io.h>
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(aesc_pinctrl, CONFIG_PINCTRL_LOG_LEVEL);
 
-#define AESC_PINCTRL_MAX_PINS		128
-
 struct pinctrl_aesc_data {
 	DEVICE_MMIO_RAM;
 	uintptr_t reg_base;
+	uint32_t max_pins;
 };
 
 struct pinctrl_aesc_config {
 	DEVICE_MMIO_ROM;
 };
 
-struct pinctrl_aesc_regs {
-	uint32_t info;
-	uint32_t pin[AESC_PINCTRL_MAX_PINS];
-} __packed;
+#define PINCTRL_AESC_INFO		0x00
+#define PINCTRL_AESC_PIN(pin)		(0x04 + ((pin) * 4))
 
 #define DEV_DATA(dev) ((struct pinctrl_aesc_data *)(dev)->data)
 
@@ -39,15 +37,13 @@ int pinctrl_configure_pins(const pinctrl_soc_pin_t *pins, uint8_t pin_cnt,
 	ARG_UNUSED(reg);
 	const struct device *dev = pins->dev;
 	struct pinctrl_aesc_data *data = DEV_DATA(dev);
-	volatile struct pinctrl_aesc_regs *regs =
-		(volatile struct pinctrl_aesc_regs *)data->reg_base;
 
 	for (uint8_t i = 0; i < pin_cnt; i++) {
-		if (pins[i].pin > AESC_PINCTRL_MAX_PINS) {
+		if (pins[i].pin >= data->max_pins) {
 			LOG_ERR("Pin index %u out of range", pins[i].pin);
 			return -EINVAL;
 		}
-		regs->pin[pins[i].pin] = pins[i].mux;
+		sys_write32(pins[i].mux, data->reg_base + PINCTRL_AESC_PIN(pins[i].pin));
 	}
 
 	return 0;
@@ -66,6 +62,9 @@ static int pinctrl_aesc_init(const struct device *dev)
 	);
 	data->reg_base = ip_id_relocate_driver(base_addr);
 	LOG_DBG("Relocate registers to address 0x%lx.", data->reg_base);
+
+	data->max_pins = sys_read32(data->reg_base + PINCTRL_AESC_INFO) & 0xFF;
+
 	return 0;
 }
 

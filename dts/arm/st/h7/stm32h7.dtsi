@@ -243,6 +243,7 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			reg = <0x58020000 0x2400>;
+			ranges;
 
 			gpioa: gpio@58020000 {
 				compatible = "st,stm32-gpio";
@@ -1042,13 +1043,14 @@
 			};
 		};
 
-		adc1: adc@40022000 {
+		adc12_common: adc@40022000 {
 			compatible = "st,stm32-adc";
+			#address-cells = <1>;
+			#size-cells = <1>;
 			reg = <0x40022000 0x400>;
+			ranges;
 			clocks = <&rcc STM32_CLOCK(AHB1, 5)>;
 			clock-names = "adcx";
-			interrupts = <18 0>;
-			#io-channel-cells = <1>;
 			st,adc-resolutions = <16 14 12 10 8>;
 			sampling-times = <2 3 9 17 33 65 388 811>;
 			st,adc-sequencer = "programmable";
@@ -1059,54 +1061,30 @@
 			st,adc-has-differential-support;
 			st,adc-has-injected-support;
 			status = "disabled";
+
+			adc1: adc@40022000 {
+				reg = <0x40022000 0x100>;
+				interrupts = <18 0>;
+				#io-channel-cells = <1>;
+				status = "disabled";
+			};
+
+			adc2: adc@40022100 {
+				reg = <0x40022100 0x100>;
+				interrupts = <18 0>;
+				#io-channel-cells = <1>;
+				status = "disabled";
+			};
 		};
 
-		adc2: adc@40022100 {
+		adc3_common: adc@58026000 {
 			compatible = "st,stm32-adc";
-			reg = <0x40022100 0x400>;
-			clocks = <&rcc STM32_CLOCK(AHB1, 5)>;
-			clock-names = "adcx";
-			interrupts = <18 0>;
-			#io-channel-cells = <1>;
-			st,adc-resolutions = <16 14 12 10 8>;
-			sampling-times = <2 3 9 17 33 65 388 811>;
-			st,adc-sequencer = "programmable";
-			st,adc-oversampler = "extended";
-			st,adc-internal-regulator = "startup-hw-status";
-			st,adc-has-deep-powerdown;
-			st,adc-has-channel-preselection;
-			st,adc-has-differential-support;
-			st,adc-has-injected-support;
-			status = "disabled";
-		};
-
-		/* dual mode: adc1 and adc2 coupled */
-		adc1_2: adc@40022300 {
-			compatible = "st,stm32-adc";
-			reg = <0x40022300 0x400>;
-			clocks = <&rcc STM32_CLOCK(AHB1, 5)>;
-			clock-names = "adcx";
-			interrupts = <18 0>;
-			#io-channel-cells = <1>;
-			st,adc-resolutions = <16 14 12 10 8>;
-			sampling-times = <2 3 9 17 33 65 388 811>;
-			st,adc-sequencer = "programmable";
-			st,adc-oversampler = "extended";
-			st,adc-internal-regulator = "startup-hw-status";
-			st,adc-has-deep-powerdown;
-			st,adc-has-channel-preselection;
-			st,adc-has-differential-support;
-			st,adc-has-injected-support;
-			status = "disabled";
-		};
-
-		adc3: adc@58026000 {
-			compatible = "st,stm32-adc";
+			#address-cells = <1>;
+			#size-cells = <1>;
 			reg = <0x58026000 0x400>;
+			ranges;
 			clocks = <&rcc STM32_CLOCK(AHB4, 24)>;
 			clock-names = "adcx";
-			interrupts = <127 0>;
-			#io-channel-cells = <1>;
 			st,adc-resolutions = <16 14 12 10 8>;
 			sampling-times = <2 3 9 17 33 65 388 811>;
 			st,adc-sequencer = "programmable";
@@ -1117,6 +1095,13 @@
 			st,adc-has-differential-support;
 			st,adc-has-injected-support;
 			status = "disabled";
+
+			adc3: adc@58026000 {
+				reg = <0x58026000 0x100>;
+				interrupts = <127 0>;
+				#io-channel-cells = <1>;
+				status = "disabled";
+			};
 		};
 
 		dac1: dac@40007400 {
@@ -1155,7 +1140,7 @@
 
 		bdma1: bdma@58025400 {
 			compatible = "st,stm32-bdma";
-			#dma-cells = <4>;
+			#dma-cells = <3>;
 			reg = <0x58025400 0x400>;
 			interrupts = <129 0>, <130 0>, <131 0>, <132 0>, <133 0>, <134 0>,
 				     <135 0>, <136 0>;
@@ -1212,6 +1197,7 @@
 			clocks = <&rcc STM32_CLOCK(AHB3, 16)>,
 				 <&rcc STM32_SRC_PLL1_Q SDMMC_SEL(0)>;
 			resets = <&rctl STM32_RESET(AHB3, 16)>;
+			interrupt-names = "event";
 			interrupts = <49 0>;
 			status = "disabled";
 		};
@@ -1227,21 +1213,28 @@
 		};
 
 		mac: ethernet@40028000 {
-			compatible = "st,stm32h7-ethernet", "st,stm32-ethernet";
+			compatible = "st,stm32h7-ethernet", "st,stm32-ethernet", "snps,dwmac";
 			reg = <0x40028000 0x8000>;
 			clock-names = "stm-eth", "mac-clk-tx", "mac-clk-rx";
 			clocks = <&rcc STM32_CLOCK(AHB1, 15)>,
 				 <&rcc STM32_CLOCK(AHB1, 16)>,
 				 <&rcc STM32_CLOCK(AHB1, 17)>;
+			resets = <&rctl STM32_RESET(AHB1, 15)>;
 			interrupts = <61 0>;
+			snps,multicast-filter-bins = <64>;
+			snps,perfect-filter-entries = <4>;
 			memory-regions = <&sram2>;
 			status = "disabled";
 
 			mdio: mdio {
-				compatible = "st,stm32-mdio", "snps,dwmac-mdio";
+				compatible = "snps,dwmac-mdio";
 				#address-cells = <1>;
 				#size-cells = <0>;
 				status = "disabled";
+			};
+
+			ptp_clock: ptp-clock {
+				compatible = "snps,dwmac-ptp-clock";
 			};
 		};
 
@@ -1284,30 +1277,36 @@
 			interrupt-names = "dcmi";
 			clocks = <&rcc STM32_CLOCK(AHB2, 0)>;
 			dmas = <&dma1 1 75 (STM32_DMA_PERIPH_TO_MEMORY | STM32_DMA_PERIPH_NO_INC |
-					    STM32_DMA_MEM_INC | STM32_DMA_PERIPH_8BITS |
+					    STM32_DMA_MEM_INC | STM32_DMA_PERIPH_32BITS |
 					    STM32_DMA_MEM_32BITS |
-					    STM32_DMA_PRIORITY_HIGH) STM32_DMA_FIFO_1_4>;
+					    STM32_DMA_PRIORITY_HIGH) STM32_DMA_FIFO_FULL>;
 			status = "disabled";
 		};
 
 		sai1: sai1@40015800 {
 			compatible = "st,stm32-sai";
 			#address-cells = <1>;
-			#size-cells = <0>;
+			#size-cells = <1>;
 			reg = <0x40015800 0x400>;
+			ranges;
 			clocks = <&rcc STM32_CLOCK(APB2, 22)>,
 				 <&rcc STM32_SRC_PLL2_P SAI1_SEL(0)>;
+			clock-names = "sai_ck", "sai_ker_ck";
 			status = "disabled";
 
-			sai1_a: sai1a@4 {
-				reg = <0x4>;
+			sai1_a: sai1a@40015804 {
+				reg = <0x40015804 0x20>;
 				dmas = <&dma1 2 87 (STM32_DMA_16BITS | STM32_DMA_PRIORITY_HIGH) 0>;
+				#address-cells = <1>;
+				#size-cells = <0>;
 				status = "disabled";
 			};
 
-			sai1_b: sai1b@24 {
-				reg = <0x24>;
+			sai1_b: sai1b@40015824 {
+				reg = <0x40015824 0x20>;
 				dmas = <&dma1 3 88 (STM32_DMA_16BITS | STM32_DMA_PRIORITY_HIGH) 0>;
+				#address-cells = <1>;
+				#size-cells = <0>;
 				status = "disabled";
 			};
 		};
@@ -1335,6 +1334,22 @@
 			reg = <0x58024c00 0x400>;
 			clocks = <&rcc STM32_CLOCK(AHB4, 19)>;
 			resets = <&rctl STM32_RESET(AHB4, 19)>;
+			status = "disabled";
+		};
+
+		vrefbuf: vrefbuf@58003c00 {
+			compatible = "st,stm32-vrefbuf";
+			reg = <0x58003c00 0x400>;
+			clocks = <&rcc STM32_CLOCK(APB4, 15)>;
+			resets = <&rctl STM32_RESET(APB4, 15)>;
+			ref-voltages = <2500000>, <2048000>, <1800000>, <1500000>;
+			status = "disabled";
+		};
+
+		dma2d: dma@52001000 {
+			compatible = "st,stm32-dma2d";
+			reg = <0x52001000 0x1000>;
+			interrupts = <90 0>;
 			status = "disabled";
 		};
 	};

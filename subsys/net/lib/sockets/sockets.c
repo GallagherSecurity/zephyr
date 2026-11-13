@@ -68,8 +68,14 @@ static inline void *get_sock_vtable(int sock,
 #endif /* CONFIG_USERSPACE */
 
 	if (ctx == NULL) {
+		const char *name = k_thread_name_get(_current);
+
+		/* k_thread_name_get() returns NULL when CONFIG_THREAD_NAME=n;
+		 * the deferred-logging string packaging strlen()s the %s arg,
+		 * so pass a non-NULL placeholder to avoid a NULL dereference.
+		 */
 		NET_DBG("Invalid access on sock %d by thread %p (%s)", sock,
-			_current, k_thread_name_get(_current));
+			_current, name != NULL ? name : "?");
 	}
 
 	return ctx;
@@ -104,6 +110,13 @@ void *z_vrfy_zsock_get_context_object(int sock)
 
 #include <zephyr/syscalls/zsock_get_context_object_mrsh.c>
 #endif
+
+bool net_socket_port_in_use(enum net_ip_protocol proto, uint16_t local_port,
+			    const struct net_sockaddr *local_addr)
+{
+	return net_context_port_in_use(proto, local_port, local_addr) ||
+	       net_socket_offloaded_port_in_use(proto, local_port, local_addr);
+}
 
 int z_impl_zsock_socket(int family, int type, int proto)
 {
@@ -153,6 +166,14 @@ extern int zvfs_close(int fd);
 int z_impl_zsock_close(int sock)
 {
 	return zvfs_close(sock);
+}
+
+/*
+ * Runs on every close path, even when zsock_close() is bypassed.
+ */
+void zvfs_socket_close_hook(int fd)
+{
+	net_socket_offloaded_port_untrack(fd);
 }
 
 #ifdef CONFIG_USERSPACE
@@ -223,6 +244,9 @@ int z_impl_zsock_bind(int sock, const struct net_sockaddr *addr, net_socklen_t a
 	SYS_PORT_TRACING_OBJ_FUNC_ENTER(socket, bind, sock, addr, addrlen);
 
 	ret = VTABLE_CALL(bind, sock, addr, addrlen);
+	if (ret == 0) {
+		net_socket_offloaded_port_bind(sock, addr);
+	}
 
 	SYS_PORT_TRACING_OBJ_FUNC_EXIT(socket, bind, sock, ret < 0 ? -errno : ret);
 
@@ -392,51 +416,63 @@ static inline ssize_t z_vrfy_zsock_sendmsg(int sock,
 					   int flags)
 {
 	struct net_msghdr msg_copy;
+	struct net_iovec *user_iov;
+	void *user_name;
+	void *user_control;
 	size_t msg_iov_size;
 	size_t i;
 	int ret;
 
-	if (size_mul_overflow(msg->msg_iovlen, sizeof(struct net_iovec),
+	K_OOPS(k_usermode_from_copy(&msg_copy, (void *)msg, sizeof(msg_copy)));
+
+	if (size_mul_overflow(msg_copy.msg_iovlen, sizeof(struct net_iovec),
 			      &msg_iov_size)) {
 		errno = EFAULT;
 		return -1;
 	}
 
-	K_OOPS(k_usermode_from_copy(&msg_copy, (void *)msg, sizeof(msg_copy)));
+	user_iov = msg_copy.msg_iov;
+	user_name = msg_copy.msg_name;
+	user_control = msg_copy.msg_control;
 
 	msg_copy.msg_name = NULL;
 	msg_copy.msg_control = NULL;
 
-	msg_copy.msg_iov = k_usermode_alloc_from_copy(msg->msg_iov, msg_iov_size);
+	msg_copy.msg_iov = k_usermode_alloc_from_copy(user_iov, msg_iov_size);
 	if (!msg_copy.msg_iov) {
 		errno = ENOMEM;
 		goto fail;
 	}
 
-	for (i = 0; i < msg->msg_iovlen; i++) {
+	memset(msg_copy.msg_iov, 0, msg_iov_size);
+
+	for (i = 0; i < msg_copy.msg_iovlen; i++) {
+		struct net_iovec elem;
+
+		K_OOPS(k_usermode_from_copy(&elem, &user_iov[i], sizeof(elem)));
+
 		msg_copy.msg_iov[i].iov_base =
-			k_usermode_alloc_from_copy(msg->msg_iov[i].iov_base,
-					       msg->msg_iov[i].iov_len);
+			k_usermode_alloc_from_copy(elem.iov_base, elem.iov_len);
 		if (!msg_copy.msg_iov[i].iov_base) {
 			errno = ENOMEM;
 			goto fail;
 		}
 
-		msg_copy.msg_iov[i].iov_len = msg->msg_iov[i].iov_len;
+		msg_copy.msg_iov[i].iov_len = elem.iov_len;
 	}
 
-	if (msg->msg_namelen > 0) {
-		msg_copy.msg_name = k_usermode_alloc_from_copy(msg->msg_name,
-							   msg->msg_namelen);
+	if (msg_copy.msg_namelen > 0) {
+		msg_copy.msg_name = k_usermode_alloc_from_copy(user_name,
+							   msg_copy.msg_namelen);
 		if (!msg_copy.msg_name) {
 			errno = ENOMEM;
 			goto fail;
 		}
 	}
 
-	if (msg->msg_controllen > 0) {
-		msg_copy.msg_control = k_usermode_alloc_from_copy(msg->msg_control,
-							  msg->msg_controllen);
+	if (msg_copy.msg_controllen > 0) {
+		msg_copy.msg_control = k_usermode_alloc_from_copy(user_control,
+							  msg_copy.msg_controllen);
 		if (!msg_copy.msg_control) {
 			errno = ENOMEM;
 			goto fail;
@@ -551,6 +587,9 @@ ssize_t z_impl_zsock_recvmsg(int sock, struct net_msghdr *msg, int flags)
 ssize_t z_vrfy_zsock_recvmsg(int sock, struct net_msghdr *msg, int flags)
 {
 	struct net_msghdr msg_copy;
+	struct net_iovec *user_iov;
+	void *user_name;
+	void *user_control;
 	size_t msg_iov_size;
 	size_t iovlen;
 	size_t i;
@@ -561,25 +600,28 @@ ssize_t z_vrfy_zsock_recvmsg(int sock, struct net_msghdr *msg, int flags)
 		return -1;
 	}
 
-	if (msg->msg_iov == NULL) {
+	K_OOPS(k_usermode_from_copy(&msg_copy, (void *)msg, sizeof(msg_copy)));
+
+	if (msg_copy.msg_iov == NULL) {
 		errno = ENOMEM;
 		return -1;
 	}
 
-	if (size_mul_overflow(msg->msg_iovlen, sizeof(struct net_iovec),
+	if (size_mul_overflow(msg_copy.msg_iovlen, sizeof(struct net_iovec),
 			      &msg_iov_size)) {
 		errno = EFAULT;
 		return -1;
 	}
 
-	K_OOPS(k_usermode_from_copy(&msg_copy, (void *)msg, sizeof(msg_copy)));
-
-	k_usermode_from_copy(&iovlen, &msg->msg_iovlen, sizeof(iovlen));
+	user_iov = msg_copy.msg_iov;
+	user_name = msg_copy.msg_name;
+	user_control = msg_copy.msg_control;
+	iovlen = msg_copy.msg_iovlen;
 
 	msg_copy.msg_name = NULL;
 	msg_copy.msg_control = NULL;
 
-	msg_copy.msg_iov = k_usermode_alloc_from_copy(msg->msg_iov, msg_iov_size);
+	msg_copy.msg_iov = k_usermode_alloc_from_copy(user_iov, msg_iov_size);
 	if (!msg_copy.msg_iov) {
 		errno = ENOMEM;
 		goto fail;
@@ -592,6 +634,10 @@ ssize_t z_vrfy_zsock_recvmsg(int sock, struct net_msghdr *msg, int flags)
 	memset(msg_copy.msg_iov, 0, msg_iov_size);
 
 	for (i = 0; i < iovlen; i++) {
+		struct net_iovec elem;
+
+		K_OOPS(k_usermode_from_copy(&elem, &user_iov[i], sizeof(elem)));
+
 		/* TODO: In practice we do not need to copy the actual data
 		 * in msghdr when receiving data but currently there is no
 		 * ready made function to do just that (unless we want to call
@@ -599,39 +645,38 @@ ssize_t z_vrfy_zsock_recvmsg(int sock, struct net_msghdr *msg, int flags)
 		 * the copying variant for now.
 		 */
 		msg_copy.msg_iov[i].iov_base =
-			k_usermode_alloc_from_copy(msg->msg_iov[i].iov_base,
-						   msg->msg_iov[i].iov_len);
+			k_usermode_alloc_from_copy(elem.iov_base, elem.iov_len);
 		if (!msg_copy.msg_iov[i].iov_base) {
 			errno = ENOMEM;
 			goto fail;
 		}
 
-		msg_copy.msg_iov[i].iov_len = msg->msg_iov[i].iov_len;
+		msg_copy.msg_iov[i].iov_len = elem.iov_len;
 	}
 
-	if (msg->msg_namelen > 0) {
-		if (msg->msg_name == NULL) {
+	if (msg_copy.msg_namelen > 0) {
+		if (user_name == NULL) {
 			errno = EINVAL;
 			goto fail;
 		}
 
-		msg_copy.msg_name = k_usermode_alloc_from_copy(msg->msg_name,
-							   msg->msg_namelen);
+		msg_copy.msg_name = k_usermode_alloc_from_copy(user_name,
+							   msg_copy.msg_namelen);
 		if (msg_copy.msg_name == NULL) {
 			errno = ENOMEM;
 			goto fail;
 		}
 	}
 
-	if (msg->msg_controllen > 0) {
-		if (msg->msg_control == NULL) {
+	if (msg_copy.msg_controllen > 0) {
+		if (user_control == NULL) {
 			errno = EINVAL;
 			goto fail;
 		}
 
 		msg_copy.msg_control =
-			k_usermode_alloc_from_copy(msg->msg_control,
-						   msg->msg_controllen);
+			k_usermode_alloc_from_copy(user_control,
+						   msg_copy.msg_controllen);
 		if (msg_copy.msg_control == NULL) {
 			errno = ENOMEM;
 			goto fail;
@@ -644,48 +689,62 @@ ssize_t z_vrfy_zsock_recvmsg(int sock, struct net_msghdr *msg, int flags)
 	 * received.
 	 */
 	if (ret > 0) {
-		if (msg->msg_namelen > 0 && msg->msg_name != NULL) {
-			K_OOPS(k_usermode_to_copy(msg->msg_name,
+		if (msg_copy.msg_name != NULL) {
+			K_OOPS(k_usermode_to_copy(user_name,
 						  msg_copy.msg_name,
 						  msg_copy.msg_namelen));
-			msg->msg_namelen = msg_copy.msg_namelen;
+			K_OOPS(k_usermode_to_copy(&msg->msg_namelen,
+						  &msg_copy.msg_namelen,
+						  sizeof(msg->msg_namelen)));
 		}
 
-		if (msg->msg_controllen > 0 &&
-		    msg->msg_control != NULL) {
-			K_OOPS(k_usermode_to_copy(msg->msg_control,
+		if (msg_copy.msg_control != NULL) {
+			K_OOPS(k_usermode_to_copy(user_control,
 						  msg_copy.msg_control,
 						  msg_copy.msg_controllen));
 
-			msg->msg_controllen = msg_copy.msg_controllen;
+			K_OOPS(k_usermode_to_copy(&msg->msg_controllen,
+						  &msg_copy.msg_controllen,
+						  sizeof(msg->msg_controllen)));
 		} else {
-			msg->msg_controllen = 0U;
+			size_t zero = 0U;
+
+			K_OOPS(k_usermode_to_copy(&msg->msg_controllen,
+						  &zero,
+						  sizeof(msg->msg_controllen)));
 		}
 
-		k_usermode_to_copy(&msg->msg_iovlen,
-				   &msg_copy.msg_iovlen,
-				   sizeof(msg->msg_iovlen));
+		K_OOPS(k_usermode_to_copy(&msg->msg_iovlen,
+					  &msg_copy.msg_iovlen,
+					  sizeof(msg->msg_iovlen)));
 
 		/* The new iovlen cannot be bigger than the original one */
 		NET_ASSERT(msg_copy.msg_iovlen <= iovlen);
 
 		for (i = 0; i < iovlen; i++) {
+			struct net_iovec dest_elem;
+
+			K_OOPS(k_usermode_from_copy(&dest_elem, &user_iov[i],
+						    sizeof(dest_elem)));
+
 			if (i < msg_copy.msg_iovlen) {
-				K_OOPS(k_usermode_to_copy(msg->msg_iov[i].iov_base,
+				K_OOPS(k_usermode_to_copy(dest_elem.iov_base,
 							  msg_copy.msg_iov[i].iov_base,
 							  msg_copy.msg_iov[i].iov_len));
-				K_OOPS(k_usermode_to_copy(&msg->msg_iov[i].iov_len,
+				K_OOPS(k_usermode_to_copy(&user_iov[i].iov_len,
 							  &msg_copy.msg_iov[i].iov_len,
-							  sizeof(msg->msg_iov[i].iov_len)));
+							  sizeof(user_iov[i].iov_len)));
 			} else {
 				/* Clear out those vectors that we could not populate */
-				msg->msg_iov[i].iov_len = 0;
+
+				K_OOPS(k_usermode_to_copy(&user_iov[i].iov_len, &(size_t){0},
+							  sizeof(user_iov[i].iov_len)));
 			}
 		}
 
-		k_usermode_to_copy(&msg->msg_flags,
-				   &msg_copy.msg_flags,
-				   sizeof(msg->msg_flags));
+		K_OOPS(k_usermode_to_copy(&msg->msg_flags,
+					  &msg_copy.msg_flags,
+					  sizeof(msg->msg_flags)));
 	}
 
 	k_free(msg_copy.msg_name);
@@ -877,9 +936,12 @@ int z_impl_zsock_getsockopt(int sock, int level, int optname,
 int z_vrfy_zsock_getsockopt(int sock, int level, int optname,
 			    void *optval, net_socklen_t *optlen)
 {
-	net_socklen_t kernel_optlen = *(net_socklen_t *)optlen;
+	net_socklen_t kernel_optlen;
 	void *kernel_optval;
 	int ret;
+
+	K_OOPS(k_usermode_from_copy(&kernel_optlen, optlen,
+		sizeof(net_socklen_t)));
 
 	if (K_SYSCALL_MEMORY_WRITE(optval, kernel_optlen)) {
 		errno = -EPERM;

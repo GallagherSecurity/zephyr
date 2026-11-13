@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef ZEPHYR_SUBSYS_CPU_FREQ_POLICY_H_
-#define ZEPHYR_SUBSYS_CPU_FREQ_POLICY_H_
+/**
+ * @file
+ * @ingroup subsys_cpu_freq_policy
+ * @brief Header file for CPU frequency scaling policy.
+ */
+
+#ifndef ZEPHYR_INCLUDE_CPU_FREQ_POLICY_H_
+#define ZEPHYR_INCLUDE_CPU_FREQ_POLICY_H_
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,7 +29,7 @@ extern "C" {
  * @brief CPU Frequency Scaling Policy
  * @defgroup subsys_cpu_freq_policy CPU Frequency Policy
  * @since 4.3
- * @version 0.1.0
+ * @version 0.8.0
  * @ingroup subsys_cpu_freq
  * @{
  */
@@ -78,4 +84,4 @@ const struct pstate *cpu_freq_policy_pstate_set(const struct pstate *state);
 }
 #endif
 
-#endif /* ZEPHYR_SUBSYS_CPU_FREQ_POLICY_H_ */
+#endif /* ZEPHYR_INCLUDE_CPU_FREQ_POLICY_H_ */

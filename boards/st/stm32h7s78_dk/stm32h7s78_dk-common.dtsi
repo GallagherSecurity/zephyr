@@ -8,7 +8,8 @@
 #include <st/h7rs/stm32h7s7X8.dtsi>
 #include <st/h7/stm32h7s7l8hxh-pinctrl.dtsi>
 #include "arduino_r3_connector.dtsi"
-#include "zephyr/dt-bindings/display/panel.h"
+#include "stmod_connector.dtsi"
+#include <zephyr/dt-bindings/display/panel.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 
 /*
@@ -68,7 +69,7 @@
 	};
 
 	dcmi_camera_connector: connector_dcmi_camera {
-		compatible = "st,stm32-dcmi-camera-fpu-330zh";
+		compatible = "st,dvp-cam-zif-30-connector";
 		#gpio-cells = <2>;
 		gpio-map-mask = <0xffffffff 0xffffffc0>;
 		gpio-map-pass-thru = <0 0x3f>;
@@ -96,6 +97,7 @@
 		die-temp0 = &die_temp;
 		volt-sensor0 = &vref;
 		volt-sensor1 = &vbat;
+		volt-sensor2 = &vddcore;
 		spi-flash0 = &mx66uw1g45;
 		rtc = &rtc;
 	};
@@ -134,10 +136,25 @@
 	status = "okay";
 };
 
+&pll2 {
+	/* PLL2.Q is tuned to minimize bit clock errors on I2S6 providing
+	 * MCK in stereo 16b at the following rates:
+	 * - 8kHz / 16kHz / 32kHz / 48kHz / 96kHz ~ 0.25% err
+	 * - 11.025kHz / 22.05kHz / 44.1KHz / 88.2kHz ~ 0.02% err
+	 * ie. there exists valid I2S prescaler values such that:
+	 * 271MHz x prescaler =~ sample_rate x16(bits) x2(chans) x8(MCK)
+	 */
+	div-m = <12>;
+	mul-n = <271>;
+	div-q = <2>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
 &pll3 {
 	div-m = <12>;
-	mul-n = <25>;
-	div-r = <2>;
+	mul-n = <200>;
+	div-r = <16>;
 	clocks = <&clk_hse>;
 	status = "okay";
 };
@@ -218,16 +235,18 @@
 &adc1 {
 	pinctrl-0 = <&adc1_inp6_pf12>; /* Arduino A3 */
 	pinctrl-names = "default";
-	st,adc-clock-source = "SYNC";
+	status = "okay";
+};
+
+&adc12_common {
 	st,adc-prescaler = <4>;
+	st,adc-clock-source = "SYNC";
 	status = "okay";
 };
 
 &adc2 {
 	pinctrl-0 = <&adc2_inp2_pf13>; /* Arduino A4 */
 	pinctrl-names = "default";
-	st,adc-clock-source = "SYNC";
-	st,adc-prescaler = <4>;
 	status = "okay";
 };
 
@@ -241,6 +260,8 @@
 st_cam_i2c: &i2c1 {
 	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb9>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 6 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 9 GPIO_ACTIVE_HIGH>;
 	/*
 	 * Make sure FDCAN and i2c1 are not enabled at the same time
 	 * because they share the pb9 pin
@@ -254,6 +275,23 @@ st_cam_i2c: &i2c1 {
 		irq-gpios = <&gpioe 3 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
 		status = "okay";
 	};
+
+	audio_codec: wm8904@1a {
+		compatible = "wolfson,wm8904";
+		reg = <0x1a>;
+		wolfson,mic-bias-voltage = "avdd-9-10";
+		input-pga-select = <1>;
+		status = "okay";
+	};
+};
+
+&i2s6 {
+	clocks = <&rcc STM32_CLOCK(APB4, 5)>,
+		 <&rcc STM32_SRC_PLL2_Q SPI6_SEL(1)>;
+	pinctrl-0 = <&i2s6_mck_pa3 &i2s6_ws_pa4 &i2s6_ck_pa5 &i2s6_sdo_pb5 &i2s6_sdi_pg12>;
+	pinctrl-names = "default";
+	mck-enabled;
+	status = "okay";
 };
 
 &fdcan1 {
@@ -289,6 +327,10 @@ st_cam_i2c: &i2c1 {
 		compatible = "ethernet-phy";
 		reg = <0x00>;
 	};
+};
+
+&xspim {
+	status = "okay";
 };
 
 &xspi1 {
@@ -341,6 +383,7 @@ st_cam_i2c: &i2c1 {
 		four-byte-opcodes;
 		status = "okay";
 
+		/* XSPI external flash mapping */
 		#address-cells = <1>;
 		#size-cells = <1>;
 		ranges = <0x0 0x70000000 DT_SIZE_M(128)>;
@@ -350,12 +393,9 @@ st_cam_i2c: &i2c1 {
 			reg = <0x0 DT_SIZE_M(128)>;
 			write-block-size = <1>;
 			erase-block-size = <DT_SIZE_K(4)>;
-
-			partitions {
-				compatible = "fixed-partitions";
-				#address-cells = <1>;
-				#size-cells = <1>;
-			};
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges;
 		};
 	};
 };
@@ -369,6 +409,10 @@ st_cam_i2c: &i2c1 {
 };
 
 &vbat {
+	status = "okay";
+};
+
+&vddcore {
 	status = "okay";
 };
 
@@ -386,13 +430,31 @@ st_cam_i2c: &i2c1 {
 	};
 };
 
+/* USB1 port of board = OTG_HS */
+usb1: &usbotg_hs {
+	pinctrl-0 = <&usb_otg_hs_dm_pm5 &usb_otg_hs_dp_pm6>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+&usbphyc {
+	/*
+	 * There is no need to change `clocks` because
+	 * we use the default configuration after reset:
+	 *  USBPHYC kernel clock = HSE @ 24 MHz
+	 */
+	status = "okay";
+};
+
+/* USB2 port of board = OTG_FS */
 usb2: &usbotg_fs {
 	pinctrl-0 = <&usb_otg_fs_dm_pm12 &usb_otg_fs_dp_pm11>;
 	pinctrl-names = "default";
 	status = "okay";
 };
 
-zephyr_udc0: &usb2 {};
+/* USB port selection: use USB1 by default */
+zephyr_udc0: &usb1 {};
 
 &ltdc {
 	pinctrl-0 = <&ltdc_r0_pf9 &ltdc_r1_pf10 &ltdc_r2_pf0 &ltdc_r3_pb4
@@ -441,5 +503,25 @@ st_cam_dvp: &dcmipp {
 };
 
 &crc {
+	status = "okay";
+};
+
+zephyr_jpegenc: &jpeg {
+	status = "okay";
+};
+
+&gpu2d {
+	status = "okay";
+};
+
+&cryp {
+	status = "okay";
+};
+
+&hash {
+	status = "okay";
+};
+
+&dma2d {
 	status = "okay";
 };

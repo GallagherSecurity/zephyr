@@ -11,8 +11,8 @@
 #include <hal/ledc_ll.h>
 #include <hal/ledc_types.h>
 #include <esp_clk_tree.h>
+#include <esp_private/esp_clk_tree_common.h>
 #include <soc/rtc.h>
-#include <clk_ctrl_os.h>
 
 #include <soc.h>
 #include <errno.h>
@@ -88,23 +88,31 @@ static struct pwm_ledc_esp32_channel_config *get_channel_config(const struct dev
 static void pwm_led_esp32_start(struct pwm_ledc_esp32_data *data,
 				struct pwm_ledc_esp32_channel_config *channel)
 {
+	unsigned int key = irq_lock();
+
 	ledc_hal_set_sig_out_en(&data->hal, channel->speed_mode, channel->channel_num, true);
 	ledc_hal_set_duty_start(&data->hal, channel->speed_mode, channel->channel_num);
 
 	if (channel->speed_mode == LEDC_LOW_SPEED_MODE) {
 		ledc_hal_ls_channel_update(&data->hal, channel->speed_mode, channel->channel_num);
 	}
+
+	irq_unlock(key);
 }
 
 static void pwm_led_esp32_stop(struct pwm_ledc_esp32_data *data,
 			       struct pwm_ledc_esp32_channel_config *channel, bool idle_level)
 {
+	unsigned int key = irq_lock();
+
 	ledc_hal_set_idle_level(&data->hal, channel->speed_mode, channel->channel_num, idle_level);
 	ledc_hal_set_sig_out_en(&data->hal, channel->speed_mode, channel->channel_num, false);
 
 	if (channel->speed_mode == LEDC_LOW_SPEED_MODE) {
 		ledc_hal_ls_channel_update(&data->hal, channel->speed_mode, channel->channel_num);
 	}
+
+	irq_unlock(key);
 }
 
 static void pwm_led_esp32_duty_set(const struct device *dev,
@@ -170,16 +178,16 @@ static int pwm_led_esp32_timer_config(struct pwm_ledc_esp32_channel_config *chan
 	 */
 	for (int i = 0; i < clock_src_num; i++) {
 		if (clock_src[i] == LEDC_SLOW_CLK_RC_FAST) {
-			uint32_t rc_fast_freq = periph_rtc_dig_clk8m_get_freq();
+			uint32_t rc_fast_freq = 0;
 
-			if (!rtc_dig_8m_enabled() || rc_fast_freq == 0) {
-				/* RC_FAST requires enabling and calibrating */
-				if (!periph_rtc_dig_clk8m_enable()) {
-					/* skip RC_FAST as clock source */
-					continue;
-				}
-				rc_fast_freq = periph_rtc_dig_clk8m_get_freq();
+			/* RC_FAST requires enabling and calibrating */
+			if (esp_clk_tree_enable_src(SOC_MOD_CLK_RC_FAST, true) != ESP_OK) {
+				/* skip RC_FAST as clock source */
+				continue;
 			}
+			esp_clk_tree_src_get_freq_hz(SOC_MOD_CLK_RC_FAST,
+						     ESP_CLK_TREE_SRC_FREQ_PRECISION_APPROX,
+						     &rc_fast_freq);
 
 			channel->clock_src = clock_src[i];
 			channel->clock_src_hz = rc_fast_freq;
@@ -424,12 +432,16 @@ static void pwm_led_esp32_sleep_retention_init(void)
 	sleep_retention_module_t module = ledc_reg_retention_info[0].module_id;
 	sleep_retention_module_init_param_t init_param = {
 		.cbs = {.create = {.handle = pwm_led_esp32_create_sleep_retention_cb, .arg = NULL}},
+		.attribute = SLEEP_RETENTION_MODULE_ATTR_ATTACH,
 		.depends = RETENTION_MODULE_BITMAP_INIT(CLOCK_SYSTEM)};
 
 	esp_err_t err = sleep_retention_module_init(module, &init_param);
 
 	if (err == ESP_OK) {
 		err = sleep_retention_module_allocate(module);
+	}
+	if (err == ESP_OK) {
+		err = sleep_retention_module_attach(module);
 	}
 	if (err != ESP_OK) {
 		LOG_WRN("LEDC sleep retention init failed (%d)", err);

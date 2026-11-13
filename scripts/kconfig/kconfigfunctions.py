@@ -624,7 +624,9 @@ def _dt_node_has_prop_generic(node_search_function, search_arg, prop):
     """
     This function takes the 'node_search_function' and uses it to search for
     a node with 'search_arg' and if node exists, then checks if 'prop'
-    exists inside the node and returns "y". Otherwise, it returns "n".
+    exists inside the node. If the property (or the node) is not found,
+    it returns "n". If the property is of type boolean hence always found,
+    it returns "bool". Otherwise, the property is found hence returning "y".
     """
     try:
         node = node_search_function(search_arg)
@@ -635,7 +637,10 @@ def _dt_node_has_prop_generic(node_search_function, search_arg, prop):
         return "n"
 
     if prop in node.props:
-        return "y"
+        if node.props[prop].type == "boolean":
+            return "bool"
+        else:
+            return "y"
 
     return "n"
 
@@ -649,7 +654,17 @@ def dt_node_has_prop(kconf, _, path, prop):
     if doc_mode or edt is None:
         return "n"
 
-    return _dt_node_has_prop_generic(edt.get_node, path, prop)
+    ret = _dt_node_has_prop_generic(edt.get_node, path, prop)
+
+    if ret == "bool":
+        _warn(kconf,
+            "dt_node_has_prop() should not be used with boolean DT property "
+            "'{}' for node '{}'. Use dt_node_bool_prop() instead."
+            .format(prop, path),
+        )
+        return "y"
+
+    return ret
 
 def dt_nodelabel_has_prop(kconf, _, label, prop):
     """
@@ -661,7 +676,17 @@ def dt_nodelabel_has_prop(kconf, _, label, prop):
     if doc_mode or edt is None:
         return "n"
 
-    return _dt_node_has_prop_generic(edt.label2node.get, label, prop)
+    ret = _dt_node_has_prop_generic(edt.label2node.get, label, prop)
+
+    if ret == "bool":
+        _warn(kconf,
+            "dt_nodelabel_has_prop() should not be used with boolean DT "
+            "property '{}' for nodelabel '{}'. Use dt_nodelabel_bool_prop() "
+            "instead.".format(prop, label),
+        )
+        return "y"
+
+    return ret
 
 def dt_node_int_prop(kconf, name, path, prop, unit=None):
     """
@@ -803,6 +828,22 @@ def dt_node_str_prop_equals(kconf, _, path, prop, val):
     return "n"
 
 
+def dt_class_enabled(kconf, _, cls):
+    """
+    This function takes a device class name 'cls', as declared by the
+    "class" key in devicetree bindings, and returns "y" if any status "okay"
+    node in the EDT belongs to that class. It returns "n" otherwise.
+    """
+    if doc_mode or edt is None:
+        return "n"
+
+    for node in edt.nodes:
+        if node.status == "okay" and cls in node.classes:
+            return "y"
+
+    return "n"
+
+
 def dt_has_compat(kconf, _, compat):
     """
     This function takes a 'compat' and returns "y" if any compatible node
@@ -866,9 +907,18 @@ def dt_compat_all_has_prop(kconf, _, compat, prop, value=None):
     if compat not in edt.compat2okay or len(edt.compat2okay[compat]) == 0:
         return "n"
 
+    warned = "n"
     for node in edt.compat2okay[compat]:
         if prop not in node.props:
             return "n"
+        if node.props[prop].type == "boolean" and value is None and warned == "n":
+            _warn(kconf,
+                "dt_compat_all_has_prop() without a target value "
+                "should not be used with boolean DT property '{}'. "
+                "The boolean property always exists for compat {}."
+                .format(prop, compat)
+            )
+            warned = "y"
         if value is None:
             continue
         if isinstance(node.props[prop].val, list):
@@ -893,9 +943,18 @@ def dt_compat_any_has_prop(kconf, _, compat, prop, value=None):
     if compat not in edt.compat2okay:
         return "n"
 
+    warned = "n"
     for node in edt.compat2okay[compat]:
         if prop not in node.props:
             continue
+        if node.props[prop].type == "boolean" and value is None and warned == "n":
+            _warn(kconf,
+                "dt_compat_any_has_prop() without a target value "
+                "should not be used with boolean DT property '{}'. "
+                "The boolean property always exists for compat {}."
+                .format(prop, compat)
+            )
+            warned = "y"
         if value is None:
             return "y"
         if isinstance(node.props[prop].val, list):
@@ -915,10 +974,19 @@ def dt_compat_any_not_has_prop(kconf, _, compat, prop):
     if doc_mode or edt is None:
         return "n"
 
+    warned = "n"
     if compat in edt.compat2okay:
         for node in edt.compat2okay[compat]:
             if prop not in node.props:
                 return "y"
+            if node.props[prop].type == "boolean" and warned == "n":
+                _warn(kconf,
+                    "dt_compat_any_not_has_prop() without a target "
+                    "value should not be used with boolean DT property "
+                    "'{}'. The boolean property always exists for compat {}."
+                    .format(prop, compat)
+                )
+                warned = "y"
 
     return "n"
 
@@ -1118,9 +1186,35 @@ def dt_highest_controller_irq_number(kconfig, _, path, irq_cell_name):
 
     return str(max(irqns))
 
+def dt_partition_mtd(kconf, _, path):
+    """
+    This function takes a 'path' and returns the mtd node for that path.
+    """
+    if doc_mode or edt is None:
+        return ""
+
+    try:
+        node = edt.get_node(path)
+    except edtlib.EDTError:
+        return ""
+
+    if node is None:
+        return ""
+
+    # Look for the parent node compatible with "soc-nv-flash"
+    parent = node.parent
+
+    while parent and "soc-nv-flash" not in parent.compats:
+        parent = parent.parent
+
+    if parent and "soc-nv-flash" in parent.compats:
+        return parent.path
+
+    return ""
+
 def normalize_upper(kconf, _, string):
     """
-    Normalize the string, so that the string only contains alpha-numeric
+    Normalize the string, so that the string only contains alphanumeric
     characters or underscores. All non-alpha-numeric characters are replaced
     with an underscore, '_'.
     When string has been normalized it will be converted into upper case.
@@ -1133,7 +1227,24 @@ def shields_list_contains(kconf, _, shield):
     Return "n" if cmake environment variable 'SHIELD_AS_LIST' doesn't exist.
     Return "y" if 'shield' is present list obtained after 'SHIELD_AS_LIST'
     has been split using ";" as a separator and "n" otherwise.
+
+    Shield names cannot contain whitespace. A leading or trailing space
+    (from ``$(shields_list_contains, foo)``) is stripped so the lookup
+    uses the intended name, and a warning is printed.
     """
+    stripped = shield.strip()
+    if stripped != shield:
+        _warn(kconf,
+              'searching for shield "{}", did you mean "{}" '
+              '(without a space)'.format(shield, stripped))
+        shield = stripped
+
+    if any(c.isspace() for c in shield):
+        _warn(kconf,
+              'shield name "{}" contains whitespace; shield names '
+              'cannot contain spaces'.format(shield))
+        return "n"
+
     try:
         list = os.environ['SHIELD_AS_LIST']
     except KeyError:
@@ -1251,6 +1362,7 @@ functions = {
         "dt_compat_enabled": (dt_compat_enabled, 1, 1),
         "dt_compat_enabled_num": (dt_compat_enabled_num, 1, 1),
         "dt_compat_on_bus": (dt_compat_on_bus, 2, 2),
+        "dt_class_enabled": (dt_class_enabled, 1, 1),
         "dt_compat_all_has_prop": (dt_compat_all_has_prop, 2, 3),
         "dt_compat_any_has_prop": (dt_compat_any_has_prop, 2, 3),
         "dt_compat_any_not_has_prop": (dt_compat_any_not_has_prop, 2, 2),
@@ -1300,6 +1412,7 @@ functions = {
         "dt_chosen_partition_addr_int": (dt_chosen_partition_addr, 1, 3),
         "dt_chosen_partition_addr_hex": (dt_chosen_partition_addr, 1, 3),
         "dt_highest_controller_irq_number": (dt_highest_controller_irq_number, 2, 2),
+        "dt_partition_mtd": (dt_partition_mtd, 1, 1),
         "normalize_upper": (normalize_upper, 1, 1),
         "shields_list_contains": (shields_list_contains, 1, 1),
         "substring": (substring, 2, 3),

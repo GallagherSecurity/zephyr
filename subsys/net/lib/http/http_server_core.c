@@ -43,13 +43,20 @@ BUILD_ASSERT(CONFIG_HTTP_SERVER_VERSION > 0,
 
 #define INACTIVITY_TIMEOUT K_SECONDS(CONFIG_HTTP_SERVER_CLIENT_INACTIVITY_TIMEOUT)
 
+#if (defined(CONFIG_HTTP_SERVER_VERSION_1) || defined(CONFIG_HTTP_SERVER_VERSION_2)) &&            \
+	defined(CONFIG_HTTP_SERVER_VERSION_3)
+#define HTTP_SERVER_SOCKETS_PER_SERVICE 2
+#else
+#define HTTP_SERVER_SOCKETS_PER_SERVICE 1
+#endif
 #define HTTP_SERVER_MAX_SERVICES CONFIG_HTTP_SERVER_NUM_SERVICES
 #define HTTP_SERVER_MAX_CLIENTS  CONFIG_HTTP_SERVER_MAX_CLIENTS
-#define HTTP_SERVER_SOCK_COUNT (1 + HTTP_SERVER_MAX_SERVICES + \
-				HTTP_SERVER_MAX_CLIENTS  + HTTP3_SERVER_MAX_STREAMS)
+#define HTTP_SERVER_SOCK_COUNT                                                                     \
+	(1 + HTTP_SERVER_SOCKETS_PER_SERVICE * HTTP_SERVER_MAX_SERVICES +                          \
+	 HTTP_SERVER_MAX_CLIENTS + HTTP3_SERVER_MAX_STREAMS)
 struct http_server_ctx {
-	int listen_fds; /* max value of 1 + MAX_SERVICES */
-	int client_fds; /* max value of 1 + MAX_CLIENTS */
+	int listen_fds; /* max value of 1 + SOCKETS_PER_SERVICE * MAX_SERVICES */
+	int client_fds; /* max value of listen_fds + MAX_CLIENTS */
 
 	/* First pollfd is eventfd that can be used to stop the server,
 	 * then we have the server listen sockets,
@@ -84,6 +91,7 @@ static int get_h3_stream_slot(const struct http_client_ctx *client, int stream_f
 static void reset_h3_stream_slot(struct http_client_ctx *client, int slot);
 static void restore_h3_stream_state(struct http_client_ctx *client, int slot);
 static void store_h3_stream_state(struct http_client_ctx *client, int slot);
+static void close_all_sockets(struct http_server_ctx *ctx);
 
 HTTP_SERVER_CONTENT_TYPE(html, "text/html")
 HTTP_SERVER_CONTENT_TYPE(css, "text/css")
@@ -236,6 +244,7 @@ static int setup_h3_socket(const struct http_service_desc *svc, int af,
 	}
 
 #if defined(CONFIG_HTTP_SERVER_TLS_USE_ALPN)
+#if defined(CONFIG_HTTP_SERVER_VERSION_3)
 		if (zsock_setsockopt(quic_sock, ZSOCK_SOL_TLS, ZSOCK_TLS_ALPN_LIST,
 				     h3_alpn_list, sizeof(h3_alpn_list)) < 0) {
 			ret = -errno;
@@ -243,8 +252,44 @@ static int setup_h3_socket(const struct http_service_desc *svc, int af,
 			zsock_close(quic_sock);
 			goto out;
 	}
+#endif /* defined(CONFIG_HTTP_SERVER_VERSION_3) */
 #endif /* defined(CONFIG_HTTP_SERVER_TLS_USE_ALPN) */
 #endif /* defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS) */
+
+	if (svc->config != NULL) {
+		int enable_tickets =
+			svc->config->h3.enable_session_tickets ||
+			svc->config->h3.max_early_data_size > 0U;
+
+		if (enable_tickets != 0) {
+			if (zsock_setsockopt(quic_sock, ZSOCK_SOL_QUIC,
+					     ZSOCK_QUIC_SO_SESSION_TICKET_ENABLE,
+					     &enable_tickets,
+					     sizeof(enable_tickets)) < 0) {
+				ret = -errno;
+				LOG_ERR("%s: setsockopt(%s): %d", "h3",
+					"QUIC_SO_SESSION_TICKET_ENABLE", ret);
+				zsock_close(quic_sock);
+				goto out;
+			}
+		}
+
+		if (svc->config->h3.max_early_data_size > 0U) {
+			uint32_t max_early_data_size =
+				svc->config->h3.max_early_data_size;
+
+			if (zsock_setsockopt(quic_sock, ZSOCK_SOL_QUIC,
+					     ZSOCK_QUIC_SO_MAX_EARLY_DATA_SIZE,
+					     &max_early_data_size,
+					     sizeof(max_early_data_size)) < 0) {
+				ret = -errno;
+				LOG_ERR("%s: setsockopt(%s): %d", "h3",
+					"QUIC_SO_MAX_EARLY_DATA_SIZE", ret);
+				zsock_close(quic_sock);
+				goto out;
+			}
+		}
+	}
 
 	ret = quic_sock;
 out:
@@ -253,10 +298,10 @@ out:
 
 int http_server_init(struct http_server_ctx *ctx)
 {
-	int failed = 0, count = 0;
+	int count = 0;
 	int svc_count;
 	net_socklen_t len;
-	int fd, af, i;
+	int fd, af, i, required_fds;
 	bool h3 = false, h2 = false, h1 = false;
 	struct net_sockaddr_storage addr_storage;
 	const union {
@@ -332,7 +377,6 @@ int http_server_init(struct http_server_ctx *ctx)
 			addr.addr4->sin_port = net_htons(*svc->port);
 		} else {
 			LOG_ERR("Neither IPv4 nor IPv6 is enabled");
-			failed++;
 			break;
 		}
 
@@ -380,9 +424,7 @@ int http_server_init(struct http_server_ctx *ctx)
 
 		if (h1 || h2) {
 			fd = setup_h1_h2_socket(svc, af, addr.addr, len);
-			if (fd < 0) {
-				failed++;
-			} else {
+			if (fd >= 0) {
 				if (IS_ENABLED(CONFIG_NET_HTTP_SERVER_LOG_LEVEL_DBG)) {
 					char ver_str[sizeof("/1.1/2")] = {0};
 
@@ -409,9 +451,7 @@ int http_server_init(struct http_server_ctx *ctx)
 
 		if (h3 && IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3)) {
 			fd = setup_h3_socket(svc, af, addr.addr, len);
-			if (fd < 0) {
-				failed++;
-			} else {
+			if (fd >= 0) {
 				LOG_DBG("Initialized HTTP%s Service %s:%u", "/3",
 					svc->host ? svc->host : "<any>", *svc->port);
 
@@ -423,8 +463,8 @@ int http_server_init(struct http_server_ctx *ctx)
 		}
 	}
 
-	if (failed >= svc_count) {
-		LOG_ERR("All services failed (%d)", failed);
+	if (count == 1) {
+		LOG_ERR("All services failed");
 		/* Close eventfd socket */
 		zsock_close(ctx->fds[0].fd);
 		return -ESRCH;
@@ -433,10 +473,13 @@ int http_server_init(struct http_server_ctx *ctx)
 	ctx->listen_fds = count;
 	ctx->client_fds = ctx->listen_fds + HTTP_SERVER_MAX_CLIENTS;
 
-	if (!IS_ENABLED(CONFIG_HTTP_SERVER_VERSION_3) &&
-	    ctx->client_fds > ARRAY_SIZE(ctx->fds)) {
+	required_fds = ctx->client_fds + HTTP3_SERVER_MAX_STREAMS;
+	if (required_fds > ARRAY_SIZE(ctx->fds)) {
 		LOG_ERR("HTTP server fd table size mismatch: %d slots required, %zu allocated",
-			ctx->client_fds, ARRAY_SIZE(ctx->fds));
+			required_fds, ARRAY_SIZE(ctx->fds));
+		/* Close sockets */
+		close_all_sockets(ctx);
+		return -ENOMEM;
 	}
 
 	return 0;
@@ -839,6 +882,19 @@ static int handle_http_request(struct http_client_ctx *client)
 	}
 
 	if (client->data_len > 0) {
+		if (client->cursor < client->buffer ||
+		    client->cursor > client->buffer + sizeof(client->buffer) ||
+		    client->data_len >
+			    (size_t)(client->buffer + sizeof(client->buffer) - client->cursor)) {
+			/* The RX length no longer describes client->buffer, so
+			 * drop the connection before it is used.
+			 */
+			LOG_ERR("Invalid RX state: cursor %p, data_len %zu, buffer %p/%zu",
+				(void *)client->cursor, client->data_len,
+				(void *)client->buffer, sizeof(client->buffer));
+			return -EINVAL;
+		}
+
 		/* Move any remaining data in the buffer. */
 		memmove(client->buffer, client->cursor, client->data_len);
 	}
@@ -1243,7 +1299,7 @@ static void handle_http_data(struct http_server_ctx *ctx, int i)
 		}
 
 		close_client_connection(client);
-	} else if (client->data_len == sizeof(client->buffer)) {
+	} else if (client->data_len >= sizeof(client->buffer)) {
 		LOG_ERR("RX buffer too small to handle request");
 		close_client_connection(client);
 	}
@@ -1303,6 +1359,16 @@ static void handle_h3_uni_stream(struct http_server_ctx *ctx, int i,
 		}
 
 		if (ret < 0) {
+			if (h3_ctx != NULL &&
+			    (stream_fd == h3_ctx->peer_control_stream ||
+			     stream_fd == h3_ctx->peer_qpack_encoder_stream ||
+			     stream_fd == h3_ctx->peer_qpack_decoder_stream)) {
+				/* The stream was taken into use before it
+				 * failed, handle it like a failure later on.
+				 */
+				goto critical_stream_failed;
+			}
+
 			zsock_close(stream_fd);
 			invalidate_poll_fd(&ctx->fds[i]);
 			return;
@@ -1312,10 +1378,23 @@ static void handle_h3_uni_stream(struct http_server_ctx *ctx, int i,
 	/* Identified: pass to the appropriate stream data handler */
 	ret = h3_handle_uni_stream_data(client, stream_fd);
 	if (ret < 0) {
-		/* Stream ended or errored */
-		zsock_close(stream_fd);
-		invalidate_poll_fd(&ctx->fds[i]);
+		goto critical_stream_failed;
 	}
+
+	return;
+
+critical_stream_failed:
+	/*
+	 * The control stream and the QPACK streams are critical: when one of
+	 * them is closed or carries invalid data, the connection cannot go on
+	 * (RFC 9114 ch. 6.2.1 and ch. 7.2.4, RFC 9204 ch. 4.2). Close the
+	 * whole connection. Closing only the stream here would leave its fd
+	 * number recorded in the connection context, and the connection
+	 * teardown would later close whatever socket has that number by then.
+	 */
+	LOG_DBG("[%p] H3: critical stream fd %d failed (%d), closing connection",
+		client, stream_fd, ret);
+	close_h3_or_plain_client(client, ctx->fds, ARRAY_SIZE(ctx->fds));
 }
 
 /*
@@ -1403,7 +1482,7 @@ static void handle_h3_bidi_stream(struct http_server_ctx *ctx, int i,
 		LOG_DBG("[%p] H3: stream fd %d closed after complete response",
 			client, closed_fd);
 
-	} else if (client->data_len == sizeof(client->buffer)) {
+	} else if (client->data_len >= sizeof(client->buffer)) {
 		LOG_ERR("RX buffer too small to handle request");
 		close_h3_or_plain_client(client, ctx->fds, ARRAY_SIZE(ctx->fds));
 	} else {
@@ -1426,7 +1505,15 @@ static int http_server_run(struct http_server_ctx *ctx)
 		}
 
 		if (ret == 0) {
-			break; /* timeout -1 should never produce 0, but be safe */
+			/* With an infinite timeout zsock_poll() can still return
+			 * 0 when a wake source fired but no fd reported an event.
+			 * Re-poll instead of breaking: the break path skips
+			 * close_all_sockets(), leaking the sockets and leaving
+			 * the client inactivity timers armed, which the caller's
+			 * re-init then memsets - corrupting the kernel timeout
+			 * list.
+			 */
+			continue;
 		}
 
 		/* Stop event on fds[0] */
@@ -1544,7 +1631,7 @@ static int compare_strings(const char *path, const char *resource)
 	return 1; /* Strings are not equal */
 }
 
-static int path_len_without_query(const char *path)
+int http_server_path_len_without_query(const char *path)
 {
 	int len = 0;
 
@@ -1673,14 +1760,14 @@ struct http_resource_detail *get_resource_detail(const struct http_service_desc 
 
 			ret = fnmatch(resource->resource, path, (FNM_PATHNAME | FNM_LEADING_DIR));
 			if (ret == 0) {
-				*path_len = path_len_without_query(path);
+				*path_len = http_server_path_len_without_query(path);
 				return resource->detail;
 			}
 		}
 	}
 
 	if (service->res_fallback != NULL) {
-		*path_len = path_len_without_query(path);
+		*path_len = http_server_path_len_without_query(path);
 		return service->res_fallback;
 	}
 
@@ -1754,7 +1841,7 @@ return_filename:
 void http_server_get_content_type_from_extension(char *url, char *content_type,
 						 size_t content_type_size)
 {
-	size_t url_len = strlen(url);
+	size_t url_len = http_server_path_len_without_query(url);
 
 	HTTP_SERVER_CONTENT_TYPE_FOREACH(ct) {
 		char *ext;
@@ -1783,6 +1870,72 @@ int http_server_sendall(struct http_client_ctx *client, const void *buf, size_t 
 
 		buf = (const char *)buf + out_len;
 		len -= out_len;
+
+		http_client_timer_restart(client);
+	}
+
+	return 0;
+}
+
+/* Send the buffers in iov as one stream of bytes, passing them to the socket in
+ * a single sendmsg() call rather than one send() call per buffer. Whether they
+ * then leave in fewer segments or records depends on the socket, some
+ * implementations of sendmsg() still write each buffer separately. Sockets
+ * without sendmsg() support get one send() call per buffer.
+ *
+ * The iovec array is modified as data is sent, so the caller must not reuse it
+ * afterwards.
+ */
+int http_server_sendall_iov(struct http_client_ctx *client, struct net_iovec *iov, size_t iovlen)
+{
+	struct net_msghdr msg = {
+		.msg_iov = iov,
+		.msg_iovlen = 0,
+	};
+
+	/* Drop empty buffers, which some socket implementations reject */
+	for (size_t i = 0; i < iovlen; i++) {
+		if (iov[i].iov_len > 0) {
+			iov[msg.msg_iovlen++] = iov[i];
+		}
+	}
+
+	while (msg.msg_iovlen > 0) {
+		ssize_t out_len = zsock_sendmsg(client->fd, &msg, 0);
+
+		if (out_len < 0) {
+			if (errno != EOPNOTSUPP && errno != ENOTSUP) {
+				return -errno;
+			}
+
+			/* The socket does not support sendmsg(), send the remaining
+			 * buffers one by one instead.
+			 */
+			for (size_t i = 0; i < msg.msg_iovlen; i++) {
+				int ret = http_server_sendall(client, msg.msg_iov[i].iov_base,
+							      msg.msg_iov[i].iov_len);
+
+				if (ret < 0) {
+					return ret;
+				}
+			}
+
+			return 0;
+		}
+
+		/* Skip what was sent, which may end in the middle of a buffer. */
+		while (out_len > 0 && msg.msg_iovlen > 0) {
+			size_t len = MIN((size_t)out_len, msg.msg_iov->iov_len);
+
+			msg.msg_iov->iov_base = (uint8_t *)msg.msg_iov->iov_base + len;
+			msg.msg_iov->iov_len -= len;
+			out_len -= len;
+
+			if (msg.msg_iov->iov_len == 0) {
+				msg.msg_iov++;
+				msg.msg_iovlen--;
+			}
+		}
 
 		http_client_timer_restart(client);
 	}

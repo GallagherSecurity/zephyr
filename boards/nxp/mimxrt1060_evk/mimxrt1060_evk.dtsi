@@ -6,7 +6,7 @@
 
 /dts-v1/;
 
-#include <nxp/imxrt/nxp_rt1060.dtsi>
+#include <nxp/imxrt/imxrt10xx/nxp_rt1060.dtsi>
 #include "mimxrt1060_evk-pinctrl.dtsi"
 #include <zephyr/dt-bindings/gpio/arduino-header-r3.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
@@ -126,6 +126,7 @@
 };
 
 arduino_serial: &lpuart3 {
+	current-speed = <115200>;
 	pinctrl-0 = <&pinmux_lpuart3>;
 	pinctrl-1 = <&pinmux_lpuart3_flow_control>;
 	pinctrl-2 = <&pinmux_lpuart3_sleep>;
@@ -307,6 +308,11 @@ arduino_spi: &lpspi1 {
 &sai1 {
 	status = "okay";
 	pinctrl-0 = <&pinmux_sai1>;
+	pinctrl-names = "default";
+};
+
+&sai2 {
+	pinctrl-0 = <&pinmux_sai2>;
 	pinctrl-names = "default";
 };
 

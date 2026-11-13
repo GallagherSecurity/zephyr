@@ -262,6 +262,8 @@ TESTDATA_1_2 = [
      False, False, TwisterStatus.PASS, None, False, False),
     (1, True, 'ERROR: region `FLASH\' overflowed by 123 MB',
      True,  True, TwisterStatus.SKIP, 'FLASH overflow', True, False),
+    (1, True, 'ld: region `sram0_0_seg\' overflowed by 90576 bytes',
+     True,  True, TwisterStatus.SKIP, 'sram0_0_seg overflow', True, False),
     (1, True, 'Error: Image size (99 B) + trailer (1 B) exceeds requested size',
      True, True, TwisterStatus.SKIP, 'imgtool overflow', True, False),
     (1, True, 'mock.ANY',
@@ -274,7 +276,8 @@ TESTDATA_1_2 = [
     ' expected_change_skip, expected_add_missing',
     TESTDATA_1_2,
     ids=['no error, no instance run', 'no error, instance run',
-         'error - region overflow', 'error - image size exceed', 'error']
+         'error - region overflow', 'error - sram segment overflow',
+         'error - image size exceed', 'error']
 )
 @pytest.mark.parametrize('sys_platform', TESTDATA_1_1)
 def test_cmake_run_build(
@@ -374,6 +377,7 @@ TESTDATA_2_2 = [
      [os.path.join('dummy', 'cmake'),
       '-B' + os.path.join('build', 'dir'), '-DTC_RUNID=1', '-DTC_NAME=testcase',
       '-DSB_CONFIG_COMPILER_WARNINGS_AS_ERRORS=y',
+      '-DSB_CONFIG_DEPRECATED_KCONFIGS_AS_ERRORS=y',
       '-DEXTRA_GEN_EDT_ARGS=--edtlib-Werror', '-Gdummy_generator',
       f'-DPython3_EXECUTABLE={pathlib.Path(sys.executable).as_posix()}',
       '-DZEPHYR_TOOLCHAIN_VARIANT=zephyr',
@@ -390,6 +394,7 @@ TESTDATA_2_2 = [
      [os.path.join('dummy', 'cmake'),
       '-B' + os.path.join('build', 'dir'), '-DTC_RUNID=1', '-DTC_NAME=testcase',
       '-DSB_CONFIG_COMPILER_WARNINGS_AS_ERRORS=n',
+      '-DSB_CONFIG_DEPRECATED_KCONFIGS_AS_ERRORS=n',
       '-DEXTRA_GEN_EDT_ARGS=', '-Gdummy_generator',
       f'-DPython3_EXECUTABLE={pathlib.Path(sys.executable).as_posix()}',
       '-DZEPHYR_TOOLCHAIN_VARIANT=zephyr',
@@ -452,6 +457,7 @@ def test_cmake_run_cmake(
     instance_mock.testsuite = mock.Mock()
     instance_mock.testsuite.name = 'testcase'
     instance_mock.testsuite.required_snippets = ['dummy snippet 1', 'ds2']
+    instance_mock.sidecar = None
     instance_mock.testcases = [mock.Mock(), mock.Mock()]
     instance_mock.testcases[0].status = TwisterStatus.NONE
     instance_mock.testcases[1].status = TwisterStatus.NONE
@@ -796,21 +802,26 @@ def test_projectbuilder_log_info(
 
 
 TESTDATA_5 = [
-    (True, False, False, "Valgrind error", 0, 0, 'build_dir/valgrind.log'),
-    (True, False, False, "Error", 0, 0, 'build_dir/build.log'),
-    (False, True, False, None, 1024, 0, 'build_dir/handler.log'),
-    (False, True, False, None, 0, 0, 'build_dir/build.log'),
-    (False, False, True, None, 0, 1024, 'build_dir/device.log'),
-    (False, False, True, None, 0, 0, 'build_dir/build.log'),
-    (False, False, False, None, 0, 0, 'build_dir/build.log'),
+    (True, False, False, "Valgrind error", 0, 0, 0, ['build_dir/valgrind.log']),
+    (True, False, False, "Error", 0, 0, 0, ['build_dir/build.log']),
+    (False, True, False, None, 1024, 0, 0, ['build_dir/handler.log']),
+    (False, True, False, None, 1024, 512, 0,
+     ['build_dir/handler.log', 'build_dir/handler_stderr.log']),
+    (False, True, False, None, 0, 512, 0, ['build_dir/handler_stderr.log']),
+    (False, True, False, None, 0, 0, 0, ['build_dir/build.log']),
+    (False, False, True, None, 0, 0, 1024, ['build_dir/device.log']),
+    (False, False, True, None, 0, 0, 0, ['build_dir/build.log']),
+    (False, False, False, None, 0, 0, 0, ['build_dir/build.log']),
 ]
 
 @pytest.mark.parametrize(
     'valgrind_log_exists, handler_log_exists, device_log_exists,' \
-    ' instance_reason, handler_log_getsize, device_log_getsize, expected_log',
+    ' instance_reason, handler_log_getsize, handler_stderr_log_getsize,' \
+    ' device_log_getsize, expected_logs',
     TESTDATA_5,
     ids=['valgrind log', 'valgrind log unused',
-         'handler log', 'handler log unused',
+         'handler log', 'handler log with stderr', 'stderr only',
+         'handler log unused',
          'device log', 'device log unused',
          'no logs']
 )
@@ -822,12 +833,15 @@ def test_projectbuilder_log_info_file(
     device_log_exists,
     instance_reason,
     handler_log_getsize,
+    handler_stderr_log_getsize,
     device_log_getsize,
-    expected_log
+    expected_logs
 ):
     def mock_exists(filename, *args, **kwargs):
         if filename == 'build_dir/handler.log':
             return handler_log_exists
+        if filename == 'build_dir/handler_stderr.log':
+            return handler_stderr_log_getsize > 0
         if filename == 'build_dir/valgrind.log':
             return valgrind_log_exists
         if filename == 'build_dir/device.log':
@@ -837,6 +851,8 @@ def test_projectbuilder_log_info_file(
     def mock_getsize(filename, *args, **kwargs):
         if filename == 'build_dir/handler.log':
             return handler_log_getsize
+        if filename == 'build_dir/handler_stderr.log':
+            return handler_stderr_log_getsize
         if filename == 'build_dir/device.log':
             return device_log_getsize
         return 0
@@ -855,7 +871,9 @@ def test_projectbuilder_log_info_file(
          mock.patch('twisterlib.runner.ProjectBuilder.log_info', log_info_mock):
         pb.log_info_file(None)
 
-    log_info_mock.assert_called_with(expected_log, mock.ANY)
+    assert log_info_mock.call_args_list == [
+        mock.call(expected_log, mock.ANY) for expected_log in expected_logs
+    ]
 
 
 TESTDATA_6 = [
@@ -1074,7 +1092,7 @@ TESTDATA_6 = [
         mock.ANY,
         ['build test: dummy instance name',
          'Determine test cases for test instance: dummy instance name'],
-        {'op': 'gather_metrics', 'test': mock.ANY},
+        {'op': 'post_build', 'test': mock.ANY},
         mock.ANY,
         mock.ANY,
         0,
@@ -1119,7 +1137,7 @@ TESTDATA_6 = [
         mock.ANY,
         ['build test: dummy instance name',
          'Determine test cases for test instance: dummy instance name'],
-        {'op': 'gather_metrics', 'test': mock.ANY},
+        {'op': 'post_build', 'test': mock.ANY},
         mock.ANY,
         mock.ANY,
         0,
@@ -1518,6 +1536,7 @@ def test_projectbuilder_process(
     pb.options.prep_artifacts_for_testing = options_prep_artifacts
     pb.options.runtime_artifact_cleanup = options_runtime_artifacts
     pb.options.cmake_only = options_cmake_only
+    pb.options.post_build_checks = True
     pb.options.outdir = tmp_path
     pb.options.log_file = None
     pb.options.log_level = "DEBUG"
@@ -1554,6 +1573,46 @@ def test_projectbuilder_process(
 
     if expected_missing:
         pb.instance.add_missing_case_status.assert_called_with(*expected_missing)
+
+
+@pytest.mark.parametrize(
+    'post_build_checks',
+    [True, False],
+    ids=['enabled', 'disabled']
+)
+def test_projectbuilder_process_post_build_transition(
+    mocked_jobserver, tmp_path, post_build_checks
+):
+    """A successful build always transitions to 'post_build', regardless of
+    whether the optional post-build checks are enabled. The post_build stage
+    itself decides whether to run those checks.
+    """
+    instance_mock = mock.Mock()
+    instance_mock.name = 'dummy instance name'
+    instance_mock.status = 'success'
+    instance_mock.testsuite.harness = 'test'
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.options = mock.Mock()
+    pb.options.post_build_checks = post_build_checks
+    pb.options.outdir = tmp_path
+    pb.options.log_file = None
+    pb.options.log_level = "DEBUG"
+
+    pb.build = mock.Mock(return_value={'returncode': 0})
+    pb.determine_testcases = mock.Mock()
+
+    processing_queue_mock = mock.Mock()
+    lock_mock = mock.Mock(
+        __enter__=mock.Mock(return_value=(mock.Mock(), mock.Mock())),
+        __exit__=mock.Mock(return_value=None)
+    )
+    results_mock = mock.Mock()
+
+    pb.process(processing_queue_mock, mock.Mock(), {'op': 'build'}, lock_mock, results_mock)
+
+    processing_queue_mock.append.assert_called_with({'op': 'post_build', 'test': mock.ANY})
 
 
 TESTDATA_7 = [
@@ -2344,6 +2403,59 @@ def test_projectbuilder_cmake():
     pb.run_cmake.assert_called_once_with(['dummy'], ['dummy filter'])
 
 
+@pytest.mark.parametrize(
+    'platform_aliases, selector, expected_args',
+    [
+        (
+            [
+                'mimxrt700_evk@mx25um51345g/mimxrt798s/cm33_cpu0',
+                'mimxrt700_evk/mimxrt798s/cm33_cpu0',
+            ],
+            'mimxrt700_evk/mimxrt798s/cm33_cpu0',
+            ['SHIELD=zc143ac72mipi'],
+        ),
+        (
+            ['mimxrt700_evk@w25q512nw/mimxrt798s/cm33_cpu0'],
+            'mimxrt700_evk/mimxrt798s/cm33_cpu0',
+            [],
+        ),
+        (
+            ['mimxrt700_evk@w25q512nw/mimxrt798s/cm33_cpu0'],
+            'mimxrt700_evk@mx25um51345g/mimxrt798s/cm33_cpu0',
+            [],
+        ),
+        (
+            ['nrf54l15dk/nrf54l15/cpuapp'],
+            'nrf54l',
+            ['SHIELD=zc143ac72mipi'],
+        ),
+    ],
+)
+def test_projectbuilder_cmake_platform_extra_args_matches_platform_aliases(
+    mocked_jobserver, platform_aliases, selector, expected_args
+):
+    instance_mock = mock.Mock()
+    instance_mock.handler = mock.Mock(ready=False)
+    instance_mock.build_dir = os.path.join('build', 'dir')
+    instance_mock.platform.name = platform_aliases[0]
+    instance_mock.platform.aliases = platform_aliases
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.testsuite.extra_args = [f'platform:{selector}:SHIELD=zc143ac72mipi']
+    pb.testsuite.conf_files = []
+    pb.testsuite.extra_conf_files = []
+    pb.testsuite.extra_overlay_confs = []
+    pb.testsuite.extra_dtc_overlay_files = []
+    pb.options.extra_args = []
+    pb.cmake_assemble_args = mock.Mock(return_value=['dummy'])
+    pb.run_cmake = mock.Mock()
+
+    pb.cmake()
+
+    assert pb.cmake_assemble_args.call_args.args[0] == expected_args
+
+
 def test_projectbuilder_build(mocked_jobserver):
     instance_mock = mock.Mock()
     instance_mock.testsuite.harness = 'test'
@@ -2358,6 +2470,109 @@ def test_projectbuilder_build(mocked_jobserver):
 
     pb.run_build.assert_called_once_with(['--build', 'build_dir'])
     assert res == {'dummy': 'dummy'}
+
+
+def test_projectbuilder_check_no_nested_git_repos(mocked_jobserver, tmp_path):
+    instance_mock = mock.Mock()
+    instance_mock.build_dir = str(tmp_path)
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+
+    # Clean build directory: no nested git repository.
+    assert pb.check_no_nested_git_repos() is None
+
+    # A '.git' directory cloned somewhere under the build directory must fail.
+    nested = tmp_path / 'subproject'
+    (nested / '.git').mkdir(parents=True)
+    reason = pb.check_no_nested_git_repos()
+    assert reason is not None
+    assert os.path.join('subproject', '.git') in reason
+
+
+def test_projectbuilder_check_no_nested_git_repos_gitfile(mocked_jobserver, tmp_path):
+    instance_mock = mock.Mock()
+    instance_mock.build_dir = str(tmp_path)
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+
+    # A '.git' file (e.g. a git submodule/worktree pointer) must also fail.
+    (tmp_path / '.git').write_text('gitdir: /elsewhere')
+    reason = pb.check_no_nested_git_repos()
+    assert reason is not None
+    assert '.git' in reason
+
+
+def test_projectbuilder_post_build_pass(mocked_jobserver):
+    instance_mock = mock.Mock()
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.options.post_build_checks = True
+    pb._simulator_unavailable_reason = mock.Mock(return_value=None)
+    pb.check_no_nested_git_repos = mock.Mock(return_value=None)
+
+    assert pb.post_build() == {'returncode': 0}
+
+
+def test_projectbuilder_post_build_fail(mocked_jobserver):
+    instance_mock = mock.Mock()
+    instance_mock.name = 'dummy instance name'
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.options.post_build_checks = True
+    pb._simulator_unavailable_reason = mock.Mock(return_value=None)
+    pb.check_no_nested_git_repos = mock.Mock(
+        return_value='cloned repo found', __name__='check_no_nested_git_repos'
+    )
+
+    res = pb.post_build()
+    assert res['returncode'] == 1
+    assert res['reason'] == 'cloned repo found'
+
+
+def test_projectbuilder_post_build_checks_skipped(mocked_jobserver):
+    """When --post-build-checks is not set, the optional checks are skipped
+    but post_build still succeeds (and other processing still runs).
+    """
+    instance_mock = mock.Mock()
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.options.post_build_checks = False
+    pb._simulator_unavailable_reason = mock.Mock(return_value=None)
+    pb.check_no_nested_git_repos = mock.Mock(
+        return_value='cloned repo found', __name__='check_no_nested_git_repos'
+    )
+
+    assert pb.post_build() == {'returncode': 0}
+    pb.check_no_nested_git_repos.assert_not_called()
+
+
+def test_projectbuilder_post_build_simulator_unavailable(mocked_jobserver):
+    """A runnable instance whose configure-time simulator binary is missing is
+    marked as not run during post_build, without failing the build.
+    """
+    instance_mock = mock.Mock()
+    instance_mock.name = 'dummy instance name'
+    instance_mock.run = True
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.options.post_build_checks = False
+    pb._simulator_unavailable_reason = mock.Mock(
+        return_value='armfvp simulator binary not found'
+    )
+
+    assert pb.post_build() == {'returncode': 0}
+    assert instance_mock.run is False
+    assert instance_mock.status == TwisterStatus.NOTRUN
+    assert instance_mock.reason == 'armfvp simulator binary not found'
+    instance_mock.add_missing_case_status.assert_called_once_with(
+        TwisterStatus.NOTRUN, 'armfvp simulator binary not found'
+    )
 
 
 TESTDATA_14 = [
@@ -2445,6 +2660,9 @@ def test_projectbuilder_run(
     instance_mock.platform.name = platform_name
     instance_mock.platform.arch = platform_arch
     instance_mock.testsuite.harness = harness
+    instance_mock.sidecar = None
+    # A reason left over from a loaded test plan or a previous iteration.
+    instance_mock.reason = 'stale'
     env_mock = mock.Mock()
 
     pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
@@ -2456,6 +2674,12 @@ def test_projectbuilder_run(
     with mock.patch('twisterlib.runner.HarnessImporter.get_harness',
                     mock_harness):
         pb.run()
+
+    if ready:
+        assert instance_mock.status == TwisterStatus.NONE
+        assert instance_mock.reason is None
+    else:
+        assert instance_mock.reason == 'stale'
 
     if expect_parse_generated:
         pb.parse_generated.assert_called_once()
@@ -2472,6 +2696,185 @@ def test_projectbuilder_run(
 
     if expect_handle:
         pb.instance.handler.handle.assert_called_once_with(harness_mock)
+
+
+TESTDATA_SIDECAR = [
+    # The harness delegates to the handler: the test runs, sidecar wraps it.
+    (False, True, True, True),
+    # The harness executes the test itself: the sidecar must still be set up
+    # around it, and the handler is not used.
+    (True, True, True, False),
+    # Setup failed (e.g. a missing host tool): nothing is executed, but the
+    # sidecar is still torn down so it cannot leak what it already provisioned.
+    (False, False, False, False),
+]
+
+
+@pytest.mark.parametrize(
+    'harness_self_executes, setup_ok, expect_run, expect_handle',
+    TESTDATA_SIDECAR,
+    ids=['handler path', 'self-executing harness', 'setup failed']
+)
+def test_projectbuilder_run_sidecar(
+    mocked_jobserver,
+    harness_self_executes,
+    setup_ok,
+    expect_run,
+    expect_handle
+):
+    """The sidecar is provisioned before whichever path executes the test, and
+    is torn down afterwards even when setup() failed."""
+    harness_mock = mock.Mock()
+    harness_mock.run = mock.Mock(return_value=harness_self_executes)
+
+    sidecar_mock = mock.Mock()
+    sidecar_mock.setup = mock.Mock(return_value=setup_ok)
+
+    instance_mock = mock.Mock()
+    instance_mock.handler.get_test_timeout = mock.Mock(return_value=60)
+    instance_mock.handler.ready = True
+    instance_mock.handler.type_str = 'not device'
+    instance_mock.platform.name = 'native_sim'
+    instance_mock.platform.arch = 'not posix'
+    instance_mock.testsuite.harness = 'not pytest'
+    instance_mock.sidecar = 'virtiofs'
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.options.extra_test_args = []
+    pb.options.seed = None
+    pb.defconfig = {}
+    pb.parse_generated = mock.Mock()
+
+    with mock.patch('twisterlib.runner.HarnessImporter.get_harness',
+                    return_value=harness_mock), \
+         mock.patch('twisterlib.runner.SidecarImporter.get_sidecar',
+                    return_value=sidecar_mock):
+        pb.run()
+
+    sidecar_mock.configure.assert_called_once_with(instance_mock)
+    # Set up before the test is executed by either path ...
+    sidecar_mock.setup.assert_called_once()
+    # ... and always torn down once configured, even if setup() failed.
+    sidecar_mock.teardown.assert_called_once()
+
+    assert harness_mock.run.called is expect_run
+    assert instance_mock.handler.handle.called is expect_handle
+
+
+def test_projectbuilder_run_unknown_sidecar(mocked_jobserver):
+    """An unresolvable sidecar name (e.g. a typo) errors the instance rather
+    than silently running the test without its host resource."""
+    harness_mock = mock.Mock()
+    harness_mock.run = mock.Mock(return_value=False)
+
+    instance_mock = mock.Mock()
+    instance_mock.handler.get_test_timeout = mock.Mock(return_value=60)
+    instance_mock.handler.ready = True
+    instance_mock.handler.type_str = 'not device'
+    instance_mock.platform.name = 'native_sim'
+    instance_mock.platform.arch = 'not posix'
+    instance_mock.testsuite.harness = 'not pytest'
+    instance_mock.sidecar = 'virtiofs_typo'
+    env_mock = mock.Mock()
+
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.options.extra_test_args = []
+    pb.options.seed = None
+    pb.defconfig = {}
+    pb.parse_generated = mock.Mock()
+
+    with mock.patch('twisterlib.runner.HarnessImporter.get_harness',
+                    return_value=harness_mock):
+        pb.run()
+
+    assert instance_mock.status == TwisterStatus.ERROR
+    assert 'virtiofs_typo' in instance_mock.reason
+    instance_mock.handler.handle.assert_not_called()
+
+
+TESTDATA_SIM_UNAVAILABLE = [
+    # No simulator selected for the platform.
+    (None, None, None),
+    # Simulator that does not resolve its binary at configure time.
+    ('qemu', None, None),
+    # Arm FVP binary found at configure time.
+    ('armfvp', '/opt/fvp/FVP_Base', None),
+    # Arm FVP binary not found at configure time.
+    ('armfvp', 'ARMFVP-NOTFOUND', 'armfvp simulator binary not found'),
+    # Arm FVP cache variable missing entirely.
+    ('armfvp', 'missing', 'armfvp simulator binary not found'),
+]
+
+
+@pytest.mark.parametrize(
+    'sim_name, armfvp_value, expected_reason',
+    TESTDATA_SIM_UNAVAILABLE,
+    ids=['no sim', 'non-configure sim', 'fvp found', 'fvp not found', 'fvp missing']
+)
+def test_projectbuilder_simulator_unavailable_reason(
+    mocked_jobserver,
+    tmp_path,
+    sim_name,
+    armfvp_value,
+    expected_reason
+):
+    instance_mock = mock.Mock()
+    instance_mock.build_dir = str(tmp_path)
+    instance_mock.sysbuild = False
+    if sim_name is None:
+        instance_mock.platform.simulator_by_name = mock.Mock(return_value=None)
+    else:
+        simulator_mock = mock.Mock()
+        simulator_mock.name = sim_name
+        instance_mock.platform.simulator_by_name = mock.Mock(return_value=simulator_mock)
+
+    if armfvp_value == 'missing':
+        # CMakeCache exists but has no ARMFVP entry.
+        with open(os.path.join(str(tmp_path), 'CMakeCache.txt'), 'w') as f:
+            f.write('SOME_OTHER_VAR:STRING=value\n')
+    elif armfvp_value is not None:
+        with open(os.path.join(str(tmp_path), 'CMakeCache.txt'), 'w') as f:
+            f.write(f'ARMFVP:FILEPATH={armfvp_value}\n')
+
+    env_mock = mock.Mock()
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.options = mock.Mock()
+    pb.options.sim_name = sim_name
+
+    assert pb._simulator_unavailable_reason() == expected_reason
+
+
+def test_projectbuilder_simulator_unavailable_reason_sysbuild(
+    mocked_jobserver, tmp_path
+):
+    """For sysbuild builds, the simulator variable is read from the default
+    domain's CMakeCache, not the top-level build directory.
+    """
+    domain_build = tmp_path / 'my_app'
+    domain_build.mkdir()
+    with open(os.path.join(str(domain_build), 'CMakeCache.txt'), 'w') as f:
+        f.write('ARMFVP:FILEPATH=ARMFVP-NOTFOUND\n')
+    # A stray top-level cache with the binary present must be ignored.
+    with open(os.path.join(str(tmp_path), 'CMakeCache.txt'), 'w') as f:
+        f.write('ARMFVP:FILEPATH=/opt/fvp/FVP_Base\n')
+
+    instance_mock = mock.Mock()
+    instance_mock.build_dir = str(tmp_path)
+    instance_mock.sysbuild = True
+    simulator_mock = mock.Mock()
+    simulator_mock.name = 'armfvp'
+    instance_mock.platform.simulator_by_name = mock.Mock(return_value=simulator_mock)
+
+    env_mock = mock.Mock()
+    pb = ProjectBuilder(instance_mock, env_mock, mocked_jobserver)
+    pb.options = mock.Mock()
+    pb.options.sim_name = 'armfvp'
+
+    domains_mock = mock.Mock()
+    domains_mock.get_default_domain.return_value.build_dir = 'my_app'
+    with mock.patch('twisterlib.runner.Domains.from_file', return_value=domains_mock):
+        assert pb._simulator_unavailable_reason() == 'armfvp simulator binary not found'
 
 
 TESTDATA_15 = [
@@ -2609,6 +3012,7 @@ def test_twisterrunner_run(
         return None
 
     instances = {'dummy instance': mock.Mock(metrics={'k': 'v'})}
+    instances['dummy instance'].testsuite.extra_args = ['platform:native_sim:MAKE=/opt/make']
     suites = [mock.Mock()]
     env_mock = mock.Mock()
 
@@ -2618,6 +3022,7 @@ def test_twisterrunner_run(
     tr.options.retry_build_errors = True
     tr.options.jobs = None
     tr.options.build_only = None
+    tr.options.extra_args = ['USE_CCACHE=0']
     for k, v in options.items():
         setattr(tr.options, k, v)
     tr.update_counting_before_pipeline = mock.Mock()
@@ -2628,6 +3033,7 @@ def test_twisterrunner_run(
     gnumakejobserver_mock().name='GNUMakeJobServer'
     jobclient_mock = mock.Mock()
     jobclient_mock().name='JobClient'
+    fifo_supported_mock = mock.Mock(return_value=True)
 
     processing_queue = deque()
     processing_ready = {}
@@ -2659,6 +3065,7 @@ def test_twisterrunner_run(
                     mock_client_from_environ), \
          mock.patch('twisterlib.runner.GNUMakeJobServer',
                     gnumakejobserver_mock), \
+         mock.patch('twisterlib.runner.fifo_supported', fifo_supported_mock), \
          mock.patch('twisterlib.runner.JobClient', jobclient_mock), \
          mock.patch('multiprocessing.cpu_count', return_value=8), \
          mock.patch('sys.platform', platform), \
@@ -2667,6 +3074,13 @@ def test_twisterrunner_run(
         tr.run()
 
     assert f'JOBS: {expected_jobs}' in caplog.text
+
+    if expected_jobserver == 'GNUMakeJobServer':
+        fifo_supported_mock.assert_called_once_with(
+            env_mock.generator_cmd,
+            ['USE_CCACHE=0', 'platform:native_sim:MAKE=/opt/make'],
+        )
+        gnumakejobserver_mock.assert_called_with(expected_jobs, fifo=True)
 
     assert tr.jobserver.name == expected_jobserver
 

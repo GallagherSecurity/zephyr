@@ -91,7 +91,7 @@ struct net_route_entry *net_route_ipv6_lookup(struct net_if *iface,
 struct net_route_entry *net_route_ipv6_add(struct net_if *iface,
 					   struct net_in6_addr *addr,
 					   uint8_t prefix_len,
-					   struct net_in6_addr *nexthop,
+					   const struct net_in6_addr *nexthop,
 					   uint32_t lifetime,
 					   uint8_t preference)
 {
@@ -121,7 +121,7 @@ int net_route_ipv6_del(struct net_route_entry *route)
 }
 
 int net_route_ipv6_del_by_nexthop(struct net_if *iface,
-				  struct net_in6_addr *nexthop)
+				  const struct net_in6_addr *nexthop)
 {
 	struct net_addr addr = route_ipv6_addr(nexthop);
 
@@ -253,6 +253,7 @@ int net_route_ipv6_mcast_forward_packet(struct net_pkt *pkt,
 	int ret = 0;
 	int err = 0;
 
+	/* Decrement hop limit; required for forwarding. */
 	hdr->hop_limit--;
 	net_pkt_set_ipv6_hop_limit(pkt, hdr->hop_limit);
 
@@ -273,7 +274,7 @@ int net_route_ipv6_mcast_forward_packet(struct net_pkt *pkt,
 				continue;
 			}
 
-			pkt_cpy = net_pkt_shallow_clone(pkt, K_NO_WAIT);
+			pkt_cpy = net_pkt_clone(pkt, K_NO_WAIT);
 			if (pkt_cpy == NULL) {
 				err--;
 				continue;
@@ -291,6 +292,10 @@ int net_route_ipv6_mcast_forward_packet(struct net_pkt *pkt,
 			}
 		}
 	}
+
+	/* Restore initial hop limit for further processing. */
+	hdr->hop_limit++;
+	net_pkt_set_ipv6_hop_limit(pkt, hdr->hop_limit);
 
 	return (err == 0) ? ret : err;
 }
@@ -450,6 +455,27 @@ bool net_route_ipv6_get_info(struct net_if *iface,
 	return true;
 }
 
+int net_route_ipv6_decrement_hop_limit(struct net_pkt *pkt)
+{
+	struct net_ipv6_hdr *hdr;
+
+	NET_ASSERT(pkt);
+
+	hdr = NET_IPV6_HDR(pkt);
+	if (hdr == NULL) {
+		return -EINVAL;
+	}
+
+	if (hdr->hop_limit <= 1U) {
+		return -ETIMEDOUT;
+	}
+
+	hdr->hop_limit--;
+	net_pkt_set_ipv6_hop_limit(pkt, hdr->hop_limit);
+
+	return 0;
+}
+
 int net_route_ipv6_packet(struct net_pkt *pkt, const struct net_in6_addr *nexthop)
 {
 	struct net_linkaddr *lladdr = NULL;
@@ -467,9 +493,18 @@ int net_route_ipv6_packet(struct net_pkt *pkt, const struct net_in6_addr *nextho
 	nbr = net_ipv6_nbr_lookup(NULL, nexthop);
 	if (nbr == NULL) {
 		if (net_route_ll_addr_supported(out_iface)) {
-			NET_DBG("Cannot find %s neighbor",
-				net_sprint_ipv6_addr(nexthop));
-			return -ENOENT;
+			if (!IS_ENABLED(CONFIG_NET_IPV6_ND)) {
+				NET_DBG("Cannot find %s neighbor",
+					net_sprint_ipv6_addr(nexthop));
+				return -ENOENT;
+			}
+
+			/* Next hop not resolved yet. Drop the link address the
+			 * packet was received with so that
+			 * net_ipv6_prepare_for_send() solicits the next hop and
+			 * queues the packet instead of dropping it.
+			 */
+			net_linkaddr_clear(net_pkt_lladdr_dst(pkt));
 		}
 	} else {
 		out_iface = nbr->iface;
@@ -478,9 +513,12 @@ int net_route_ipv6_packet(struct net_pkt *pkt, const struct net_in6_addr *nextho
 	orig_iface = net_pkt_orig_iface(pkt);
 	forwarding = net_pkt_forwarding(pkt);
 
+	/* A packet with an ingress interface was received for another host,
+	 * so re-sending it is forwarding even when out_iface is the one it
+	 * arrived on.
+	 */
 	if (orig_iface != NULL) {
-		forwarding = IS_ENABLED(CONFIG_NET_IPV6_FORWARDING) &&
-			     orig_iface != out_iface;
+		forwarding = IS_ENABLED(CONFIG_NET_IPV6_FORWARDING);
 		net_pkt_set_forwarding(pkt, forwarding);
 	}
 
@@ -488,6 +526,12 @@ int net_route_ipv6_packet(struct net_pkt *pkt, const struct net_in6_addr *nextho
 	    net_route_ll_addr_supported(out_iface) &&
 	    net_route_ll_addr_supported(net_pkt_iface(pkt)) &&
 	    net_route_ll_addr_supported(net_pkt_orig_iface(pkt))) {
+		if (nbr->idx == NET_NBR_LLADDR_UNKNOWN) {
+			NET_DBG("Neighbor %s has no link-layer (idx unknown)",
+				net_sprint_ipv6_addr(nexthop));
+			return -ESRCH;
+		}
+
 		lladdr = net_nbr_get_lladdr(nbr->idx);
 		if (lladdr == NULL) {
 			NET_DBG("Cannot find %s neighbor link layer address.",
@@ -508,12 +552,11 @@ int net_route_ipv6_packet(struct net_pkt *pkt, const struct net_in6_addr *nextho
 	}
 
 	if (forwarding) {
-		if (NET_IPV6_HDR(pkt)->hop_limit <= 1U) {
-			return -ETIMEDOUT;
-		}
+		int ret = net_route_ipv6_decrement_hop_limit(pkt);
 
-		NET_IPV6_HDR(pkt)->hop_limit--;
-		net_pkt_set_ipv6_hop_limit(pkt, NET_IPV6_HDR(pkt)->hop_limit);
+		if (ret < 0) {
+			return ret;
+		}
 	}
 
 	net_pkt_set_iface(pkt, out_iface);

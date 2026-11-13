@@ -19,7 +19,7 @@ def pytest_addoption(parser) -> None:
 
 @pytest.fixture(name='initialize', scope='session')
 def fixture_initialize(request, shell: Shell, dut: DeviceAdapter):
-    """Session initializtion"""
+    """Session initialization"""
     # Get HCI transport for bumble
     hci = request.config.getoption('--hci-transport')
 
@@ -33,7 +33,7 @@ def fixture_initialize(request, shell: Shell, dut: DeviceAdapter):
 
     shell.exec_command("bt init")
     dut.readlines_until(regex="Settings Loaded")
-    regex = r'(?P<bd_addr>([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2}) *\((.*?)\))'
+    regex = r'[PR]:(?P<bd_addr>([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})'
     bd_addr = None
     lines = shell.exec_command("bt id-show")
     for line in lines:

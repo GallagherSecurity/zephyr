@@ -6,14 +6,15 @@
 /**
  * @file
  * @brief USB-C VBUS device APIs
+ * @ingroup usbc_vbus_api
  *
  * This file contains the USB-C VBUS device APIs.
  * All USB-C VBUS measurement and control device drivers should
  * implement the APIs described in this file.
  */
 
-#ifndef ZEPHYR_INCLUDE_DRIVERS_USBC_VBUS_H_
-#define ZEPHYR_INCLUDE_DRIVERS_USBC_VBUS_H_
+#ifndef ZEPHYR_INCLUDE_DRIVERS_USB_C_USBC_VBUS_H_
+#define ZEPHYR_INCLUDE_DRIVERS_USB_C_USBC_VBUS_H_
 
 /**
  * @brief USB-C VBUS API
@@ -32,12 +33,27 @@
 extern "C" {
 #endif
 
+/**
+ * @def_driverbackendgroup{USB-C VBUS,usbc_vbus_api}
+ * @ingroup usbc_vbus_api
+ * @{
+ */
+
+/**
+ * @driver_ops{USB-C VBUS}
+ */
 __subsystem struct usbc_vbus_driver_api {
+	/** @driver_ops_mandatory @copybrief usbc_vbus_check_level */
 	bool (*check_level)(const struct device *dev, enum tc_vbus_level level);
+	/** @driver_ops_mandatory @copybrief usbc_vbus_measure */
 	int (*measure)(const struct device *dev, int *vbus_meas);
+	/** @driver_ops_mandatory @copybrief usbc_vbus_discharge */
 	int (*discharge)(const struct device *dev, bool enable);
+	/** @driver_ops_mandatory @copybrief usbc_vbus_enable */
 	int (*enable)(const struct device *dev, bool enable);
 };
+
+/** @} */
 
 /**
  * @brief Checks if VBUS is at a particular level
@@ -105,4 +121,4 @@ static inline int usbc_vbus_enable(const struct device *dev, bool enable)
 }
 #endif
 
-#endif /* ZEPHYR_INCLUDE_DRIVERS_USBC_VBUS_H_ */
+#endif /* ZEPHYR_INCLUDE_DRIVERS_USB_C_USBC_VBUS_H_ */

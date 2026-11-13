@@ -850,7 +850,6 @@ static DEVICE_API(can, tcan4x5x_driver_api) = {
 	.recover = can_mcan_recover,
 #endif /* CONFIG_CAN_MANUAL_RECOVERY_MODE */
 	.get_state = can_mcan_get_state,
-	.set_state_change_callback = can_mcan_set_state_change_callback,
 	.get_core_clock = tcan4x5x_get_core_clock,
 	.get_max_filters = can_mcan_get_max_filters,
 	.timing_min = CAN_MCAN_TIMING_MIN_INITIALIZER,
@@ -914,8 +913,7 @@ static const struct can_mcan_ops tcan4x5x_ops = {
                                                                                                    \
 	static struct tcan4x5x_data tcan4x5x_data_##inst;                                          \
                                                                                                    \
-	static struct can_mcan_data can_mcan_data_##inst =                                         \
-		CAN_MCAN_DATA_INITIALIZER(&tcan4x5x_data_##inst);                                  \
+	CAN_MCAN_DATA_DEFINE(can_mcan_data_##inst, &tcan4x5x_data_##inst);                         \
                                                                                                    \
 	PM_DEVICE_DT_INST_DEFINE(inst, tcan4x5x_pm_control);                                       \
 	CAN_DEVICE_DT_INST_DEFINE(inst, tcan4x5x_init, PM_DEVICE_DT_INST_GET(inst),                \

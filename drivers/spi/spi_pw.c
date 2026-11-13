@@ -13,7 +13,6 @@
 #include "spi_rtio.h"
 
 #if DT_ANY_INST_ON_BUS_STATUS_OKAY(pcie)
-BUILD_ASSERT(IS_ENABLED(CONFIG_PCIE), "DT need CONFIG_PCIE");
 #include <zephyr/drivers/pcie/pcie.h>
 #endif
 
@@ -749,8 +748,8 @@ static int spi_pw_configure(const struct device *dev,
 	}
 
 	/* Verify if requested op mode is relevant to this controller */
-	if (config->operation & SPI_OP_MODE_SLAVE) {
-		LOG_ERR("Slave mode not supported");
+	if (config->operation & SPI_OP_MODE_PERIPHERAL) {
+		LOG_ERR("Peripheral mode not supported");
 		return -ENOTSUP;
 	}
 
@@ -1058,8 +1057,6 @@ static int spi_pw_init(const struct device *dev)
 	_CONCAT(SPI_INTEL_IRQ_FLAGS, DT_INST_IRQ_HAS_CELL(n, flags))(n)
 
 #define SPI_INTEL_IRQ_INIT(n)						     \
-	BUILD_ASSERT(IS_ENABLED(CONFIG_DYNAMIC_INTERRUPTS),		     \
-		     "SPI PCIe requires dynamic interrupts");		     \
 	static void spi_##n##_irq_init(const struct device *dev)	     \
 	{								     \
 		const struct spi_pw_config *info = dev->config;		     \

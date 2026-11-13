@@ -7,6 +7,8 @@
 #ifndef ZEPHYR_DRIVERS_MODEM_HL78XX_HL78XX_GNSS_H_
 #define ZEPHYR_DRIVERS_MODEM_HL78XX_HL78XX_GNSS_H_
 
+#include <stddef.h>
+
 #include <zephyr/types.h>
 
 #include <zephyr/drivers/gnss.h>
@@ -70,8 +72,11 @@ struct hl78xx_gnss_config {
 };
 
 struct hl78xx_gnss_data {
-	const struct device *dev;
+	/* Must stay first: generic gnss_nmea0183_match_* callbacks cast user_data
+	 * directly to struct gnss_nmea0183_match_data.
+	 */
 	struct gnss_nmea0183_match_data match_data;
+	const struct device *dev;
 #if defined(CONFIG_GNSS_SATELLITES) && defined(CONFIG_HL78XX_GNSS_SOURCE_NMEA)
 	struct gnss_satellite satellites[CONFIG_HL78XX_GNSS_SATELLITES_COUNT];
 #endif
@@ -121,6 +126,9 @@ struct hl78xx_gnss_data {
 	k_timepoint_t pm_deadline;
 };
 
+_Static_assert(offsetof(struct hl78xx_gnss_data, match_data) == 0,
+	       "hl78xx_gnss_data.match_data must be the first member");
+
 /**
  * @brief Set the GNSS search state
  */
@@ -159,6 +167,26 @@ bool hl78xx_gnss_is_pending(struct hl78xx_data *data);
  * @brief Get the current GNSS search state
  */
 enum hl78xx_gnss_search_state hl78xx_gnss_get_search_state(struct hl78xx_gnss_data *gnss);
+
+/**
+ * @brief Reset GNSS session state at a modem power boundary.
+ *
+ * Clears every field that describes the state of the GNSS engine inside the
+ * modem (search_state, gnss_start_status, gnss_init_status, RRC check phase,
+ * exit_to_lte_pending). These are maintained from modem URCs and command
+ * acknowledgements, so once the modem powers off or restarts they describe a
+ * session that no longer exists — and several of them are one-shot latches
+ * that only a URC from the (now dead) session could clear.
+ *
+ * gnss_mode_enter_pending is preserved: it records an unserved caller request,
+ * which the boot path is expected to honour in the new session.
+ *
+ * Called from hl78xx_reset_modem_session_state(); safe to call when the GNSS
+ * device is absent.
+ *
+ * @param data Parent modem data structure.
+ */
+void hl78xx_gnss_reset_session_state(struct hl78xx_data *data);
 /**
  * @brief Check if modem is in GNSS mode (state machine)
  */
@@ -175,8 +203,8 @@ bool hl78xx_gnss_search_is_queued(struct hl78xx_gnss_data *gnss);
 /**
  * @brief Check if GNSS search is active or pending
  *
- * Returns true if GNSS is in any state other than IDLE, meaning configuration
- * changes should not be allowed.
+ * Returns true if GNSS is in any state other than IDLE, meaning a GNSS
+ * session is active or pending.
  */
 bool hl78xx_gnss_is_active(struct hl78xx_gnss_data *gnss);
 /**

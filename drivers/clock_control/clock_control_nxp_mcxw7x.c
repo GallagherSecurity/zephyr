@@ -53,14 +53,18 @@ struct mcxw_clock_control_config {
 	ccm32k_osc_xtal_cap_t xtal_cap;
 	/* OSC32K EXTAL capacitance configuration */
 	ccm32k_osc_extal_cap_t extal_cap;
+	/* OSC32K amplifier coarse gain adjustment */
+	ccm32k_osc_coarse_adjustment_value_t coarse_adjustment;
 
 	/* FIRC mode configuration */
 	uint8_t firc_mode;
 	/* FIRC frequency range configuration */
 	uint8_t firc_range;
 
+#if DT_INST_PROP(0, sirc_supported)
 	/* Enable SIRC in low power mode */
 	bool enable_sirc_in_lp_mode;
+#endif
 
 	/* System clock source selection */
 	uint8_t sys_clk_src;
@@ -154,7 +158,12 @@ static int nxp_mcxw_clock_control_get_rate(const struct device *dev,
 			break;
 		}
 		case MCXW_CLK_IP_MUX_FRO_6M: {
+#if DT_INST_PROP(0, sirc_supported)
 			*rate = CLOCK_GetFreq(kCLOCK_ScgSircClk);
+#else
+			/* SIRC not present on this SoC; FRO6M runs at a fixed 6 MHz */
+			*rate = 6000000U;
+#endif
 			break;
 		}
 		default: {
@@ -233,8 +242,16 @@ static int nxp_mcxw_clock_control_pm(const struct device *dev, enum pm_device_ac
 	return 0;
 }
 
+#if !defined(CONFIG_TRUSTED_EXECUTION_NONSECURE)
 static int nxp_mcxw_clock_validate_sys_clk_src(const struct mcxw_clock_control_config *config)
 {
+#if !DT_INST_PROP(0, sirc_supported)
+	if (config->sys_clk_src == MCXW_CLK_SYSTEM_CLK_SRC_SIRC) {
+		LOG_ERR("SIRC is not available as system clock source on this SoC");
+		return -EINVAL;
+	}
+#endif
+
 	switch (config->sys_clk_src) {
 	case MCXW_CLK_SYSTEM_CLK_SRC_SOSC:
 		if (!config->enable_sosc) {
@@ -258,18 +275,42 @@ static int nxp_mcxw_clock_validate_sys_clk_src(const struct mcxw_clock_control_c
 
 	return 0;
 }
+#endif /* !CONFIG_TRUSTED_EXECUTION_NONSECURE */
 
 static int nxp_mcxw_clock_control_init(const struct device *dev)
 {
 	const struct mcxw_clock_control_config *config = dev->config;
 
+#if defined(CONFIG_TRUSTED_EXECUTION_NONSECURE)
+	/*
+	 * TF-M non-secure build:
+	 *
+	 * Secure firmware owns global clock, oscillator, voltage,
+	 * flash wait-state, power and security setup.
+	 *
+	 * Do not reconfigure SYSCLK, FIRC, SIRC, SOSC, ROSC, CCM32K,
+	 * SPC or FMU from the non-secure image.
+	 *
+	 * The secure image must configure the clock tree before jumping
+	 * to the non-secure image.
+	 */
+
+	if (config->core_clock_frequency != 0U) {
+		SystemCoreClock = config->core_clock_frequency;
+	} else {
+		SystemCoreClock = CLOCK_GetCoreSysClkFreq();
+	}
+
+#else
 	if (nxp_mcxw_clock_validate_sys_clk_src(config) != 0) {
 		return -EINVAL;
 	}
 
 	/* Unlock Reference Clock Status Registers to allow writes */
 	CLOCK_UnlockFircControlStatusReg();
+#if DT_INST_PROP(0, sirc_supported)
 	CLOCK_UnlockSircControlStatusReg();
+#endif
 	CLOCK_UnlockRoscControlStatusReg();
 	CLOCK_UnlockSysOscControlStatusReg();
 
@@ -277,8 +318,26 @@ static int nxp_mcxw_clock_control_init(const struct device *dev)
 
 	/* Init OSC32K */
 	CLOCK_SetRoscMonitorMode(kSCG_RoscMonitorDisable);
+
+	/*
+	 * CCM32K registers are not reset on a warm boot. If a previous application
+	 * selected OSC32K as the 32 kHz clock source and this application disables
+	 * OSC32K, CCM32K_Set32kOscConfig() asserts because OSC32K cannot be
+	 * disabled while it is the active source. Switch the 32 kHz source back to
+	 * FRO32K first.
+	 */
+	if ((config->osc32k_mode == kCCM32K_Disable32kHzCrystalOsc) &&
+	    (CCM32K_GetClockSource(CCM32K) == kCCM32K_ClockSource32kOsc)) {
+		/* FRO32K must be enabled before it can be selected as the source. */
+		CCM32K_Enable32kFro(CCM32K, true);
+		CCM32K_SelectClockSource(CCM32K, kCCM32K_ClockSourceSelectFro32k);
+		/* Wait until FRO32K is the active 32 kHz clock source. */
+		while ((CCM32K_GetStatusFlag(CCM32K) & kCCM32K_32kFroActiveStatusFlag) == 0UL) {
+		}
+	}
+
 	ccm32k_osc_config_t ccm32k_osc_config = {
-		.coarseAdjustment = kCCM32K_OscCoarseAdjustmentRange0,
+		.coarseAdjustment = config->coarse_adjustment,
 		.enableInternalCapBank = true,
 		.xtalCap = config->xtal_cap,
 		.extalCap = config->extal_cap,
@@ -288,7 +347,7 @@ static int nxp_mcxw_clock_control_init(const struct device *dev)
 	/* Switch to safe clock source (SIRC) before reconfiguring FIRC */
 	scg_sys_clk_config_t sys_clk_safe_config_source = {
 #if DT_INST_NODE_HAS_PROP(0, sys_clk_div_plat)
-		.divPlat = (uint32_t)kSCG_SysClkDivBy1,
+		.divCore1 = (uint32_t)kSCG_SysClkDivBy1,
 #endif
 		.divSlow = (uint32_t)kSCG_SysClkDivBy4,
 		.divBus = (uint32_t)kSCG_SysClkDivBy1,
@@ -318,12 +377,14 @@ static int nxp_mcxw_clock_control_init(const struct device *dev)
 	/* Initialize FIRC */
 	(void)CLOCK_InitFirc(&scg_firc_config);
 
+#if DT_INST_PROP(0, sirc_supported)
 	if (config->enable_sirc_in_lp_mode) {
 		scg_sirc_config_t scg_sirc_config = {
 			.enableMode = kSCG_SircEnableInSleep,
 		};
 		(void)CLOCK_InitSirc(&scg_sirc_config);
 	}
+#endif
 
 	if (config->enable_sosc) {
 		scg_sosc_config_t scg_sosc_config = {
@@ -352,7 +413,7 @@ static int nxp_mcxw_clock_control_init(const struct device *dev)
 	/* Configure system clock with user-defined settings */
 	scg_sys_clk_config_t sys_clk_config = {
 #if DT_INST_NODE_HAS_PROP(0, sys_clk_div_plat)
-		.divPlat = (config->sys_clk_div_plat - 1),
+		.divCore1 = (config->sys_clk_div_plat - 1),
 #endif
 		.divSlow = (config->sys_clk_div_slow - 1),
 		.divBus = (config->sys_clk_div_bus - 1),
@@ -396,6 +457,7 @@ static int nxp_mcxw_clock_control_init(const struct device *dev)
 	/* Enable 32kHz clock output to all peripherals.  */
 	CCM32K_EnableCLKOutToPeripherals(CCM32K, 0xFF);
 #endif
+#endif /* CONFIG_TRUSTED_EXECUTION_NONSECURE */
 
 	return pm_device_driver_init(dev, nxp_mcxw_clock_control_pm);
 }
@@ -412,9 +474,12 @@ static struct mcxw_clock_control_config config = {
 	.osc32k_mode = DT_INST_PROP(0, osc32k_mode),
 	.xtal_cap = DT_INST_PROP(0, osc32k_xtal_cap),
 	.extal_cap = DT_INST_PROP(0, osc32k_extal_cap),
+	.coarse_adjustment = DT_INST_PROP(0, osc32k_coarse_adjustment),
 	.firc_mode = DT_INST_PROP(0, firc_mode),
 	.firc_range = DT_INST_PROP(0, firc_range),
+#if DT_INST_PROP(0, sirc_supported)
 	.enable_sirc_in_lp_mode = DT_INST_PROP(0, enable_sirc_in_lp_mode),
+#endif
 	.sys_clk_src = DT_INST_PROP(0, sys_clk_src),
 #if DT_INST_NODE_HAS_PROP(0, sys_clk_div_plat)
 	.sys_clk_div_plat = DT_INST_PROP(0, sys_clk_div_plat),

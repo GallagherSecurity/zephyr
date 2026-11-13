@@ -20,6 +20,8 @@
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
+		/* CPU clock divided by 4 */
+		timebase-frequency = <DT_FREQ_M(27)>;
 
 		cpu: cpu@0 {
 			clock-frequency = <DT_FREQ_M(108)>;
@@ -78,6 +80,7 @@
 		fmc: flash-controller@40022000 {
 			compatible = "gd,gd32-flash-controller";
 			reg = <0x40022000 0x400>;
+			ranges;
 			#address-cells = <1>;
 			#size-cells = <1>;
 
@@ -86,6 +89,8 @@
 				write-block-size = <2>;
 				max-erase-time-ms = <300>;
 				page-size = <DT_SIZE_K(1)>;
+				#address-cells = <1>;
+				#size-cells = <1>;
 			};
 		};
 

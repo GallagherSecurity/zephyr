@@ -6,9 +6,11 @@
 
 /dts-v1/;
 
-#include <nxp/mcx/nxp_mcxl255_cm0.dtsi>
+#include <nxp/mcx/mcxl/nxp_mcxl255_cm0.dtsi>
 #include "frdm_mcxl255-pinctrl.dtsi"
+#include <zephyr/dt-bindings/gpio/gpio.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
+#include "frdm_mcxl255-common.dtsi"
 
 / {
 	model = "NXP FRDM_MCXL255 board";
@@ -19,6 +21,15 @@
 		zephyr,console = &aon_lpuart0;
 		zephyr,shell-uart = &aon_lpuart0;
 	};
+
+	aliases {
+		rtc = &rtc;
+		sw0 = &user_button_5;
+	};
+};
+
+&user_button_5 {
+	zephyr,code = <INPUT_KEY_0>;
 };
 
 &cpu1 {
@@ -32,6 +43,34 @@
 	pinctrl-names = "default";
 };
 
+&rtc {
+	status = "okay";
+};
+
 &systick {
+	status = "okay";
+};
+
+&aon_lpi2c0 {
+	status = "okay";
+	pinctrl-0 = <&pinmux_aon_lpi2c0>;
+	pinctrl-names = "default";
+};
+
+&aon_gpio0 {
+	status = "okay";
+};
+
+&mbox_b {
+	status = "okay";
+};
+
+&aon_kpp0 {
+	status = "okay";
+	pinctrl-0 = <&pinmux_aon_kpp0>;
+	pinctrl-names = "default";
+};
+
+&aon_lptmr0 {
 	status = "okay";
 };

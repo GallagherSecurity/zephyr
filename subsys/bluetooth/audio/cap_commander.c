@@ -39,8 +39,6 @@ LOG_MODULE_REGISTER(bt_cap_commander, CONFIG_BT_CAP_COMMANDER_LOG_LEVEL);
 
 #include "common/bt_str.h"
 
-static void cap_commander_proc_complete(struct bt_cap_common_proc *active_proc);
-
 static const struct bt_cap_commander_cb *cap_cb;
 
 int bt_cap_commander_register_cb(const struct bt_cap_commander_cb *cb)
@@ -506,7 +504,7 @@ static bool valid_broadcast_reception_start_param(
 		return false;
 	}
 
-	for (size_t i = 0; i < param->count; i++) {
+	for (size_t i = 0U; i < param->count; i++) {
 		const struct bt_cap_commander_broadcast_reception_start_member_param *start_param =
 			&param->param[i];
 		const union bt_cap_set_member *member = &param->param[i].member;
@@ -780,7 +778,7 @@ static void cap_commander_handle_recv_state(struct bt_conn *conn, uint8_t src_id
 		LOG_DBG("BASS recv state: conn %p, src_id %u pa_sync_state %u", (void *)conn,
 			state->src_id, state->pa_sync_state);
 
-		for (uint8_t i = 0; i < state->num_subgroups; i++) {
+		for (uint8_t i = 0U; i < state->num_subgroups; i++) {
 			const struct bt_bap_bass_subgroup *subgroup = &state->subgroups[i];
 
 			LOG_DBG("Subgroup[%u].bis_sync: 0x%08X", i, subgroup->bis_sync);
@@ -953,7 +951,11 @@ static void cap_commander_ba_recv_state_cb(struct bt_conn *conn, int err,
 		return;
 	}
 
-	__ASSERT_NO_MSG(state != NULL);
+	if (state == NULL) {
+		/* Ignore, we use cap_commander_ba_recv_state_removed_cb for removed receive states
+		 */
+		return;
+	}
 
 	cap_commander_handle_recv_state(conn, state->src_id, state);
 }
@@ -1157,7 +1159,7 @@ bool bt_cap_commander_valid_broadcast_reception_stop_param(
 		return false;
 	}
 
-	for (size_t i = 0; i < param->count; i++) {
+	for (size_t i = 0U; i < param->count; i++) {
 		const struct bt_cap_commander_broadcast_reception_stop_member_param *stop_param =
 			&param->param[i];
 		const union bt_cap_set_member *member = &param->param[i].member;
@@ -1366,7 +1368,7 @@ static bool valid_distribute_broadcast_code_param(
 		return false;
 	}
 
-	for (size_t i = 0; i < param->count; i++) {
+	for (size_t i = 0U; i < param->count; i++) {
 		const union bt_cap_set_member *member = &param->param[i].member;
 		const struct bt_conn *member_conn =
 			bt_cap_common_get_member_conn(param->type, member);
@@ -1502,7 +1504,7 @@ void cap_commander_register_broadcast_assistant_callbacks(void)
  *
  * This will also unlock the provided @p active_proc
  */
-static void cap_commander_proc_complete(struct bt_cap_common_proc *active_proc)
+void cap_commander_proc_complete(struct bt_cap_common_proc *active_proc)
 {
 	enum bt_cap_common_proc_type proc_type;
 	struct bt_conn *failed_conn;
@@ -1512,7 +1514,7 @@ static void cap_commander_proc_complete(struct bt_cap_common_proc *active_proc)
 	err = active_proc->err;
 	proc_type = active_proc->proc_type;
 
-	if (IS_ENABLED(CONFIG_BT_CAP_HANDOVER) && bt_cap_common_handover_is_active()) {
+	if (IS_ENABLED(CONFIG_BT_CAP_HANDOVER) && bt_cap_common_active_proc_is_handover()) {
 		bt_cap_handover_commander_proc_complete(active_proc);
 		return;
 	}
@@ -1590,6 +1592,15 @@ int bt_cap_commander_cancel(void)
 		LOG_DBG("No CAP procedure is in progress");
 
 		return -EALREADY;
+	}
+
+	if ((IS_ENABLED(CONFIG_BT_CAP_HANDOVER) && bt_cap_common_active_proc_is_handover()) ||
+	    !bt_cap_common_active_proc_is_commander()) {
+		bt_cap_common_unlock_proc();
+
+		LOG_DBG("No CAP commander procedure is in progress");
+
+		return -EOPNOTSUPP;
 	}
 
 	bt_cap_common_abort_proc(NULL, -ECANCELED);

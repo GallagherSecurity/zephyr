@@ -11,6 +11,7 @@
 
 #include "tmc50xx.h"
 #include <adi_tmc5xxx_common.h>
+#include "tmc50xx_reg.h"
 
 #include <zephyr/drivers/stepper/stepper_ctrl.h>
 #include <zephyr/drivers/stepper/stepper_trinamic.h>
@@ -45,7 +46,7 @@ int tmc50xx_stepper_ctrl_index(const struct device *dev)
 int tmc50xx_stepper_ctrl_set_max_velocity(const struct device *dev, uint32_t velocity)
 {
 	const struct tmc50xx_stepper_ctrl_config *config = dev->config;
-	const uint32_t clock_frequency = tmc50xx_get_clock_frequency(dev);
+	const uint32_t clock_frequency = tmc50xx_get_clock_frequency(config->controller);
 	uint32_t velocity_fclk;
 	int err;
 
@@ -431,7 +432,7 @@ static int tmc50xx_stepper_ctrl_configure_ramp(const struct device *dev,
 {
 	const struct tmc50xx_stepper_ctrl_config *config = dev->config;
 	const struct device *controller = config->controller;
-	const uint32_t clock_frequency = tmc50xx_get_clock_frequency(dev);
+	const uint32_t clock_frequency = tmc50xx_get_clock_frequency(config->controller);
 	int err;
 
 	uint32_t accel_fclk = tmc5xxx_calculate_acceleration_from_hz_to_fclk(ramp->acceleration_max,

@@ -8,8 +8,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef ZEPHYR_INCLUDE_BLUETOOTH_AUDIO_BAP_
-#define ZEPHYR_INCLUDE_BLUETOOTH_AUDIO_BAP_
+#ifndef ZEPHYR_INCLUDE_BLUETOOTH_AUDIO_BAP_H_
+#define ZEPHYR_INCLUDE_BLUETOOTH_AUDIO_BAP_H_
 
 /**
  * @brief Bluetooth Basic Audio Profile (BAP)
@@ -108,7 +108,7 @@ extern "C" {
 /**
  * @brief Recommended connection parameters for coexistence of ACL and ISO
  *
- * Defined by Table 8.3 in BAP 1.0.2
+ * Defined by Table 8.4 in BAP 1.0.2
  */
 #define BT_BAP_CONN_PARAM_RELAXED                                                                  \
 	BT_LE_CONN_PARAM(BT_GAP_MS_TO_CONN_INTERVAL(50), BT_GAP_MS_TO_CONN_INTERVAL(70), 0,        \
@@ -201,11 +201,11 @@ enum bt_bap_qos_cfg_framing {
 /** @brief QoS Preferred PHY */
 enum {
 	/** LE 1M PHY */
-	BT_BAP_QOS_CFG_1M = BIT(0),
+	BT_BAP_QOS_CFG_1M = BIT(0U),
 	/** LE 2M PHY */
-	BT_BAP_QOS_CFG_2M = BIT(1),
+	BT_BAP_QOS_CFG_2M = BIT(1U),
 	/** LE Coded PHY */
-	BT_BAP_QOS_CFG_CODED = BIT(2),
+	BT_BAP_QOS_CFG_CODED = BIT(2U),
 };
 
 /**
@@ -375,7 +375,7 @@ enum bt_bap_bass_att_err {
 };
 
 /** Value indicating that the periodic advertising interval is unknown */
-#define BT_BAP_PA_INTERVAL_UNKNOWN             0xFFFF
+#define BT_BAP_PA_INTERVAL_UNKNOWN             0xFFFFU
 
 /**
  * @brief Broadcast Assistant no BIS sync preference
@@ -383,9 +383,9 @@ enum bt_bap_bass_att_err {
  * Value indicating that the Broadcast Assistant has no preference to which BIS
  * the Scan Delegator syncs to
  */
-#define BT_BAP_BIS_SYNC_NO_PREF 0xFFFFFFFF
+#define BT_BAP_BIS_SYNC_NO_PREF 0xFFFFFFFFU
 /** BIS sync value indicating that the BIG sync has failed for any reason */
-#define BT_BAP_BIS_SYNC_FAILED  0xFFFFFFFF
+#define BT_BAP_BIS_SYNC_FAILED  0xFFFFFFFFU
 
 /** Endpoint states */
 enum bt_bap_ep_state {
@@ -499,8 +499,6 @@ struct bt_bap_scan_delegator_cb {
 	 * @param conn       Pointer to the connection to a remote device if
 	 *                   the change was caused by it, otherwise NULL.
 	 * @param recv_state Pointer to the receive state that was updated.
-	 *
-	 * @return 0 in case of success or negative value in case of error.
 	 */
 	void (*recv_state_updated)(struct bt_conn *conn,
 				   const struct bt_bap_scan_delegator_recv_state *recv_state);
@@ -563,6 +561,8 @@ struct bt_bap_scan_delegator_cb {
 	 * accordance to the @p bis_sync_req within reasonable time. The
 	 * Broadcast Assistant may also request fewer, or none, indexes to
 	 * be synchronized.
+	 * This callback is always called when any of the @p bis_sync_req values are @ref
+	 * BT_BAP_BIS_SYNC_NO_PREF.
 	 *
 	 * @param[in]  conn          Pointer to the connection of the
 	 *                           Broadcast Assistant requesting the sync.
@@ -753,24 +753,26 @@ struct bt_bap_stream {
 struct bt_bap_stream_ops {
 #if defined(CONFIG_BT_BAP_UNICAST) || defined(__DOXYGEN__)
 	/**
-	 * @brief Stream configured callback
+	 * @brief Stream codec configured callback
 	 *
-	 * Configured callback is called whenever an Audio Stream has been configured.
+	 * Codec configured callback is called whenever an Audio Stream has been configured with a
+	 * codec configuration.
 	 *
 	 * @param stream Stream object that has been configured.
 	 * @param pref   Remote QoS preferences.
 	 */
-	void (*configured)(struct bt_bap_stream *stream, const struct bt_bap_qos_cfg_pref *pref);
+	void (*codec_configured)(struct bt_bap_stream *stream,
+				 const struct bt_bap_qos_cfg_pref *pref);
 
 	/**
-	 * @brief Stream QoS set callback
+	 * @brief Stream QoS configured callback
 	 *
-	 * QoS set callback is called whenever an Audio Stream Quality of Service has been set or
-	 * updated.
+	 * QoS configured callback is called whenever an Audio Stream Quality of Service has been
+	 * set or updated.
 	 *
 	 * @param stream Stream object that had its QoS updated.
 	 */
-	void (*qos_set)(struct bt_bap_stream *stream);
+	void (*qos_configured)(struct bt_bap_stream *stream);
 
 	/**
 	 * @brief Stream enabled callback
@@ -929,7 +931,7 @@ void bt_bap_stream_cb_register(struct bt_bap_stream *stream, struct bt_bap_strea
  * @param ep Remote Audio Endpoint being configured
  * @param codec_cfg Codec configuration
  *
- * @return Allocated Audio Stream object or NULL in case of error.
+ * @return 0 in case of success or negative value in case of error.
  */
 int bt_bap_stream_config(struct bt_conn *conn, struct bt_bap_stream *stream, struct bt_bap_ep *ep,
 			 const struct bt_audio_codec_cfg *codec_cfg);
@@ -1089,6 +1091,10 @@ int bt_bap_stream_stop(struct bt_bap_stream *stream);
  * Broadcast sink streams cannot be released, but can be deleted by bt_bap_broadcast_sink_delete().
  * Broadcast source streams cannot be released, but can be deleted by
  * bt_bap_broadcast_source_delete().
+ *
+ * If the stream's endpoint is non-NULL and its state is @ref BT_BAP_EP_STATE_IDLE,
+ * the function will reset the stream and endpoint locally if the return value is 0,
+ * but will not send the release command.
  *
  * @param stream Stream object
  *
@@ -1569,9 +1575,10 @@ int bt_bap_unicast_group_foreach_stream(struct bt_bap_unicast_group *unicast_gro
 					bt_bap_unicast_group_foreach_stream_func_t func,
 					void *user_data);
 
-/** Structure holding information of audio stream endpoint */
+/** Structure holding information of a unicast group */
 struct bt_bap_unicast_group_info {
-	/** Presentation delay for sink ASEs
+	/**
+	 * @brief Presentation delay for sink ASEs (central to peripheral audio direction)
 	 *
 	 * Will be @ref BT_BAP_PD_UNSET if no sink streams have been added to group.
 	 * The value does not reflect what has been configured on any remote ASEs, but only the
@@ -1579,13 +1586,79 @@ struct bt_bap_unicast_group_info {
 	 */
 	uint32_t sink_pd;
 
-	/** Presentation delay for source ASEs
+	/**
+	 * @brief Presentation delay for source ASEs (peripheral to central audio direction)
 	 *
 	 * Will be @ref BT_BAP_PD_UNSET if no source streams have been added to group.
 	 * The value does not reflect what has been configured on any remote ASEs, but only the
 	 * local value from when the group was created or reconfigured.
 	 */
 	uint32_t source_pd;
+
+	/**
+	 * @brief Central to Peripheral SDU interval in microseconds
+	 *
+	 * Will be 0 if no sink streams have been added to the group.
+	 */
+	uint32_t c_to_p_interval;
+
+	/**
+	 * @brief Peripheral to Central SDU interval in microseconds
+	 *
+	 * Will be 0 if no source streams have been added to the group.
+	 */
+	uint32_t p_to_c_interval;
+
+	/**
+	 * @brief Central to Peripheral maximum transport latency in milliseconds
+	 *
+	 * Will be 0 if no sink streams have been added to the group.
+	 */
+	uint16_t c_to_p_latency;
+
+	/**
+	 * @brief Peripheral to Central maximum transport latency in milliseconds
+	 *
+	 * Will be 0 if no source streams have been added to the group.
+	 */
+	uint16_t p_to_c_latency;
+
+	/** @brief The framing of the streams in the group */
+	enum bt_bap_qos_cfg_framing framing;
+
+	/**
+	 * @brief The packing of the group
+	 *
+	 * @ref BT_ISO_PACKING_SEQUENTIAL or @ref BT_ISO_PACKING_INTERLEAVED.
+	 */
+	uint8_t packing;
+
+	/**
+	 * @brief Whether any stream in the group has been connected
+	 *
+	 * If this is true, then the group can no longer be modified with e.g.
+	 * bt_bap_unicast_group_reconfig() or bt_bap_unicast_group_add_streams().
+	 */
+	bool has_been_connected;
+
+#if defined(CONFIG_BT_ISO_TEST_PARAMS) || defined(__DOXYGEN__)
+	/**
+	 * @brief Central to Peripheral flush timeout in multiples of the ISO interval
+	 *
+	 * Will be 0 if no sink streams have been added to the group.
+	 */
+	uint8_t c_to_p_ft;
+
+	/**
+	 * @brief Peripheral to Central flush timeout in multiples of the ISO interval
+	 *
+	 * Will be 0 if no source streams have been added to the group.
+	 */
+	uint8_t p_to_c_ft;
+
+	/** @brief ISO interval in 1.25 ms units */
+	uint16_t iso_interval;
+#endif /* CONFIG_BT_ISO_TEST_PARAMS */
 };
 
 /**
@@ -1840,6 +1913,34 @@ int bt_bap_unicast_client_unregister_cb(struct bt_bap_unicast_client_cb *cb);
  */
 int bt_bap_unicast_client_discover(struct bt_conn *conn, enum bt_audio_dir dir);
 
+/**
+ * @brief Get a copy of the QoS configured for the group of the stream
+ *
+ * This may be different from @p stream->qos if the stream has not been QoS configured or if group
+ * has been reconfigured with bt_bap_unicast_group_reconfig(). The QoS returned from this is what
+ * will be applied when bt_bap_stream_qos() is called for the group.
+ *
+ * @param[in] stream The stream to get the QoS configuration information from
+ * @param[out] qos The copy of the QoS configuration data
+ *
+ * @retval 0 Success
+ * @retval -EINVAL @p stream or @p qos are NULL, or @p stream is not part of a group.
+ */
+int bt_bap_unicast_client_qos_from_group(const struct bt_bap_stream *stream,
+					 struct bt_bap_qos_cfg *qos);
+
+/**
+ * @brief Compare two @ref bt_bap_qos_cfg and return whether they are equal
+ *
+ * @param a The first QoS config to compare with
+ * @param b The second QoS config to compare with
+ *
+ * @retval true @p a and @p b points to the same memory (including NULL),
+	   or all fields are identical.
+ * @retval false Either @p a or @p b is NULL or any of the fields are not identical.
+ */
+bool bt_bap_qos_cfg_eq(const struct bt_bap_qos_cfg *a, const struct bt_bap_qos_cfg *b);
+
 /** @} */ /* End of group bt_bap_unicast_client */
 /**
  * @brief BAP Broadcast APIs
@@ -1970,8 +2071,8 @@ int bt_bap_base_get_subgroup_codec_data(const struct bt_bap_base_subgroup *subgr
  * @param[in]  subgroup The subgroup pointer
  * @param[out] meta     Pointer that will point to the resulting codec metadata
  *
+ * @return Length of the metadata on success
  * @retval -EINVAL if arguments are invalid
- * @retval 0 on success
  */
 int bt_bap_base_get_subgroup_codec_meta(const struct bt_bap_base_subgroup *subgroup,
 					uint8_t **meta);
@@ -2434,7 +2535,7 @@ int bt_bap_broadcast_sink_create(struct bt_le_per_adv_sync *pa_sync, uint32_t br
  *
  * @param sink               Pointer to the sink object from the base_recv callback.
  * @param indexes_bitfield   Bitfield of the BIS index to sync to. To sync to e.g. BIS index 1 and
- *                           2, this should have the value of BIT(1) | BIT(2).
+ *                           2, this should have the value of BIT(1U) | BIT(2U).
  * @param streams            Stream object pointers to be used for the receiver. If multiple BIS
  *                           indexes shall be synchronized, multiple streams shall be provided.
  * @param broadcast_code     The 16-octet broadcast code. Shall be supplied if the broadcast is
@@ -2500,7 +2601,9 @@ int bt_bap_scan_delegator_register(struct bt_bap_scan_delegator_cb *cb);
  * Unregister the scan delegator and Broadcast Audio Scan Service (BASS)
  * dynamically at runtime.
  *
- * @return 0 in case of success or negative value in case of error.
+ * @retval 0 Success
+ * @retval -EALREADY Already unregistering
+ * @retval -EAGAIN Not registered
  */
 int bt_bap_scan_delegator_unregister(void);
 
@@ -2569,7 +2672,12 @@ struct bt_bap_scan_delegator_add_src_param {
  *
  * @param param The parameters for adding the new source
  *
- * @return int  errno on failure, or source ID on success.
+ * @return The source ID of the new state if return value is >= 0
+ * @retval -EAGAIN Service not yet registered with bt_bap_scan_delegator_register()
+ * @retval -EINVAL Invalid parameters
+ * @retval -ENOMEM Could not add any more receive states
+ * @retval -EALREADY A receive state with the same advertiser address type, SID, and
+ *          broadcast ID already exists
  */
 int bt_bap_scan_delegator_add_src(const struct bt_bap_scan_delegator_add_src_param *param);
 
@@ -2587,12 +2695,7 @@ struct bt_bap_scan_delegator_mod_src_param {
 	/** Number of subgroups */
 	uint8_t num_subgroups;
 
-	/**
-	 * @brief Subgroup specific information
-	 *
-	 * If a subgroup's metadata_len is set to 0, the existing metadata
-	 * for the subgroup will remain unchanged
-	 */
+	/** Subgroup specific information */
 	struct bt_bap_bass_subgroup subgroups[BT_BAP_BASS_MAX_SUBGROUPS];
 };
 
@@ -2998,4 +3101,4 @@ int bt_bap_broadcast_assistant_read_recv_state(struct bt_conn *conn, uint8_t idx
 }
 #endif
 
-#endif /* ZEPHYR_INCLUDE_BLUETOOTH_AUDIO_BAP_ */
+#endif /* ZEPHYR_INCLUDE_BLUETOOTH_AUDIO_BAP_H_ */

@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 NXP
+ * Copyright 2024-2026 NXP
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <zephyr/init.h>
@@ -8,9 +8,12 @@
 #include <fsl_clock.h>
 #include <fsl_spc.h>
 #include <soc.h>
+#if defined(CONFIG_PM) || defined(CONFIG_POWEROFF)
+#include <fsl_vbat.h>
+#endif
 #if CONFIG_USB_DC_NXP_EHCI
-#include "usb_phy.h"
-#include "usb.h"
+#include <usb_phy.h>
+#include <usb.h>
 
 /* USB PHY configuration */
 #define BOARD_USB_PHY_D_CAL     (0x04U)
@@ -137,19 +140,23 @@ void board_early_init_hook(void)
 	CLOCK_SetClkDiv(kCLOCK_DivAhbClk, 1U);
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(sai0)) || DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(sai1))
+/* PLL fractional M divider: 86.016 */
+#define PLL1_SS_MDIV_LSB_VALUE 2886218023U
+
 	/* < Set up PLL1 */
 	const pll_setup_t pll1_Setup = {
-		.pllctrl = SCG_SPLLCTRL_SOURCE(1U) | SCG_SPLLCTRL_SELI(3U) |
-				 SCG_SPLLCTRL_SELP(1U),
-		.pllndiv = SCG_SPLLNDIV_NDIV(25U),
-		.pllpdiv = SCG_SPLLPDIV_PDIV(10U),
-		.pllmdiv = SCG_SPLLMDIV_MDIV(256U),
+		.pllctrl = SCG_SPLLCTRL_SOURCE(1U) | SCG_SPLLCTRL_LIMUPOFF(1U) |
+			   SCG_SPLLCTRL_SELR(4U) | SCG_SPLLCTRL_SELI(4U) | SCG_SPLLCTRL_SELP(3U),
+		.pllndiv = SCG_SPLLNDIV_NDIV(12U),
+		.pllpdiv = SCG_SPLLPDIV_PDIV(7U),
+		.pllsscg[0] = PLL1_SS_MDIV_LSB_VALUE,
+		.pllsscg[1] = SCG_SPLLSSCG1_SEL_SS_MDIV(1U),
 		.pllRate = 24576000U};
 
 	/* Configure PLL1 to the desired values */
 	CLOCK_SetPLL1Freq(&pll1_Setup);
-	/* Set PLL1 CLK0 divider to value 1 */
-	CLOCK_SetClkDiv(kCLOCK_DivPLL1Clk0, 1U);
+	/* Set PLL1 CLK0 divider to value 2, then the clock is 12288000Hz. */
+	CLOCK_SetClkDiv(kCLOCK_DivPLL1Clk0, 2U);
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(flexcomm0))
@@ -254,7 +261,7 @@ void board_early_init_hook(void)
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(enet))
 	CLOCK_AttachClk(kNONE_to_ENETRMII);
-#if defined(CONFIG_PTP_CLOCK_NXP_ENET_QOS)
+#if defined(CONFIG_PTP_CLOCK_NXP_ENET_QOS) || defined(CONFIG_PTP_CLOCK_DWC_MAC)
 	/* Attach PLL0 (150 MHz) to the ENET QoS PTP reference clock. */
 	CLOCK_AttachClk(kPLL0_to_ENETPTPREF);
 	CLOCK_SetClkDiv(kCLOCK_DivEnetptprefClk, 1u);
@@ -310,18 +317,21 @@ void board_early_init_hook(void)
 	flexspi_clock_set_freq(MCUX_FLEXSPI_CLK,
 			       DT_PROP(DT_NODELABEL(ext_flash_ctrl), spi_max_frequency));
 	enable_cache64();
+#elif CONFIG_FLASH_MCUX_FLEXSPI_NAND
+	flexspi_clock_set_freq(MCUX_FLEXSPI_CLK,
+			       DT_PROP(DT_NODELABEL(mx35lf1ge4ab), spi_max_frequency));
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(smartdma))
 	CLOCK_EnableClock(kCLOCK_Smartdma);
 	RESET_PeripheralReset(kSMART_DMA_RST_SHIFT_RSTn);
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(video_sdma))
-	/* Drive CLKOUT from main clock, divided by 25 to yield 6MHz clock
+	/* Drive CLKOUT from main clock, divided by 6 to yield 25MHz clock
 	 * The camera will use this clock signal to generate
 	 * PCLK, HSYNC, and VSYNC
 	 */
 	CLOCK_AttachClk(kMAIN_CLK_to_CLKOUT);
-	CLOCK_SetClkDiv(kCLOCK_DivClkOut, 25U);
+	CLOCK_SetClkDiv(kCLOCK_DivClkOut, 6U);
 #endif
 #endif
 
@@ -412,6 +422,9 @@ void board_early_init_hook(void)
 	CLOCK_SetupClockCtrl(kCLOCK_FRO12MHZ_ENA);
 #elif DT_PROP(DT_NODELABEL(lptmr0), clk_source) == 0x1
 	CLOCK_SetupClk16KClocking(kCLOCK_Clk16KToVsys);
+#if defined(CONFIG_PM) || defined(CONFIG_POWEROFF)
+	VBAT_EnableFRO16k(VBAT0, true);
+#endif
 #elif DT_PROP(DT_NODELABEL(lptmr0), clk_source) == 0x2
 	CLOCK_SetupOsc32KClocking(kCLOCK_Osc32kToVsys);
 #elif DT_PROP(DT_NODELABEL(lptmr0), clk_source) == 0x3
@@ -460,8 +473,8 @@ void board_early_init_hook(void)
 #endif
 
 #if DT_NODE_HAS_STATUS_OKAY(DT_NODELABEL(ewm0))
-	CLOCK_SetupOsc32KClocking(kCLOCK_Osc32kToWake);
-	CLOCK_AttachClk(kXTAL32K2_to_EWM0);
+	CLOCK_SetupClk16KClocking(kCLOCK_Clk16KToWake);
+	CLOCK_AttachClk(kCLK_16K2_to_EWM0);
 	CLOCK_EnableClock(kCLOCK_Ewm0);
 #endif
 

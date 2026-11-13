@@ -573,8 +573,8 @@ static void mqtt_evt_handler(struct mqtt_client *const client, const struct mqtt
 
 		while (payload_left > 0) {
 			/* Attempt to claim `payload_left` bytes of buffer in rb */
-			size = (size_t)ring_buf_put_claim(&sh->rx_rb, &sh->rx_rb_ptr,
-							  payload_left);
+			size = (size_t)MIN(ring_buf_put_ptr(&sh->rx_rb, &sh->rx_rb_ptr, 0),
+					   payload_left);
 			/* Read `size` bytes of payload from mqtt */
 			rc = mqtt_read_publish_payload_blocking(client, sh->rx_rb_ptr, size);
 
@@ -586,7 +586,7 @@ static void mqtt_evt_handler(struct mqtt_client *const client, const struct mqtt
 
 			size = (size_t)rc;
 			/* Indicate that `size` bytes of payload has been written into rb */
-			(void)ring_buf_put_finish(&sh->rx_rb, size);
+			ring_buf_commit(&sh->rx_rb, size);
 			/* Update `payload_left` */
 			payload_left -= size;
 			/* Tells the shell that we have new data for it */
@@ -670,7 +670,7 @@ static int init(const struct shell_transport *transport, const void *config,
 	k_work_queue_init(&sh->workq);
 	k_work_queue_start(&sh->workq, sh_mqtt_workq_stack,
 			   K_KERNEL_STACK_SIZEOF(sh_mqtt_workq_stack), K_PRIO_COOP(7), NULL);
-	(void)k_thread_name_set(&sh->workq.thread, "sh_mqtt_workq");
+	(void)k_thread_name_set(sh->workq.thread_id, "sh_mqtt_workq");
 	k_work_init(&sh->net_disconnected_work, net_disconnect_handler);
 	k_work_init_delayable(&sh->connect_dwork, sh_mqtt_connect_handler);
 	k_work_init_delayable(&sh->subscribe_dwork, sh_mqtt_subscribe_handler);

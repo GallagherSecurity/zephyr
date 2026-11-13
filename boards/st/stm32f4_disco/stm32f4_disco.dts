@@ -169,10 +169,14 @@ zephyr_udc0: &usbotg_fs {
 	status = "okay";
 };
 
+&adc123_common {
+	st,adc-prescaler = <2>;
+	status = "okay";
+};
+
 &adc1 {
 	pinctrl-0 = <&adc1_in1_pa1 &adc1_in6_pa6>;
 	pinctrl-names = "default";
-	st,adc-prescaler = <2>;
 	status = "okay";
 };
 
@@ -220,6 +224,8 @@ zephyr_udc0: &usbotg_fs {
 	clock-frequency = <I2C_BITRATE_FAST>;
 	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb9>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 6 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 9 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 
 	audio_codec: cs43l22@4a {

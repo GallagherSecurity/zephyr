@@ -145,6 +145,93 @@ ZTEST(posix_timers, test_one_shot__SIGEV_SIGNAL)
 	zassert_equal(exp_count, 1, "Number of expiry is incorrect");
 }
 
+ZTEST(posix_timers, test_TIMER_ABSTIME_reference_clock)
+{
+	struct sigevent sig = {0};
+	struct itimerspec value;
+	struct timespec now;
+
+	exp_count = 0;
+	sig.sigev_notify = SIGEV_SIGNAL;
+	sig.sigev_notify_function = handler;
+	sig.sigev_value.sival_int = TEST_SIGNAL_VAL;
+
+	zassert_ok(timer_create(CLOCK_MONOTONIC, &sig, &timerid));
+
+	/*Set a 2-second relative timer to prime k_timer_remaining_get()*/
+	value.it_interval.tv_sec = 0;
+	value.it_interval.tv_nsec = 0;
+	value.it_value.tv_sec = 2;
+	value.it_value.tv_nsec = 0;
+	zassert_ok(timer_settime(timerid, 0, &value, NULL));
+
+	/*Re-arm immediately with TIMER_ABSTIME for now + 200 ms*/
+	zassert_ok(clock_gettime(CLOCK_MONOTONIC, &now));
+	value.it_interval.tv_sec = 0;
+	value.it_interval.tv_nsec = 0;
+	value.it_value.tv_sec = now.tv_sec;
+	value.it_value.tv_nsec = now.tv_nsec + 200 * NSEC_PER_MSEC;
+	if (value.it_value.tv_nsec >= NSEC_PER_SEC) {
+		value.it_value.tv_sec++;
+		value.it_value.tv_nsec -= NSEC_PER_SEC;
+	}
+	zassert_ok(timer_settime(timerid, TIMER_ABSTIME, &value, NULL));
+
+	/*Verify the timer has not fired before the absolute expiry*/
+	k_sleep(K_MSEC(100));
+	zassert_equal(exp_count, 0, "TIMER_ABSTIME fired too early");
+
+	/*Verify the timer fired after the absolute expiry*/
+	k_sleep(K_MSEC(300));
+	zassert_equal(exp_count, 1, "TIMER_ABSTIME fired %d times, expected 1", exp_count);
+}
+
+ZTEST(posix_timers, test_TIMER_ABSTIME_large_timeout)
+{
+	struct sigevent sig = {0};
+	struct itimerspec value;
+	struct timespec ref, orig;
+
+	exp_count = 0;
+	sig.sigev_notify = SIGEV_SIGNAL;
+	sig.sigev_notify_function = handler;
+	sig.sigev_value.sival_int = TEST_SIGNAL_VAL;
+
+	zassert_ok(timer_create(CLOCK_REALTIME, &sig, &timerid));
+
+	/*
+	 * TIMER_ABSTIME at a large CLOCK_REALTIME value with a 5 s offset.
+	 * Guards two timeout conversion bugs on 32-bit time_t toolchains:
+	 * - uint32 truncation: storing absolute milliseconds in a uint32_t
+	 *   instead of the relative wait from timespec_to_timeoutms()
+	 * - time_t overflow: tv_sec * NSEC_PER_SEC wraps in 32-bit math
+	 *   unless widened to int64_t before scaling (needs a multi-second
+	 *   offset; same-second offsets cancel in the subtraction)
+	 * After 2 s the timer must still be pending; after 5.5 s it must
+	 * have fired once.
+	 */
+	zassert_ok(clock_gettime(CLOCK_REALTIME, &orig));
+	ref.tv_sec = 1700000000;
+	ref.tv_nsec = 0;
+	zassert_ok(clock_settime(CLOCK_REALTIME, &ref));
+
+	/* Set TIMER_ABSTIME to ref + 5 s */
+	value.it_interval.tv_sec = 0;
+	value.it_interval.tv_nsec = 0;
+	value.it_value.tv_sec = ref.tv_sec + 5;
+	value.it_value.tv_nsec = 0;
+	zassert_ok(timer_settime(timerid, TIMER_ABSTIME, &value, NULL));
+	zassert_ok(clock_settime(CLOCK_REALTIME, &orig));
+
+	/* A broken build fires early; a correct 5 s timeout has not fired yet */
+	k_sleep(K_MSEC(2000));
+	zassert_equal(exp_count, 0, "TIMER_ABSTIME fired too early: tv_sec overflow not widened");
+
+	/* A correct build fires exactly once at the 5 s absolute expiry */
+	k_sleep(K_MSEC(3500));
+	zassert_equal(exp_count, 1, "TIMER_ABSTIME fired %d times, expected 1", exp_count);
+}
+
 static void after(void *arg)
 {
 	ARG_UNUSED(arg);

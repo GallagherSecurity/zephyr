@@ -10,6 +10,7 @@
 #include <zephyr/drivers/flash.h>
 #include <zephyr/irq.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
 #include <zephyr/sys/util.h>
 #include "spi_nor.h"
 #include "jesd216.h"
@@ -23,12 +24,9 @@
 #include <zephyr/drivers/gpio.h>
 #endif
 
-#define NOR_ERASE_VALUE	0xff
+#include "flash_priv.h"
 
-#define FLEXSPI_NOR_SOC_NV_FLASH_COMPAT(node_id) \
-	COND_CODE_1(DT_NODE_HAS_COMPAT(node_id, soc_nv_flash), (node_id), ())
-#define FLEXSPI_NOR_SOC_NV_FLASH_NODE(node_id) \
-	DT_INST_FOREACH_CHILD_STATUS_OKAY(node_id, FLEXSPI_NOR_SOC_NV_FLASH_COMPAT)
+#define NOR_ERASE_VALUE	0xff
 
 #ifdef CONFIG_FLASH_MCUX_FLEXSPI_NOR_WRITE_BUFFER
 static uint8_t nor_write_buf[SPI_NOR_PAGE_SIZE];
@@ -94,6 +92,10 @@ struct flash_flexspi_nor_data {
 	flexspi_port_t port;
 	bool legacy_poll;
 	uint64_t size;
+	/* Bytes erased by one ERASE_BLOCK sequence; the SFDP path overrides
+	 * the classic 64 KiB default with the size the chip declares.
+	 */
+	uint32_t erase_block_size;
 	/* Expected jedec-id property from devicetree */
 	uint8_t jedec_id[JESD216_READ_ID_LEN];
 #if defined(CONFIG_FLASH_PAGE_LAYOUT)
@@ -587,8 +589,10 @@ static int flash_flexspi_nor_erase(const struct device *dev, off_t offset,
 		 */
 		size_t remaining_size = size;
 		off_t current_offset = offset;
+		size_t block_size = data->erase_block_size;
+
 		/* Step 1: Handle unaligned start - erase sectors until block aligned */
-		while (remaining_size > 0 && (current_offset % SPI_NOR_BLOCK_SIZE) != 0) {
+		while (remaining_size > 0 && (current_offset % block_size) != 0) {
 			flash_flexspi_nor_write_enable(data);
 			flash_flexspi_nor_erase_sector(data, current_offset);
 			flash_flexspi_nor_wait_bus_busy(data);
@@ -598,13 +602,13 @@ static int flash_flexspi_nor_erase(const struct device *dev, off_t offset,
 		}
 
 		/* Step 2: Erase whole blocks */
-		while (remaining_size >= SPI_NOR_BLOCK_SIZE) {
+		while (remaining_size >= block_size) {
 			flash_flexspi_nor_write_enable(data);
 			flash_flexspi_nor_erase_block(data, current_offset);
 			flash_flexspi_nor_wait_bus_busy(data);
 			memc_flexspi_reset(&data->controller);
-			current_offset += SPI_NOR_BLOCK_SIZE;
-			remaining_size -= SPI_NOR_BLOCK_SIZE;
+			current_offset += block_size;
+			remaining_size -= block_size;
 		}
 
 		/* Step 3: Erase remaining sectors */
@@ -1078,6 +1082,9 @@ static int flash_flexspi_nor_config_flash(struct flash_flexspi_nor_data *data,
 	uint8_t addr_width;
 	uint8_t mode_cmd;
 	uint8_t octal_enable_req = JESD216_DW19_OER_VAL_NONE;
+	uint8_t erase_sector_cmd = SPI_NOR_CMD_SE;
+	uint8_t erase_block_cmd = SPI_NOR_CMD_BE;
+	uint32_t block_size = 0;
 	int ret;
 
 	/* Read DW14 to determine the polling method we should use while programming */
@@ -1107,6 +1114,55 @@ static int flash_flexspi_nor_config_flash(struct flash_flexspi_nor_data *data,
 		octal_enable_req = dw19.octal_enable_req;
 	}
 
+	/* Select the erase opcodes from the BFP erase types (DW8-DW9): the
+	 * driver's sector size for ERASE_SECTOR, the largest declared type
+	 * for ERASE_BLOCK.
+	 */
+	for (uint8_t et = 1; et <= JESD216_NUM_ERASE_TYPES; et++) {
+		struct jesd216_erase_type etype;
+
+		/* Types 1-2 live in DW8, 3-4 in DW9; both DWs are optional and
+		 * jesd216_bfp_erase() cannot know the table length, so gate on
+		 * it before reading (a short table leaves param_buf words
+		 * uninitialized).
+		 */
+		if (header->phdr[0].len_dw < 8U + ((et - 1U) / 2U)) {
+			continue;
+		}
+
+		if (jesd216_bfp_erase(bfp, et, &etype) < 0) {
+			continue;
+		}
+
+		/* Guard BIT() against a nonsensical declared size */
+		if (etype.exp >= 32U) {
+			continue;
+		}
+
+		if (BIT(etype.exp) == SPI_NOR_SECTOR_SIZE) {
+			erase_sector_cmd = etype.cmd;
+		}
+		if (BIT(etype.exp) > block_size) {
+			block_size = BIT(etype.exp);
+			erase_block_cmd = etype.cmd;
+		}
+	}
+	if (block_size == 0) {
+		/* No type larger than a sector: block erase degrades to it. */
+		erase_block_cmd = erase_sector_cmd;
+		block_size = SPI_NOR_SECTOR_SIZE;
+	}
+	data->erase_block_size = block_size;
+	LOG_DBG("SFDP erase types: sector 0x%02x (4 KiB), block 0x%02x (%u KiB)",
+		erase_sector_cmd, erase_block_cmd, block_size / 1024);
+
+	flexspi_lut[ERASE_SECTOR][0] = FLEXSPI_LUT_SEQ(
+			kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, erase_sector_cmd,
+			kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_1PAD, addr_width);
+	flexspi_lut[ERASE_BLOCK][0] = FLEXSPI_LUT_SEQ(
+			kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, erase_block_cmd,
+			kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_1PAD, addr_width);
+
 	/* Check to see if we can enable 4 byte addressing */
 	ret = jesd216_bfp_decode_dw16(&header->phdr[0], bfp, &dw16);
 	if (ret == 0) {
@@ -1119,11 +1175,11 @@ static int flash_flexspi_nor_config_flash(struct flash_flexspi_nor_data *data,
 			/* Update LUT for ERASE_SECTOR and ERASE_BLOCK to use 32 bit addr */
 			flexspi_lut[ERASE_SECTOR][0] = FLEXSPI_LUT_SEQ(
 					kFLEXSPI_Command_SDR, kFLEXSPI_1PAD,
-					SPI_NOR_CMD_SE, kFLEXSPI_Command_RADDR_SDR,
+					erase_sector_cmd, kFLEXSPI_Command_RADDR_SDR,
 					kFLEXSPI_1PAD, addr_width);
 			flexspi_lut[ERASE_BLOCK][0] = FLEXSPI_LUT_SEQ(
 					kFLEXSPI_Command_SDR, kFLEXSPI_1PAD,
-					SPI_NOR_CMD_BE, kFLEXSPI_Command_RADDR_SDR,
+					erase_block_cmd, kFLEXSPI_Command_RADDR_SDR,
 					kFLEXSPI_1PAD, addr_width);
 			/* Update LUT for page program to use 32 bit addr and 4byte page program
 			 * command.
@@ -1460,6 +1516,36 @@ static int flash_flexspi_nor_check_jedec(struct flash_flexspi_nor_data *data,
 		/* Device uses bit 1 of status reg 2 for QE */
 		return flash_flexspi_nor_quad_enable(data, flexspi_lut,
 						     JESD216_DW15_QER_VAL_S2B1v5);
+	case 0x1a609d: /* IS25LP512M */
+	case 0x20609d:
+		/*
+		 * Keep the runtime LUT in 4-byte Quad I/O read mode while XIP
+		 * is active.
+		 */
+		flexspi_lut[READ][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_4READ_4B,
+				kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_4PAD, 32);
+		flexspi_lut[READ][1] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_DUMMY_SDR, kFLEXSPI_4PAD, 6,
+				kFLEXSPI_Command_READ_SDR, kFLEXSPI_4PAD, 0x04);
+		flexspi_lut[PAGE_PROGRAM][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_PP_4B,
+				kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_1PAD, 32);
+		flexspi_lut[PAGE_PROGRAM][1] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_WRITE_SDR, kFLEXSPI_1PAD, 0x04,
+				kFLEXSPI_Command_STOP, kFLEXSPI_1PAD, 0x00);
+		flexspi_lut[ERASE_SECTOR][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_SE_4B,
+				kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_1PAD, 32);
+		flexspi_lut[ERASE_BLOCK][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_BE_4B,
+				kFLEXSPI_Command_RADDR_SDR, kFLEXSPI_1PAD, 32);
+		data->legacy_poll = true;
+		flexspi_lut[READ_STATUS_REG][0] = FLEXSPI_LUT_SEQ(
+				kFLEXSPI_Command_SDR, kFLEXSPI_1PAD, SPI_NOR_CMD_RDSR,
+				kFLEXSPI_Command_READ_SDR, kFLEXSPI_1PAD, 0x01);
+		return flash_flexspi_nor_quad_enable(data, flexspi_lut,
+						     JESD216_DW15_QER_VAL_S1B6);
 	case 0x1940ef: /* W25Q256JV-IQ/IN flash, uses identical LUT than W25Q512JV*/
 	case 0x2040ef:
 		/* W25Q512JV-IQ/IN flash, use 4 byte read/write */
@@ -1909,7 +1995,7 @@ _program_lut:
 					FLEXSPI_INSTR_PROG_END * MEMC_FLEXSPI_CMD_PER_SEQ,
 					data->port);
 	if (ret < 0) {
-		return ret;
+		goto _exit;
 	}
 
 _exit:
@@ -1927,6 +2013,8 @@ static int flash_flexspi_nor_init(const struct device *dev)
 {
 	const struct flash_flexspi_nor_config *config = dev->config;
 	struct flash_flexspi_nor_data *data = dev->data;
+
+	data->erase_block_size = SPI_NOR_BLOCK_SIZE;
 
 #if defined(CONFIG_FLASH_MCUX_FLEXSPI_NOR_MUTEX)
 	k_mutex_init(&data->lock);
@@ -2005,6 +2093,48 @@ static DEVICE_API(flash, flash_flexspi_nor_api) = {
 #endif
 };
 
+#ifdef CONFIG_PM_DEVICE
+/*
+ * PM_DEVICE_ACTION_TURN_ON: re-initialize the FlexSPI controller (device
+ * configuration + LUT) after its state was lost, e.g. on wake from a deep
+ * power state.
+ */
+static int flash_flexspi_nor_pm_action(const struct device *dev,
+				       enum pm_device_action action)
+{
+	switch (action) {
+	case PM_DEVICE_ACTION_TURN_ON:
+#ifdef CONFIG_FLASH_MCUX_FLEXSPI_NOR_PM_RESTORE
+	{
+		struct flash_flexspi_nor_data *data = dev->data;
+		const struct flash_flexspi_nor_config *config = dev->config;
+		int ret;
+
+		/* Re-initialize the FlexSPI controller configuration. */
+		memc_flexspi_reset_lut_alloc(&data->controller, data->port);
+		ret = flash_flexspi_nor_probe(data, config);
+		if (ret < 0) {
+			LOG_ERR("FlexSPI NOR re-probe failed: %d", ret);
+			return ret;
+		}
+	}
+#endif
+		return 0;
+	case PM_DEVICE_ACTION_TURN_OFF:
+	case PM_DEVICE_ACTION_SUSPEND:
+	case PM_DEVICE_ACTION_RESUME:
+		/* Nothing to save/do: config lives in RAM, chip state (QE,
+		 * 4BA) is retained by the flash itself across PM3, and the
+		 * controller state is rebuilt by probe on TURN_ON when
+		 * CONFIG_FLASH_MCUX_FLEXSPI_NOR_PM_RESTORE is enabled.
+		 */
+		return 0;
+	default:
+		return -ENOTSUP;
+	}
+}
+#endif /* CONFIG_PM_DEVICE */
+
 #define CONCAT3(x, y, z) x ## y ## z
 
 #define CS_INTERVAL_UNIT(unit)						\
@@ -2077,15 +2207,17 @@ static DEVICE_API(flash, flash_flexspi_nor_api) = {
 		},))							\
 		.flash_parameters = {					\
 			.write_block_size = DT_PROP(			\
-				FLEXSPI_NOR_SOC_NV_FLASH_NODE(n),\
+				SOC_NV_FLASH_CHILD_NODE(n),\
 				write_block_size),		\
 			.erase_value = NOR_ERASE_VALUE,			\
 		},							\
 	};								\
 									\
+	PM_DEVICE_DT_INST_DEFINE(n, flash_flexspi_nor_pm_action);	\
+									\
 	DEVICE_DT_INST_DEFINE(n,					\
 			      flash_flexspi_nor_init,			\
-			      NULL,					\
+			      PM_DEVICE_DT_INST_GET(n),			\
 			      &flash_flexspi_nor_data_##n,		\
 			      &flash_flexspi_nor_config_##n,		\
 			      POST_KERNEL,				\

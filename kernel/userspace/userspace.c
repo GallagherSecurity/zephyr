@@ -14,7 +14,6 @@
 #include <zephyr/syscall.h>
 #include <zephyr/internal/syscall_handler.h>
 #include <zephyr/device.h>
-#include <zephyr/init.h>
 #include <stdbool.h>
 #include <zephyr/app_memory/app_memdomain.h>
 #include <zephyr/sys/libc-hooks.h>
@@ -23,6 +22,7 @@
 #include <inttypes.h>
 #include <zephyr/linker/linker-defs.h>
 #include <zephyr/cache.h>
+#include <kernel_internal.h>
 
 #ifdef Z_LIBC_PARTITION_EXISTS
 K_APPMEM_PARTITION_DEFINE(z_libc_partition);
@@ -75,9 +75,13 @@ static struct k_spinlock obj_lock;         /* kobj struct data */
 
 #ifdef CONFIG_DYNAMIC_OBJECTS
 extern uint8_t _thread_idx_map[CONFIG_MAX_THREAD_BYTES];
+
+extern int z_msgq_cleanup(struct k_msgq *q, bool locked);
+extern int z_stack_cleanup(struct k_stack *stack, bool locked);
+extern int z_timer_cleanup(struct k_timer *timer, bool locked);
 #endif /* CONFIG_DYNAMIC_OBJECTS */
 
-static void clear_perms_cb(struct k_object *ko, void *ctx_ptr);
+static void unref_check(struct k_object *ko, uintptr_t index, bool locked);
 
 const char *otype_to_str(enum k_objects otype)
 {
@@ -254,6 +258,13 @@ static struct dyn_obj *dyn_object_find(const void *obj)
 	return node;
 }
 
+static void clear_perms_cb(struct k_object *ko, void *ctx_ptr)
+{
+	uintptr_t id = (uintptr_t)ctx_ptr;
+
+	unref_check(ko, id, false);
+}
+
 /**
  * @internal
  *
@@ -365,6 +376,14 @@ static struct k_object *dynamic_object_create(enum k_objects otype, size_t align
 		}
 
 		adjusted_size = STACK_ELEMENT_DATA_SIZE(size);
+		if (adjusted_size < size) {
+			/* The size adjustment above overflowed, which would
+			 * hand out an allocation smaller than requested.
+			 */
+			k_free(dyn);
+			return NULL;
+		}
+
 		dyn->data = z_thread_aligned_alloc(DYN_OBJ_DATA_ALIGN_K_THREAD_STACK,
 						     adjusted_size);
 		if (dyn->data == NULL) {
@@ -402,7 +421,14 @@ static struct k_object *dynamic_object_create(enum k_objects otype, size_t align
 		dyn->kobj.data.stack_size = adjusted_size;
 #endif /* CONFIG_GEN_PRIV_STACKS */
 	} else {
-		dyn->data = z_thread_aligned_alloc(align, obj_size_get(otype) + size);
+		size_t total_size = obj_size_get(otype) + size;
+
+		if (total_size < size) {
+			k_free(dyn);
+			return NULL;
+		}
+
+		dyn->data = z_thread_aligned_alloc(align, total_size);
 		if (dyn->data == NULL) {
 			k_free(dyn);
 			return NULL;
@@ -451,7 +477,6 @@ static void *z_object_alloc(enum k_objects otype, size_t size)
 		}
 		break;
 	/* The following are currently not allowed at all */
-	case K_OBJ_FUTEX:			/* Lives in user memory */
 	case K_OBJ_SYS_MUTEX:			/* Lives in user memory */
 	case K_OBJ_NET_SOCKET:			/* Indeterminate size */
 		LOG_ERR("forbidden object type '%s' requested",
@@ -535,6 +560,11 @@ void k_object_free(void *obj)
 	}
 
 	if (dyn != NULL) {
+#ifdef CONFIG_OBJ_CORE
+		if (dyn->kobj.type != K_OBJ_THREAD_STACK_ELEMENT) {
+			k_obj_core_evict_range(obj, obj_size_get(dyn->kobj.type));
+		}
+#endif /* CONFIG_OBJ_CORE */
 #ifdef CONFIG_DYNAMIC_OBJECTS_FORCE_STACK_CACHED
 		/* We may have nudged the pointer to point to the cached area
 		 * in dynamic_object_create() when we first created the thread
@@ -606,11 +636,14 @@ void k_object_wordlist_foreach(_wordlist_cb_func_t func, void *context)
 Z_GENERIC_SECTION(.kobject_data.text.dummies)
 __weak struct k_object *z_object_gperf_find(const void *obj)
 {
+	ARG_UNUSED(obj);
 	return NULL;
 }
 Z_GENERIC_SECTION(.kobject_data.text.dummies)
 __weak void z_object_gperf_wordlist_foreach(_wordlist_cb_func_t func, void *context)
 {
+	ARG_UNUSED(func);
+	ARG_UNUSED(context);
 }
 #else
 Z_GENERIC_SECTION(.kobject_data.text.dummies)
@@ -640,8 +673,11 @@ static unsigned int thread_index_get(struct k_thread *thread)
 /* Caller must hold lists_lock for the duration of this call so that the
  * sys_dlist_remove() below is mutually exclusive with concurrent
  * obj_list traversal in k_object_wordlist_foreach() on another CPU.
+ *
+ * Note: The 'locked' parameter in this function refers to the scheduler's
+ * spinlock.
  */
-static void unref_check(struct k_object *ko, uintptr_t index)
+static void unref_check(struct k_object *ko, uintptr_t index, bool locked)
 {
 	k_spinlock_key_t key = k_spin_lock(&obj_lock);
 
@@ -672,10 +708,20 @@ static void unref_check(struct k_object *ko, uintptr_t index)
 	 */
 	switch (ko->type) {
 	case K_OBJ_MSGQ:
-		k_msgq_cleanup((struct k_msgq *)ko->name);
+		(void)z_msgq_cleanup((struct k_msgq *)ko->name, locked);
 		break;
 	case K_OBJ_STACK:
-		k_stack_cleanup((struct k_stack *)ko->name);
+		(void)z_stack_cleanup((struct k_stack *)ko->name, locked);
+		break;
+	case K_OBJ_TIMER:
+		/* k_timer_cleanup() does not check whether the timer has
+		 * been initialized; calling it on an uninitialized timer
+		 * would read garbage from an uninitialized dnode. Guard
+		 * explicitly here.
+		 */
+		if ((ko->flags & K_OBJ_FLAG_INITIALIZED) != 0U) {
+			(void)z_timer_cleanup((struct k_timer *)ko->name, locked);
+		}
 		break;
 	default:
 		/* Nothing to do */
@@ -734,27 +780,34 @@ void k_thread_perms_clear(struct k_object *ko, struct k_thread *thread)
 #ifdef CONFIG_DYNAMIC_OBJECTS
 		k_spinlock_key_t key = k_spin_lock(&lists_lock);
 
-		unref_check(ko, index);
+		unref_check(ko, index, false);
 		k_spin_unlock(&lists_lock, key);
 #else
-		unref_check(ko, index);
+		unref_check(ko, index, false);
 #endif /* CONFIG_DYNAMIC_OBJECTS */
 	}
 }
 
-static void clear_perms_cb(struct k_object *ko, void *ctx_ptr)
+static void clear_perms_cb_locked(struct k_object *ko, void *ctx_ptr)
 {
 	uintptr_t id = (uintptr_t)ctx_ptr;
 
-	unref_check(ko, id);
+	unref_check(ko, id, true);
 }
 
+/*
+ * The only place where this routine is presently used in the Zephyr tree
+ * is in halt_thread() when a thread is being aborted and the scheduler's
+ * spinlock is held. The knowledge that the scheduler's spinlock is held must
+ * be passed down to the lower layers so that they do not try to reacquire the
+ * spinlock (leading to deadlock).
+ */
 void k_thread_perms_all_clear(struct k_thread *thread)
 {
 	uintptr_t index = thread_index_get(thread);
 
 	if ((int)index != -1) {
-		k_object_wordlist_foreach(clear_perms_cb, (void *)index);
+		k_object_wordlist_foreach(clear_perms_cb_locked, (void *)index);
 	}
 }
 
@@ -1066,7 +1119,7 @@ out:
 extern char __app_shmem_regions_start[];
 extern char __app_shmem_regions_end[];
 
-static int app_shmem_bss_zero(void)
+static void app_shmem_bss_zero(void)
 {
 	struct z_app_region *region, *end;
 
@@ -1075,44 +1128,11 @@ static int app_shmem_bss_zero(void)
 	region = (struct z_app_region *)&__app_shmem_regions_start[0];
 
 	for ( ; region < end; region++) {
-#if defined(CONFIG_DEMAND_PAGING) && !defined(CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT)
-		/* When BSS sections are not present at boot, we need to wait for
-		 * paging mechanism to be initialized before we can zero out BSS.
-		 */
-		extern bool z_sys_post_kernel;
-		bool do_clear = z_sys_post_kernel;
-
-		/* During pre-kernel init, z_sys_post_kernel == false, but
-		 * with pinned rodata region, so clear. Otherwise skip.
-		 * In post-kernel init, z_sys_post_kernel == true,
-		 * skip those in pinned rodata region as they have already
-		 * been cleared and possibly already in use. Otherwise clear.
-		 */
-		if (((uint8_t *)region->bss_start >= (uint8_t *)_app_smem_pinned_start) &&
-		    ((uint8_t *)region->bss_start < (uint8_t *)_app_smem_pinned_end)) {
-			do_clear = !do_clear;
-		}
-
-		if (do_clear)
-#endif /* CONFIG_DEMAND_PAGING && !CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT */
-		{
-			(void)memset(region->bss_start, 0, region->bss_size);
-		}
+		(void)memset(region->bss_start, 0, region->bss_size);
 	}
-
-	return 0;
 }
 
-SYS_INIT_NAMED(app_shmem_bss_zero_pre, app_shmem_bss_zero,
-	       PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
-
-#if defined(CONFIG_DEMAND_PAGING) && !defined(CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT)
-/* When BSS sections are not present at boot, we need to wait for
- * paging mechanism to be initialized before we can zero out BSS.
- */
-SYS_INIT_NAMED(app_shmem_bss_zero_post, app_shmem_bss_zero,
-	       POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
-#endif /* CONFIG_DEMAND_PAGING && !CONFIG_LINKER_GENERIC_SECTIONS_PRESENT_AT_BOOT */
+K_KERNEL_INIT_PRE(app_shmem_bss_zero);
 
 /*
  * Default handlers if otherwise unimplemented

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2021 Nordic Semiconductor ASA
- * Copyright 2025 NXP
+ * Copyright 2025 - 2026 NXP
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -14,18 +14,27 @@
 #define I2S_RX_NODE  DT_ALIAS(i2s_rx)
 #define I2S_TX_NODE  DT_ALIAS(i2s_tx)
 
-#define SAMPLE_FREQUENCY    16000
+#define SAMPLE_FREQUENCY    48000
 #define SAMPLE_BIT_WIDTH    16
 #define BYTES_PER_SAMPLE    sizeof(int16_t)
 #define NUMBER_OF_CHANNELS  2
 /* Such block length provides an echo with the delay of 100 ms. */
 #define SAMPLES_PER_BLOCK   ((SAMPLE_FREQUENCY / 10) * NUMBER_OF_CHANNELS)
-#define INITIAL_BLOCKS      2
+#define INITIAL_BLOCKS      4
 #define TIMEOUT             1000
 
 #define BLOCK_SIZE  (BYTES_PER_SAMPLE * SAMPLES_PER_BLOCK)
 #define BLOCK_COUNT (INITIAL_BLOCKS + 4)
-K_MEM_SLAB_DEFINE_STATIC(mem_slab, BLOCK_SIZE, BLOCK_COUNT, 4);
+
+#ifdef CONFIG_SAMPLE_USE_CODEC_CLOCK
+#define CODEC_CLK_OPTS (I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONTROLLER)
+#define I2S_CLK_OPTS   (I2S_OPT_FRAME_CLK_TARGET     | I2S_OPT_BIT_CLK_TARGET)
+#else
+#define CODEC_CLK_OPTS (I2S_OPT_FRAME_CLK_TARGET     | I2S_OPT_BIT_CLK_TARGET)
+#define I2S_CLK_OPTS   (I2S_OPT_FRAME_CLK_CONTROLLER | I2S_OPT_BIT_CLK_CONTROLLER)
+#endif
+
+K_MEM_SLAB_DEFINE_IN_SECT_STATIC(mem_slab, __nocache, BLOCK_SIZE, BLOCK_COUNT, 4);
 
 static bool configure_streams(const struct device *i2s_dev_rx,
 				const struct device *i2s_dev_tx,
@@ -148,7 +157,7 @@ int main(void)
 	audio_cfg.dai_cfg.i2s.word_size = SAMPLE_BIT_WIDTH;
 	audio_cfg.dai_cfg.i2s.channels =  2;
 	audio_cfg.dai_cfg.i2s.format = I2S_FMT_DATA_FORMAT_I2S;
-	audio_cfg.dai_cfg.i2s.options = I2S_OPT_FRAME_CLK_CONTROLLER;
+	audio_cfg.dai_cfg.i2s.options = CODEC_CLK_OPTS;
 	audio_cfg.dai_cfg.i2s.frame_clk_freq = SAMPLE_FREQUENCY;
 	audio_cfg.dai_cfg.i2s.mem_slab = &mem_slab;
 	audio_cfg.dai_cfg.i2s.block_size = BLOCK_SIZE;
@@ -158,7 +167,7 @@ int main(void)
 	config.word_size = SAMPLE_BIT_WIDTH;
 	config.channels = NUMBER_OF_CHANNELS;
 	config.format = I2S_FMT_DATA_FORMAT_I2S;
-	config.options = I2S_OPT_BIT_CLK_CONTROLLER | I2S_OPT_FRAME_CLK_CONTROLLER;
+	config.options = I2S_CLK_OPTS;
 	config.frame_clk_freq = SAMPLE_FREQUENCY;
 	config.mem_slab = &mem_slab;
 	config.block_size = BLOCK_SIZE;

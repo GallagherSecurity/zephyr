@@ -1,7 +1,7 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2022 Intel Corporation
- * SPDX-FileCopyrightText: <text>Copyright (c) 2026 Infineon Technologies AG,
- * or an affiliate of Infineon Technologies AG. All rights reserved.</text>
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Infineon Technologies AG,
+ * SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -9,6 +9,7 @@
 /**
  * @file
  * @brief RTIO Submission Queue Events and Related Functions
+ * @ingroup rtio
  */
 
 
@@ -107,10 +108,13 @@ extern "C" {
 /**
  * @brief The SQE should not execute if possible
  *
- * If possible (not yet executed), the SQE should be canceled by flagging it as failed and returning
- * -ECANCELED as the result.
+ * @deprecated Cancellation state moved into the atomic status word of the
+ * owning rtio_iodev_sqe. Request cancellation with rtio_sqe_cancel() and
+ * check it with rtio_iodev_sqe_is_canceled(). Setting this flag before
+ * submit still cancels the submission, but reading it no longer reflects
+ * cancellation requested at runtime.
  */
-#define RTIO_SQE_CANCELED BIT(3)
+#define RTIO_SQE_CANCELED BIT(3) __DEPRECATED_MACRO
 
 /**
  * @brief The SQE should continue producing CQEs until canceled
@@ -235,6 +239,11 @@ extern "C" {
 #define RTIO_IODEV_I3C_NBCH BIT(4)
 
 /**
+ * @brief Equivalent to the I3C_MSG_NOACK_EXPECTED
+ */
+#define RTIO_IODEV_I3C_NOACK_EXPECTED BIT(5)
+
+/**
  * @brief I3C HDR Mode Mask
  */
 #define RTIO_IODEV_I3C_HDR_MODE_MASK GENMASK(15, 8)
@@ -299,6 +308,30 @@ typedef void (*rtio_callback_t)(struct rtio *r, const struct rtio_sqe *sqe, int 
 typedef void (*rtio_signaled_t)(struct rtio_iodev_sqe *iodev_sqe, void *userdata);
 
 /**
+ * @brief Opaque identity for a submission queue entry
+ *
+ * Encodes the entry's pool block index and generation as
+ * @c (block_index << 16) | generation. Unlike a raw @ref rtio_sqe pointer a
+ * handle can be validated (bounds + generation) before the target is touched,
+ * so a stale handle to a completed-and-recycled entry is safely rejected rather
+ * than dereferenced. Used as the identity primitive for cancellation.
+ *
+ * @see rtio_sqe_handle()
+ * @see rtio_iodev_sqe_from_handle()
+ */
+typedef uint32_t rtio_sqe_handle_t;
+
+/**
+ * @brief A handle value that never refers to a live submission
+ *
+ * Resolving this value with rtio_iodev_sqe_from_handle() always yields NULL, so
+ * it is safe to use as a sentinel for "no submission" and to pass to
+ * rtio_sqe_cancel() (where it is a satisfied no-op). Its block index is out of
+ * range for any pool.
+ */
+#define RTIO_SQE_HANDLE_INVALID ((rtio_sqe_handle_t)UINT32_MAX)
+
+/**
  * @brief A submission queue event
  */
 struct rtio_sqe {
@@ -321,6 +354,7 @@ struct rtio_sqe {
 	 */
 	void *userdata;
 
+	/** Operation specific arguments, selected by the op code */
 	union {
 
 		/** OP_TX */
@@ -343,7 +377,7 @@ struct rtio_sqe {
 
 		/** OP_CALLBACK */
 		struct {
-			rtio_callback_t callback;
+			rtio_callback_t callback; /**< Function to run */
 			void *arg0; /**< Last argument given to callback */
 		} callback;
 
@@ -357,8 +391,7 @@ struct rtio_sqe {
 #ifdef CONFIG_RTIO_OP_DELAY
 		/** OP_DELAY */
 		struct {
-			k_timeout_t timeout; /**< Delay timeout. */
-			struct _timeout to; /**< Timeout struct. Used internally. */
+			k_timeout_t timeout; /**< Delay timeout (input). */
 		} delay;
 #endif
 
@@ -368,23 +401,55 @@ struct rtio_sqe {
 		/** OP_I3C_CONFIGURE */
 		struct {
 			/* enum i3c_config_type type; */
-			int type;
-			void *config;
+			int type; /**< Configuration type, an enum i3c_config_type value */
+			void *config; /**< Configuration to apply */
 		} i3c_config;
 
 		/** OP_I3C_CCC */
 		/* struct i3c_ccc_payload *ccc_payload; */
 		void *ccc_payload;
-
-		/** OP_AWAIT */
-		struct {
-			atomic_t ok;
-			rtio_signaled_t callback;
-			void *userdata;
-		} await;
 	};
 };
 
+
+/**
+ * @name rtio_iodev_sqe status word bits
+ *
+ * The status word carries the entry's identity and lifetime independently of
+ * the immutable @ref rtio_sqe. The generation is bumped every time the entry is
+ * returned to the pool so any handle captured against a prior occupant no longer
+ * matches.
+ * @{
+ */
+/** Generation counter; bumped on free, compared against a handle's generation */
+#define RTIO_SQE_GEN_MASK GENMASK(15, 0)
+/** Set while the entry is allocated from the pool (i.e. a live submission) */
+#define RTIO_SQE_ALLOCD   BIT(16)
+/** Set when cancellation of the submission has been requested */
+#define RTIO_SQE_STATUS_CANCELED BIT(17)
+/** @} */
+
+/**
+ * @brief Pool block index encoded in a handle
+ *
+ * @param handle Handle previously returned by rtio_sqe_handle()
+ * @return The entry's pool block index
+ */
+static inline uint16_t rtio_sqe_handle_index(rtio_sqe_handle_t handle)
+{
+	return (uint16_t)(handle >> 16);
+}
+
+/**
+ * @brief Generation counter encoded in a handle
+ *
+ * @param handle Handle previously returned by rtio_sqe_handle()
+ * @return The entry's generation at the time the handle was captured
+ */
+static inline uint16_t rtio_sqe_handle_generation(rtio_sqe_handle_t handle)
+{
+	return (uint16_t)(handle & RTIO_SQE_GEN_MASK);
+}
 
 /**
  * @brief IO device submission queue entry
@@ -392,10 +457,43 @@ struct rtio_sqe {
  * May be cast safely to and from a rtio_sqe as they occupy the same memory provided by the pool
  */
 struct rtio_iodev_sqe {
+	/** The submission queue entry this wraps */
 	struct rtio_sqe sqe;
+	/** Node used to link the entry into the pool free list and iodev queues */
 	struct mpsc_node q;
+	/** Next entry in a chained or transactional sequence, NULL if none */
 	struct rtio_iodev_sqe *next;
+	/** RTIO context that owns this entry */
 	struct rtio *r;
+
+	/** Identity + lifetime word (generation | ALLOCD), see RTIO_SQE_* bits above */
+	atomic_t status;
+
+	/**
+	 * Runtime scratch state that the subsystem/driver mutates while it owns
+	 * the submission. Kept out of @ref rtio_sqe so the submission description
+	 * stays immutable to drivers after submit. The members are mutually
+	 * exclusive per op and are zeroed when the entry is allocated from the pool.
+	 */
+	union {
+		/** OP_RX buffer bound at runtime (see @ref RTIO_SQE_MEMPOOL_BUFFER) */
+		struct {
+			uint8_t *buf;     /**< Buffer allocated for the read */
+			uint32_t buf_len; /**< Length of the allocated buffer */
+		} rx_bind;
+
+		/** OP_AWAIT signaling state */
+		struct {
+			atomic_t ok;              /**< Set once the awaited signal arrives */
+			rtio_signaled_t callback; /**< Invoked when the entry is signaled */
+			void *userdata;           /**< Opaque pointer passed to the callback */
+		} await;
+
+#ifdef CONFIG_RTIO_OP_DELAY
+		/** OP_DELAY absolute expiration */
+		k_timepoint_t delay_expiry;
+#endif
+	} rt;
 };
 
 
@@ -408,7 +506,7 @@ struct rtio_iodev_sqe {
 #define RTIO_CACHE_LINE_SIZE 64
 #endif
 BUILD_ASSERT(sizeof(struct rtio_iodev_sqe) <= RTIO_CACHE_LINE_SIZE,
-	"RTIO performs best when the submissions queue entries are less than a cache line")
+	"RTIO performs best when the submissions queue entries are less than a cache line");
 #endif
 /** @endcond */
 
@@ -425,10 +523,12 @@ static inline void rtio_sqe_prep_nop(struct rtio_sqe *sqe,
 	sqe->userdata = userdata;
 }
 
+
 /**
- * @brief Prepare a read op submission
+ * @cond ignore
+ * @brief Common helper for prep read family of functions
  */
-static inline void rtio_sqe_prep_read(struct rtio_sqe *sqe,
+static inline void _rtio_sqe_prep_read(struct rtio_sqe *sqe,
 				      const struct rtio_iodev *iodev,
 				      int8_t prio,
 				      uint8_t *buf,
@@ -443,6 +543,22 @@ static inline void rtio_sqe_prep_read(struct rtio_sqe *sqe,
 	sqe->rx.buf = buf;
 	sqe->userdata = userdata;
 }
+/** @endcond */
+
+/**
+ * @brief Prepare a read op submission
+ */
+static inline void rtio_sqe_prep_read(struct rtio_sqe *sqe,
+				      const struct rtio_iodev *iodev,
+				      int8_t prio,
+				      uint8_t *buf,
+				      uint32_t len,
+				      void *userdata)
+{
+	__ASSERT_NO_MSG(len > 0 && buf != NULL);
+
+	_rtio_sqe_prep_read(sqe, iodev, prio, buf, len, userdata);
+}
 
 /**
  * @brief Prepare a read op submission with context's mempool
@@ -453,10 +569,17 @@ static inline void rtio_sqe_prep_read_with_pool(struct rtio_sqe *sqe,
 						const struct rtio_iodev *iodev, int8_t prio,
 						void *userdata)
 {
-	rtio_sqe_prep_read(sqe, iodev, prio, NULL, 0, userdata);
+	_rtio_sqe_prep_read(sqe, iodev, prio, NULL, 0, userdata);
 	sqe->flags = RTIO_SQE_MEMPOOL_BUFFER;
 }
 
+/**
+ * @brief Prepare a multishot read op submission with context's mempool
+ *
+ * The submission keeps producing completions until it is canceled.
+ *
+ * @see rtio_sqe_prep_read_with_pool()
+ */
 static inline void rtio_sqe_prep_read_multishot(struct rtio_sqe *sqe,
 						const struct rtio_iodev *iodev, int8_t prio,
 						void *userdata)
@@ -475,6 +598,8 @@ static inline void rtio_sqe_prep_write(struct rtio_sqe *sqe,
 				       uint32_t len,
 				       void *userdata)
 {
+	__ASSERT_NO_MSG(len > 0 && buf != NULL);
+
 	memset(sqe, 0, sizeof(struct rtio_sqe));
 	sqe->op = RTIO_OP_TX;
 	sqe->prio = prio;
@@ -502,6 +627,7 @@ static inline void rtio_sqe_prep_tiny_write(struct rtio_sqe *sqe,
 					    void *userdata)
 {
 	__ASSERT_NO_MSG(tiny_write_len <= sizeof(sqe->tiny_tx.buf));
+	__ASSERT_NO_MSG(tiny_write_len > 0 && tiny_write_data != NULL);
 
 	memset(sqe, 0, sizeof(struct rtio_sqe));
 	sqe->op = RTIO_OP_TINY_TX;
@@ -564,6 +690,8 @@ static inline void rtio_sqe_prep_transceive(struct rtio_sqe *sqe,
 					    uint32_t buf_len,
 					    void *userdata)
 {
+	__ASSERT_NO_MSG(buf_len > 0 && tx_buf != NULL && rx_buf != NULL);
+
 	memset(sqe, 0, sizeof(struct rtio_sqe));
 	sqe->op = RTIO_OP_TXRX;
 	sqe->prio = prio;
@@ -645,6 +773,14 @@ static inline void rtio_sqe_prep_await_executor(struct rtio_sqe *sqe, int8_t pri
  * @param userdata User supplied pointer to associated data
  */
 #ifdef CONFIG_RTIO_OP_DELAY
+/**
+ * @brief Default timeout iodev backing RTIO_OP_DELAY submissions
+ *
+ * Delay operations are handled by a subsystem-provided timeout iodev rather
+ * than as an executor special case. See subsys/rtio/rtio_timeout.c.
+ */
+extern struct rtio_iodev rtio_timeout_iodev;
+
 static inline void rtio_sqe_prep_delay(struct rtio_sqe *sqe,
 				       k_timeout_t timeout,
 				       void *userdata)
@@ -652,7 +788,7 @@ static inline void rtio_sqe_prep_delay(struct rtio_sqe *sqe,
 	memset(sqe, 0, sizeof(struct rtio_sqe));
 	sqe->op = RTIO_OP_DELAY;
 	sqe->prio = 0;
-	sqe->iodev = NULL;
+	sqe->iodev = &rtio_timeout_iodev;
 	sqe->delay.timeout = timeout;
 	sqe->userdata = userdata;
 }
@@ -744,6 +880,37 @@ static inline struct rtio_iodev_sqe *rtio_iodev_sqe_next(const struct rtio_iodev
 }
 
 /**
+ * @brief Check whether cancellation of a submission has been requested
+ *
+ * Cancellation state lives in the entry's atomic status word rather than in
+ * the immutable @ref rtio_sqe, so it can be requested from any context while
+ * the submission is in flight. Drivers servicing long-running submissions
+ * (e.g. streams) should check this between steps and stop early when it
+ * returns true.
+ *
+ * @param iodev_sqe Submission queue entry
+ * @retval true Cancellation has been requested
+ * @retval false The submission has not been canceled
+ */
+static inline bool rtio_iodev_sqe_is_canceled(const struct rtio_iodev_sqe *iodev_sqe)
+{
+	return (atomic_get(&iodev_sqe->status) & RTIO_SQE_STATUS_CANCELED) != 0;
+}
+
+/**
+ * @brief Mark a submission canceled
+ *
+ * Sets the canceled bit in the entry's atomic status word. Internal helper for
+ * the cancellation paths; users request cancellation with rtio_sqe_cancel().
+ *
+ * @param iodev_sqe Submission queue entry
+ */
+static inline void rtio_iodev_sqe_set_canceled(struct rtio_iodev_sqe *iodev_sqe)
+{
+	atomic_or(&iodev_sqe->status, RTIO_SQE_STATUS_CANCELED);
+}
+
+/**
  * @brief Await an AWAIT SQE signal from RTIO IODEV
  *
  * If the SQE is already signaled, the callback is called immediately. Otherwise the
@@ -757,10 +924,10 @@ static inline void rtio_iodev_sqe_await_signal(struct rtio_iodev_sqe *iodev_sqe,
 					       rtio_signaled_t callback,
 					       void *userdata)
 {
-	iodev_sqe->sqe.await.callback = callback;
-	iodev_sqe->sqe.await.userdata = userdata;
+	iodev_sqe->rt.await.callback = callback;
+	iodev_sqe->rt.await.userdata = userdata;
 
-	if (!atomic_cas(&iodev_sqe->sqe.await.ok, 0, 1)) {
+	if (!atomic_cas(&iodev_sqe->rt.await.ok, 0, 1)) {
 		callback(iodev_sqe, userdata);
 	}
 }
@@ -785,6 +952,22 @@ static inline struct rtio_iodev_sqe *rtio_sqe_pool_alloc(struct rtio_sqe_pool *p
 
 	struct rtio_iodev_sqe *iodev_sqe = CONTAINER_OF(node, struct rtio_iodev_sqe, q);
 
+	/* Reset the runtime scratch so per-op state (await ok, mempool binding)
+	 * starts clean for this allocation.
+	 */
+	memset(&iodev_sqe->rt, 0, sizeof(iodev_sqe->rt));
+
+	/* The chain link is only valid once the executor links the entry at
+	 * submit time; clear it so a cancel before then does not walk the
+	 * previous occupant's chain.
+	 */
+	iodev_sqe->next = NULL;
+
+	/* Mark the slot live. The generation persists from the previous free so a
+	 * handle captured against the prior occupant no longer matches.
+	 */
+	atomic_or(&iodev_sqe->status, RTIO_SQE_ALLOCD);
+
 	pool->pool_free--;
 
 	return iodev_sqe;
@@ -792,6 +975,13 @@ static inline struct rtio_iodev_sqe *rtio_sqe_pool_alloc(struct rtio_sqe_pool *p
 
 static inline void rtio_sqe_pool_free(struct rtio_sqe_pool *pool, struct rtio_iodev_sqe *iodev_sqe)
 {
+	/* Bump the generation and clear ALLOCD so any outstanding handle to this
+	 * slot is rejected by rtio_iodev_sqe_from_handle() once it is recycled.
+	 */
+	atomic_val_t gen = (atomic_get(&iodev_sqe->status) + 1) & RTIO_SQE_GEN_MASK;
+
+	atomic_set(&iodev_sqe->status, gen);
+
 	mpsc_push(&pool->free_q, &iodev_sqe->q);
 
 	pool->pool_free++;

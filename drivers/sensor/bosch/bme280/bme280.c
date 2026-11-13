@@ -15,6 +15,7 @@
 #include <zephyr/pm/device.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/__assert.h>
+#include <zephyr/sys/util.h>
 
 #include <zephyr/logging/log.h>
 
@@ -168,6 +169,7 @@ int bme280_sample_fetch_helper(const struct device *dev,
 	uint8_t buf[8];
 	int32_t adc_press, adc_temp, adc_humidity;
 	uint32_t poll_timeout;
+	uint32_t comp_press;
 	int size = 6;
 	int ret;
 
@@ -202,7 +204,14 @@ int bme280_sample_fetch_helper(const struct device *dev,
 	adc_temp = (buf[3] << 12) | (buf[4] << 4) | (buf[5] >> 4);
 
 	reading->comp_temp = bme280_compensate_temp(dev_data, adc_temp);
-	reading->comp_press = bme280_compensate_press(dev_data, adc_press);
+
+	comp_press = bme280_compensate_press(dev_data, adc_press);
+	if (comp_press == 0) {
+		LOG_ERR("Pressure compensation failed");
+		return -EIO;
+	}
+
+	reading->comp_press = comp_press;
 
 	if (dev_data->chip_id == BME280_CHIP_ID) {
 		adc_humidity = (buf[6] << 8) | buf[7];
@@ -318,8 +327,9 @@ static int bme280_read_compensation(const struct device *dev)
 
 		data->dig_h2 = (hbuf[1] << 8) | hbuf[0];
 		data->dig_h3 = hbuf[2];
-		data->dig_h4 = (hbuf[3] << 4) | (hbuf[4] & 0x0F);
-		data->dig_h5 = ((hbuf[4] >> 4) & 0x0F) | (hbuf[5] << 4);
+		/* dig_h4 and dig_h5 are signed 12-bit values */
+		data->dig_h4 = sign_extend((hbuf[3] << 4) | (hbuf[4] & 0x0F), 11);
+		data->dig_h5 = sign_extend(((hbuf[4] >> 4) & 0x0F) | (hbuf[5] << 4), 11);
 		data->dig_h6 = hbuf[6];
 	}
 

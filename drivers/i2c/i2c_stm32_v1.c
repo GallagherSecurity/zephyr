@@ -10,20 +10,22 @@
 
 #include <zephyr/drivers/clock_control/stm32_clock_control.h>
 #include <zephyr/drivers/clock_control.h>
-#include <zephyr/sys/util.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+#include <zephyr/pm/device_runtime.h>
+#include <zephyr/sys/util.h>
+
 #include <soc.h>
 #include <stm32_bitops.h>
 #include <stm32_ll_i2c.h>
-#include <errno.h>
-#include <zephyr/drivers/i2c.h>
 
-#define LOG_LEVEL CONFIG_I2C_LOG_LEVEL
-#include <zephyr/logging/log.h>
-LOG_MODULE_REGISTER(i2c_ll_stm32_v1);
+#include <errno.h>
 
 #include "i2c_stm32.h"
 #include "i2c-priv.h"
+
+LOG_MODULE_REGISTER(i2c_ll_stm32_v1, CONFIG_I2C_LOG_LEVEL);
 
 #define I2C_STM32_TIMEOUT_USEC  1000
 #define I2C_REQUEST_WRITE       0x00
@@ -116,7 +118,6 @@ static void i2c_stm32_reset(const struct device *dev)
 	stm32_reg_write(&i2c->FLTR, fltr);
 #endif
 }
-
 
 static void i2c_stm32_controller_finish(const struct device *dev)
 {
@@ -437,7 +438,6 @@ static inline void handle_btf(const struct device *dev)
 	}
 }
 
-
 #if defined(CONFIG_I2C_TARGET)
 static void i2c_stm32_target_event(const struct device *dev)
 {
@@ -510,11 +510,24 @@ int i2c_stm32_target_register(const struct device *dev, struct i2c_target_config
 		return -EBUSY;
 	}
 
+	if ((config->flags & I2C_TARGET_FLAGS_ADDR_10_BITS) != 0) {
+		return -ENOTSUP;
+	}
+
 	bitrate_cfg = i2c_map_dt_bitrate(cfg->bitrate);
 
+	k_sem_take(&data->bus_mutex, K_FOREVER);
 	ret = i2c_stm32_runtime_configure(dev, bitrate_cfg);
+	k_sem_give(&data->bus_mutex);
+
 	if (ret < 0) {
 		LOG_ERR("i2c: failure initializing");
+		return ret;
+	}
+
+	ret = pm_device_runtime_get(dev);
+	if (ret < 0) {
+		LOG_ERR_PM_DEVICE_RUNTIME_GET(dev, ret);
 		return ret;
 	}
 
@@ -522,9 +535,6 @@ int i2c_stm32_target_register(const struct device *dev, struct i2c_target_config
 
 	LL_I2C_Enable(i2c);
 
-	if (data->target_cfg->flags == I2C_TARGET_FLAGS_ADDR_10_BITS)	{
-		return -ENOTSUP;
-	}
 	LL_I2C_SetOwnAddress1(i2c, config->address << 1U, LL_I2C_OWNADDRESS1_7BIT);
 	data->target_attached = true;
 
@@ -559,6 +569,8 @@ int i2c_stm32_target_unregister(const struct device *dev, struct i2c_target_conf
 	if (!data->smbalert_active) {
 		LL_I2C_Disable(i2c);
 	}
+
+	(void)pm_device_runtime_put(dev);
 
 	data->target_attached = false;
 
@@ -637,11 +649,10 @@ int i2c_stm32_error(const struct device *dev)
 
 	if (LL_I2C_IsActiveFlag_BERR(i2c)) {
 		LL_I2C_ClearFlag_BERR(i2c);
-		/* STM32 I2C V1 errata: Spurious Bus Error detection in
-		 * controller mode. Multiple errata sheets document this:
-		 *   - ES0182 (STM32F405/407) §2.10.1
-		 *   - ES0305 (STM32F412)     §2.11.1
-		 *   - ES0206 (STM32F2)       §2.10.1
+		/* Address "Spurious Bus Error detection in controller mode"
+		 * erratum, that affects STM32 I2C v1 controller, referenced
+		 * in multiple errata sheets document like:
+		 * - ES0182 (STM32F41x/41x) Rev 18, section 2.10.1
 		 *
 		 * Workaround: clear the BERR flag and let the ongoing
 		 * transfer continue. If a real bus error has occurred,
@@ -693,13 +704,14 @@ end:
 static int32_t i2c_stm32_msg_write(const struct device *dev, struct i2c_msg *msg,
 				   uint8_t *next_msg_flags, uint16_t saddr)
 {
+	const struct i2c_stm32_config *cfg = dev->config;
 	struct i2c_stm32_data *data = dev->data;
 
 	msg_init(dev, msg, next_msg_flags, saddr, I2C_REQUEST_WRITE);
 
 	i2c_stm32_enable_transfer_interrupts(dev);
 
-	if (k_sem_take(&data->device_sync_sem, I2C_TRANSFER_TIMEOUT) != 0) {
+	if (k_sem_take(&data->device_sync_sem, cfg->transfer_timeout) != 0) {
 		LOG_DBG("%s: WRITE timeout", __func__);
 		i2c_stm32_reset(dev);
 		return -EIO;
@@ -720,7 +732,7 @@ static int32_t i2c_stm32_msg_read(const struct device *dev, struct i2c_msg *msg,
 	i2c_stm32_enable_transfer_interrupts(dev);
 	LL_I2C_EnableIT_RX(i2c);
 
-	if (k_sem_take(&data->device_sync_sem, I2C_TRANSFER_TIMEOUT) != 0) {
+	if (k_sem_take(&data->device_sync_sem, cfg->transfer_timeout) != 0) {
 		LOG_DBG("%s: READ timeout", __func__);
 		i2c_stm32_reset(dev);
 		return -EIO;

@@ -149,8 +149,8 @@ Supported Features
 Bluetooth® and IEEE 802.15.4 support
 ------------------------------------
 
-Bluetooth® Low Energy and IEEE 802.15.4 support are enabled on nucleo_wba55cg. To build a zephyr sample
-using this board, you first need to install Bluetooth® and/or IEEE 802.15.4 Controller libraries available
+Bluetooth® Low Energy and IEEE 802.15.4 support are enabled on nucleo_wba55cg. To build a Zephyr sample
+using this board you first need to install Bluetooth® and/or IEEE 802.15.4 Controller libraries available
 in Zephyr as binary blobs.
 
 To fetch Binary Blobs:
@@ -158,6 +158,33 @@ To fetch Binary Blobs:
 .. code-block:: console
 
    west blobs fetch hal_stm32
+
+Secure bootloader
+=================
+
+Default Zephyr bootloader
+-------------------------
+
+.. |st_board_name| replace:: Nucleo WBA55CG
+.. |st_board_target| replace:: nucleo_wba55cg
+
+.. include:: ../../common/doc/stm32_common_doc.rst.inc
+  :start-after: stm32_default_zephyr_bootloader_start
+  :end-before: stm32_default_zephyr_bootloader_end
+
+.. include:: ../../common/doc/stm32_common_doc.rst.inc
+  :start-after: stm32wba_default_zephyr_fota_start
+  :end-before: stm32wba_default_zephyr_fota_end
+
+Low Power
+=========
+
+.. |stm32wba_lp_board_name| replace:: Nucleo WBA55CG
+.. |stm32wba_lp_board_target| replace:: nucleo_wba55cg
+
+.. include:: ../../common/doc/stm32_common_doc.rst.inc
+  :start-after: stm32wba_low_power_start
+  :end-before: stm32wba_low_power_end
 
 Connections and IOs
 ===================

@@ -839,6 +839,7 @@ int bt_has_client_cb_register(const struct bt_has_client_cb *cb)
 int bt_has_client_discover(struct bt_conn *conn)
 {
 	struct bt_has_client *inst;
+	struct bt_conn *ref;
 	int err;
 
 	LOG_DBG("conn %p", (void *)conn);
@@ -858,13 +859,25 @@ int bt_has_client_discover(struct bt_conn *conn)
 		return -EALREADY;
 	}
 
-	inst->conn = bt_conn_ref(conn);
+	ref = bt_conn_ref(conn);
+	if (ref == NULL) {
+		err = -ENOTCONN;
+		goto cleanup;
+	}
+
+	inst->conn = ref;
 
 	err = features_discover(inst);
 	if (err != 0) {
-		atomic_clear_bit(inst->flags, HAS_CLIENT_DISCOVER_IN_PROGRESS);
+		bt_conn_unref(inst->conn);
+		inst->conn = NULL;
+		goto cleanup;
 	}
 
+	return 0;
+
+cleanup:
+	atomic_clear_bit(inst->flags, HAS_CLIENT_DISCOVER_IN_PROGRESS);
 	return err;
 }
 
@@ -990,10 +1003,15 @@ int bt_has_client_preset_prev(struct bt_has *has, bool sync)
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
-	struct bt_has_client *inst = inst_by_conn(conn);
+	struct bt_has_client *inst;
 
 	ARG_UNUSED(reason);
 
+	if (!bt_conn_is_type(conn, BT_CONN_TYPE_LE)) {
+		return;
+	}
+
+	inst = inst_by_conn(conn);
 	if (!inst) {
 		return;
 	}

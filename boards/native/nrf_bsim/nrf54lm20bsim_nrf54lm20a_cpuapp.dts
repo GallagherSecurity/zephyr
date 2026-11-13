@@ -24,6 +24,7 @@
 
 	/delete-node/ cpus;
 	/delete-node/ sw-pwm;
+	/delete-node/ ipc;
 
 	soc {
 		/delete-node/ memory@20000000;
@@ -118,6 +119,7 @@
 
 &gpio2 {
 	status = "okay";
+	/delete-property/ hspadctrl-supported;
 };
 
 &gpiote20 {
@@ -140,5 +142,17 @@
 };
 
 &clock {
+	status = "okay";
+};
+
+&xo {
+	status = "okay";
+};
+
+&lfclk {
+	status = "okay";
+};
+
+&xo24m {
 	status = "okay";
 };

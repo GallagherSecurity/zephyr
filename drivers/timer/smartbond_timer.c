@@ -8,9 +8,8 @@
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/smartbond_clock_control.h>
 #include <zephyr/drivers/timer/system_timer.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/spinlock.h>
-#include <cmsis_core.h>
 #include <zephyr/irq.h>
 #include <da1469x_pdc.h>
 
@@ -103,18 +102,14 @@ static void schedule_next_interrupt(uint32_t ticks)
 	 * not but time expired anyway so make sure that interrupt is pending.
 	 */
 	if ((int32_t)(target_val - timer_val_32_noupdate() - 1) < 0) {
-		NVIC_SetPendingIRQ(TIMER2_IRQn);
+		k_irq_set_pending(TIMER2_IRQn);
 	}
 }
 
-void sys_clock_set_timeout(int32_t ticks, bool idle)
+void sys_clock_set_timeout(uint32_t ticks, bool idle)
 {
 	if (!IS_ENABLED(CONFIG_TICKLESS_KERNEL)) {
 		return;
-	}
-
-	if (ticks == K_TICKS_FOREVER) {
-		/* FIXME we could disable timer here */
 	}
 
 	/*
@@ -150,8 +145,7 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 			ticks = watchdog_expire_ticks - 2;
 		}
 	}
-	ticks = (ticks == K_TICKS_FOREVER) ? MAX_TICKS : ticks;
-	ticks = CLAMP(ticks - 1, 0, (int32_t)MAX_TICKS);
+	ticks = CLAMP(ticks, 1, MAX_TICKS) - 1;
 
 	schedule_next_interrupt(ticks);
 }

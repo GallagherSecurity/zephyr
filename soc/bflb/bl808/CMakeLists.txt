@@ -7,18 +7,8 @@ zephyr_sources(soc.c)
 
 set(SOC_LINKER_SCRIPT ${ZEPHYR_BASE}/include/zephyr/arch/riscv/common/linker.ld CACHE INTERNAL "")
 
-zephyr_code_relocate(
-  FILES ${ZEPHYR_BASE}/arch/riscv/custom/thead/cache_xtheadcmo.c LOCATION ITCM NOKEEP)
-
-# Clock driver code runs from ITCM (needed while switching flash clock), but
-# rodata stays in flash — flash clock is on XCLK before any PLL/BCLK changes,
-# so XIP data reads remain valid throughout reconfiguration.
-zephyr_code_relocate_ifdef(CONFIG_CLOCK_CONTROL_BOUFFALOLAB_BL808
-  FILES ${ZEPHYR_BASE}/drivers/clock_control/clock_control_bl808.c
-  LOCATION ITCM NOKEEP FILTER "\\.text")
-zephyr_code_relocate_ifdef(CONFIG_UART_BFLB LIBRARY drivers__serial LOCATION ITCM NOKEEP)
-zephyr_code_relocate_ifdef(CONFIG_RISCV_MACHINE_TIMER LIBRARY drivers__timer LOCATION ITCM NOKEEP)
-zephyr_code_relocate_ifdef(CONFIG_PINCTRL_BFLB LIBRARY drivers__pinctrl LOCATION ITCM NOKEEP)
-zephyr_code_relocate_ifdef(CONFIG_OTP_BFLB LIBRARY drivers__otp LOCATION ITCM NOKEEP)
-zephyr_code_relocate_ifdef(CONFIG_SOC_FLASH_BFLB FILES ${ZEPHYR_BASE}/drivers/flash/flash_bflb.c
-  LOCATION ITCM NOKEEP)
+if(CONFIG_BT_BFLB_BL808)
+  zephyr_sources(bflb_rf.c)
+  zephyr_sources(ble/btblecontroller_port_hw.c)
+  zephyr_linker_sources(RWDATA bflb_rwdata.ld)
+endif()

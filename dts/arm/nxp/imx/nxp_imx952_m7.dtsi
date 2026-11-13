@@ -208,9 +208,27 @@
 			status = "disabled";
 		};
 
-		edma2: dma@42000000 {
+		edma1: dma@44000000 {
 			compatible = "nxp,mcux-edma";
-			reg = <0x42000000 0x4000>;
+			reg = <0x44000000 0x4000>;
+			#dma-cells = <2>;
+			nxp,version = <4>;
+			dma-channels = <32>;
+			dma-requests = <32>;
+			interrupts = <96 0>, <97 0>, <98 0>, <99 0>,
+				     <100 0>, <101 0>, <102 0>, <103 0>,
+				     <104 0>, <105 0>, <106 0>, <107 0>,
+				     <108 0>, <109 0>, <110 0>, <111 0>,
+				     <112 0>, <113 0>, <114 0>, <115 0>,
+				     <116 0>, <117 0>, <118 0>, <119 0>,
+				     <120 0>, <121 0>, <122 0>, <123 0>,
+				     <124 0>, <125 0>, <126 0>, <126 0>;
+			status = "disabled";
+		};
+
+		edma2: dma@42800000 {
+			compatible = "nxp,mcux-edma";
+			reg = <0x42800000 0x4000>;
 			#dma-cells = <2>;
 			nxp,version = <5>;
 			dma-channels = <64>;
@@ -650,6 +668,20 @@
 			status = "disabled";
 		};
 
+		tstmr1: timer@442c0000 {
+			compatible = "nxp,tstmr";
+			reg = <0x442c0000 0x8>;
+			clock-frequency = <DT_FREQ_M(24)>;
+			status = "disabled";
+		};
+
+		tstmr2: timer@420a0000 {
+			compatible = "nxp,tstmr";
+			reg = <0x420a0000 0x8>;
+			clock-frequency = <DT_FREQ_M(24)>;
+			status = "disabled";
+		};
+
 		i3c1: i3c@44330000 {
 			compatible = "nxp,mcux-i3c";
 			reg = <0x44330000 0x1000>;
@@ -704,6 +736,7 @@
 				reg = <0>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 224 0>;
 			};
 
@@ -712,6 +745,7 @@
 				reg = <1>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 225 0>;
 			};
 
@@ -720,6 +754,7 @@
 				reg = <2>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 226 0>;
 			};
 
@@ -728,6 +763,7 @@
 				reg = <3>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 227 0>;
 			};
 
@@ -736,6 +772,7 @@
 				reg = <4>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 228 0>;
 			};
 
@@ -744,6 +781,7 @@
 				reg = <5>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 229 0>;
 			};
 
@@ -752,6 +790,7 @@
 				reg = <6>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 230 0>;
 			};
 
@@ -760,6 +799,7 @@
 				reg = <7>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 231 0>;
 			};
 
@@ -768,6 +808,7 @@
 				reg = <8>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 232 0>;
 			};
 
@@ -776,6 +817,7 @@
 				reg = <9>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 233 0>;
 			};
 		};
@@ -795,6 +837,7 @@
 				reg = <0>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 214 0>;
 				status = "disabled";
 			};
@@ -804,6 +847,7 @@
 				reg = <1>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 215 0>;
 				status = "disabled";
 			};
@@ -813,6 +857,7 @@
 				reg = <2>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 216 0>;
 				status = "disabled";
 			};
@@ -822,6 +867,7 @@
 				reg = <3>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 217 0>;
 				status = "disabled";
 			};
@@ -831,6 +877,7 @@
 				reg = <4>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 218 0>;
 				status = "disabled";
 			};
@@ -840,6 +887,7 @@
 				reg = <7>;
 				interrupt-controller;
 				#interrupt-cells = <2>;
+				#address-cells = <0>;
 				interrupts-extended = <&nvic 219 0>;
 				status = "disabled";
 			};
@@ -938,6 +986,15 @@
 					status = "disabled";
 				};
 			};
+		};
+
+		sar_adc: adc@44530000 {
+			compatible = "nxp,sar-adc";
+			reg = <0x44530000 DT_SIZE_K(64)>;
+			interrupts = <201 0>;
+			#io-channel-cells = <1>;
+			clocks = <&scmi_clk IMX952_CLK_ADC>;
+			status = "disabled";
 		};
 	};
 };

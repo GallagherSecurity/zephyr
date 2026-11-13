@@ -90,7 +90,7 @@ def test_if_get_command_returns_proper_string_5(patched_which, device: HardwareA
     assert isinstance(device.command, list)
     assert device.command == [
         'west', 'flash', '--no-rebuild', '--build-dir', 'build', '--runner', 'openocd',
-        '--', '--cmd-pre-init', 'cmsis_dap_serial p_id'
+        '--', '--cmd-pre-init', 'adapter serial p_id'
     ]
 
 
@@ -128,6 +128,18 @@ def test_if_get_command_returns_proper_string_8(patched_which, device: HardwareA
     assert device.command == [
         'west', 'flash', '--no-rebuild', '--build-dir', 'build',
         '--runner', 'openocd', '--', '--cmd-pre-init', 'hla_serial p_id'
+    ]
+
+
+@mock.patch('shutil.which', return_value='west')
+def test_if_get_command_returns_proper_string_with_base_params(patched_which, device: HardwareAdapter) -> None:
+    device.device_config.build_dir = Path('build')
+    device.device_config.base_params = ['--base-param1', '--base-param2']
+    device.generate_command()
+    assert isinstance(device.command, list)
+    assert device.command == [
+        'west', 'flash', '--no-rebuild', '--build-dir', 'build',
+        '--runner', 'runner', '--base-param1', '--base-param2'
     ]
 
 

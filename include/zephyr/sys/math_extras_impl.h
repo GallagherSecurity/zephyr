@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#ifndef ZEPHYR_INCLUDE_SYS_MATH_EXTRAS_IMPL_H_
+#define ZEPHYR_INCLUDE_SYS_MATH_EXTRAS_IMPL_H_
+
 /**
  * @file
  * @brief Inline implementation of functions declared in math_extras.h.
@@ -14,6 +17,8 @@
 #endif
 
 #include <zephyr/toolchain.h>
+
+/** @cond INTERNAL_HIDDEN */
 
 /*
  * Force the use of portable C code (no builtins) by defining
@@ -314,3 +319,7 @@ static inline void i128_multiply_i64_i64(int64_t a, int64_t b, int128_t *result)
 #endif /* __has_type_128 */
 
 #undef use_builtin
+
+/** @endcond */
+
+#endif /* ZEPHYR_INCLUDE_SYS_MATH_EXTRAS_IMPL_H_ */

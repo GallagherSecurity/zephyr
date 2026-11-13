@@ -52,6 +52,12 @@
 				status = "disabled";
 				#pwm-cells = <3>;
 			};
+
+			qdec {
+				compatible = "st,stm32-qdec";
+				st,input-filter-level = <NO_FILTER>;
+				status = "disabled";
+			};
 		};
 
 		timers3: timers@40000400 {
@@ -75,6 +81,12 @@
 				status = "disabled";
 				#pwm-cells = <3>;
 			};
+
+			qdec {
+				compatible = "st,stm32-qdec";
+				st,input-filter-level = <NO_FILTER>;
+				status = "disabled";
+			};
 		};
 
 		usart2: serial@40004400 {
@@ -90,11 +102,10 @@
 			compatible = "st,stm32u5-dma";
 			#dma-cells = <3>;
 			reg = <0x40020000 0x1000>;
-			interrupts = <29 0 30 0 31 0 32 0 33 0 34 0 35 0 36 0>;
+			interrupts = <29 0>, <30 0>, <31 0>, <32 0>, <33 0>, <34 0>, <35 0>, <36 0>;
 			clocks = <&rcc STM32_CLOCK(AHB1, 0)>;
 			dma-channels = <8>;
 			dma-requests = <52>;
-			dma-offset = <0>;
 			status = "disabled";
 		};
 
@@ -105,13 +116,15 @@
 			interrupts = <0 0>;
 			status = "disabled";
 		};
-	};
 
-	bt_hci_wba: bt_hci_wba {
-		interrupts = <66 0>;
-	};
+		rng: rng@420c0800 {
+			nist-config = <0x8f01f00>;
+			health-test-config = <0x6688>;
+			noise-source-control = <0xfff>;
+		};
 
-	ieee802154: ieee802154 {
-		interrupts = <66 0>;
+		radio: radio@48020000 {
+			interrupts = <66 0>;
+		};
 	};
 };

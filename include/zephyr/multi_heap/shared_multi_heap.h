@@ -9,8 +9,8 @@
  * @brief Public API for Shared Multi-Heap framework
  */
 
-#ifndef ZEPHYR_INCLUDE_MULTI_HEAP_MANAGER_SMH_H_
-#define ZEPHYR_INCLUDE_MULTI_HEAP_MANAGER_SMH_H_
+#ifndef ZEPHYR_INCLUDE_MULTI_HEAP_SHARED_MULTI_HEAP_H_
+#define ZEPHYR_INCLUDE_MULTI_HEAP_SHARED_MULTI_HEAP_H_
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,6 +58,10 @@ extern "C" {
  *    take care of selecting the correct heap (thus memory region) to carve
  *    memory from, based on the opaque parameter and the runtime state of the
  *    heaps (available memory, heap state, etc...)
+ *
+ * The allocation functions of this interface are safe to call from any
+ * thread and from ISRs. Regions are added at initialization time, from a
+ * single context.
  */
 
 /**
@@ -208,4 +212,4 @@ void *shared_multi_heap_realloc(enum shared_multi_heap_attr attr, void *ptr, siz
 }
 #endif
 
-#endif /* ZEPHYR_INCLUDE_MULTI_HEAP_MANAGER_SMH_H_ */
+#endif /* ZEPHYR_INCLUDE_MULTI_HEAP_SHARED_MULTI_HEAP_H_ */

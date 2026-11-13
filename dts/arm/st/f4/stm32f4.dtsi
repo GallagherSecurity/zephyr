@@ -207,6 +207,7 @@
 			#address-cells = <1>;
 			#size-cells = <1>;
 			reg = <0x40020000 0x2000>;
+			ranges;
 
 			gpioa: gpio@40020000 {
 				compatible = "st,stm32-gpio";
@@ -597,6 +598,7 @@
 			prescaler = <32768>;
 			alarms-count = <2>;
 			alrm-exti-line = <17>;
+			wakeup-source; /* Enable use as system timer companion */
 			status = "disabled";
 
 			bbram: backup_regs {
@@ -606,28 +608,36 @@
 			};
 		};
 
-		adc1: adc@40012000 {
+		adc123_common: adc@40012000 {
 			compatible = "st,stm32f4-adc", "st,stm32-adc";
+			#address-cells = <1>;
+			#size-cells = <1>;
 			reg = <0x40012000 0x400>;
-			clocks = <&rcc STM32_CLOCK(APB2, 8)>;
-			clock-names = "adcx";
-			interrupts = <18 0>;
-			#io-channel-cells = <1>;
+			ranges;
+			st,adc-clock-source = "SYNC";
 			st,adc-resolutions = <12 10 8 6>;
 			sampling-times = <3 15 28 56 84 112 144 480>;
-			st,adc-clock-source = "SYNC";
 			st,adc-sequencer = "programmable";
 			st,adc-oversampler = "none";
 			st,adc-internal-regulator = "none";
 			st,adc-has-injected-support;
 			status = "disabled";
+
+			adc1: adc@40012000 {
+				reg = <0x40012000 0x50>;
+				clocks = <&rcc STM32_CLOCK(APB2, 8)>;
+				clock-names = "adcx";
+				interrupts = <18 0>;
+				#io-channel-cells = <1>;
+				status = "disabled";
+			};
 		};
 
 		dma1: dma@40026000 {
 			compatible = "st,stm32-dma-v1";
 			#dma-cells = <4>;
 			reg = <0x40026000 0x400>;
-			interrupts = <11 0 12 0 13 0 14 0 15 0 16 0 17 0 47 0>;
+			interrupts = <11 0>, <12 0>, <13 0>, <14 0>, <15 0>, <16 0>, <17 0>, <47 0>;
 			clocks = <&rcc STM32_CLOCK(AHB1, 21)>;
 			status = "disabled";
 		};
@@ -636,7 +646,7 @@
 			compatible = "st,stm32-dma-v1";
 			#dma-cells = <4>;
 			reg = <0x40026400 0x400>;
-			interrupts = <56 0 57 0 58 0 59 0 60 0 68 0 69 0 70 0>;
+			interrupts = <56 0>, <57 0>, <58 0>, <59 0>, <60 0>, <68 0>, <69 0>, <70 0>;
 			clocks = <&rcc STM32_CLOCK(AHB1, 22)>;
 			st,mem2mem;
 			status = "disabled";
@@ -651,21 +661,24 @@
 			interrupts = <49 0>;
 			status = "disabled";
 		};
-	};
 
-	pwr: power@40007000 {
-		compatible = "st,stm32-pwr";
-		reg = <0x40007000 0x400>; /* PWR register bank */
-		status = "disabled";
+		pwr: power@40007000 {
+			compatible = "st,stm32-pwr";
+			reg = <0x40007000 0x400>; /* PWR register bank */
 
-		wkup-pins-nb = <1>;
+			wakeup-controller {
+				compatible = "st,stm32f1-pwr-wkupctrl", "st,stm32-pwr-wkupctrl";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				status = "disabled";
 
-		#address-cells = <1>;
-		#size-cells = <0>;
+				st,max-wkup-line-idx = <1>;
 
-		wkup-pin@1 {
-			reg = <0x1>;
-			wkup-gpios = <&gpioa 0 STM32_PWR_WKUP_PIN_NOT_MUXED>;
+				wkup@1 {
+					reg = <0x1>;
+					wkup-gpios = <&gpioa 0 STM32_PWR_WKUP_PIN_NOT_MUXED>;
+				};
+			};
 		};
 	};
 

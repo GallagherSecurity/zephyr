@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "os_wrapper.h"
+#include <os_wrapper.h>
 #include <zephyr/kernel_structs.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(os_if_task);
@@ -72,7 +72,7 @@ int rtos_sched_get_state(void)
 	return RTOS_SCHED_RUNNING;
 }
 
-int rtos_task_create(rtos_task_t *pp_handle, const char *p_name, void (*p_routine)(void *),
+int rtos_task_create(rtos_task_t *pp_handle, const char *p_name, void (*p_routine)(void *p_param),
 		     void *p_param, uint16_t stack_size_in_byte, uint16_t priority)
 {
 	k_tid_t p_thread;
@@ -124,19 +124,19 @@ int rtos_task_delete(rtos_task_t p_handle)
 	bool is_self_delete = (p_free == NULL) || (p_curr == p_free);
 
 	if (is_self_delete) {
+		struct rtos_task_delete_context *ctx = NULL;
 #if (K_HEAP_MEM_POOL_SIZE > 0)
-		struct rtos_task_delete_context *ctx =
-			k_malloc(sizeof(struct rtos_task_delete_context));
-
+		ctx = k_malloc(sizeof(struct rtos_task_delete_context));
+#else
+		LOG_ERR("k_malloc not support.");
+#endif
 		if (ctx) {
 			ctx->thread = p_curr;
 			ctx->stack = (void *)p_curr->stack_info.start;
 			k_work_init(&ctx->work, deferred_task_delete_handler);
 			k_work_submit(&ctx->work);
 		}
-#else
-		LOG_ERR("k_malloc not support.");
-#endif
+
 		k_sleep(K_FOREVER);
 		CODE_UNREACHABLE;
 	} else {

@@ -121,8 +121,9 @@ static int lis2dh_start_trigger_int1(const struct device *dev)
 					 LIS2DH_EN_DRDY1_INT1);
 }
 
-#define LIS2DH_ANYM_CFG (LIS2DH_INT_CFG_ZHIE_ZUPE | LIS2DH_INT_CFG_YHIE_YUPE |\
-			 LIS2DH_INT_CFG_XHIE_XUPE)
+#define LIS2DH_ANYM_CFG (LIS2DH_INT_CFG_ZHIE_ZUPE | LIS2DH_INT_CFG_ZLIE_ZDOWNE |\
+			LIS2DH_INT_CFG_YHIE_YUPE | LIS2DH_INT_CFG_YLIE_YDOWNE |\
+			LIS2DH_INT_CFG_XHIE_XUPE | LIS2DH_INT_CFG_XLIE_XDOWNE)
 
 static inline void setup_int2(const struct device *dev,
 			      bool enable)
@@ -189,8 +190,15 @@ static int lis2dh_trigger_anym_tap_set(const struct device *dev,
 		lis2dh->trig_tap = trig;
 	}
 
-	if ((handler == NULL) || (status < 0)) {
+	if (status < 0) {
 		return status;
+	}
+
+	/* both int2 sources were torn down above, so only stay down if neither
+	 * of them is registered any more
+	 */
+	if ((lis2dh->handler_anymotion == NULL) && (lis2dh->handler_tap == NULL)) {
+		return 0;
 	}
 
 	/* serialize start of int2 in thread to synchronize output sampling

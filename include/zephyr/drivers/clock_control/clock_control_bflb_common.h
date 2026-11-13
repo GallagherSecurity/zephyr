@@ -4,27 +4,45 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* Contains short functions relevant to timing and clocks common to all Bouffalolab platforms */
+/**
+ * @file
+ * @brief Timing and clock helpers common to all Bouffalo Lab platforms.
+ * @ingroup clock_control_bflb
+ */
 
-#ifndef ZEPHYR_INCLUDE_DRIVERS_CLOCK_CONTROL_BFLB_COMMON_H_
-#define ZEPHYR_INCLUDE_DRIVERS_CLOCK_CONTROL_BFLB_COMMON_H_
+#ifndef ZEPHYR_INCLUDE_DRIVERS_CLOCK_CONTROL_CLOCK_CONTROL_BFLB_COMMON_H_
+#define ZEPHYR_INCLUDE_DRIVERS_CLOCK_CONTROL_CLOCK_CONTROL_BFLB_COMMON_H_
 
-/* Common main clock mux (clock_bflb_set_root_clock) */
-/* XCLK is RC32M, main clock is XCLK */
+/**
+ * @defgroup clock_control_bflb Bouffalo Lab
+ * @ingroup clock_control_interface_ext
+ * @{
+ */
+
+/** @name Main clock mux selections (see clock_bflb_set_root_clock()) */
+/** @{ */
+/** XCLK is RC32M, main clock is XCLK. */
 #define BFLB_MAIN_CLOCK_RC32M     0
-/* XCLK is Crystal, main clock is XCLK */
+/** XCLK is the crystal, main clock is XCLK. */
 #define BFLB_MAIN_CLOCK_XTAL      1
-/* XCLK is RC32M, main clock is PLL */
+/** XCLK is RC32M, main clock is the PLL. */
 #define BFLB_MAIN_CLOCK_PLL_RC32M 2
-/* XCLK is Crystal, main clock is PLL */
+/** XCLK is the crystal, main clock is the PLL. */
 #define BFLB_MAIN_CLOCK_PLL_XTAL  3
+/** @} */
 
-/* Function that busy waits for a few cycles */
+/** @brief Busy-wait for a few CPU cycles to let a clock change settle. */
 static inline void clock_bflb_settle(void)
 {
 	__asm__ volatile (".rept 20 ; nop ; .endr");
 }
 
+/**
+ * @brief Select the root (main) clock source.
+ *
+ * @param clock One of the @c BFLB_MAIN_CLOCK_* selections. Out-of-range values fall back to
+ *              @ref BFLB_MAIN_CLOCK_RC32M.
+ */
 static inline void clock_bflb_set_root_clock(uint32_t clock)
 {
 	uint32_t tmp;
@@ -40,6 +58,11 @@ static inline void clock_bflb_set_root_clock(uint32_t clock)
 	clock_bflb_settle();
 }
 
+/**
+ * @brief Get the currently selected root (main) clock source.
+ *
+ * @return One of the @c BFLB_MAIN_CLOCK_* selections.
+ */
 static inline uint32_t clock_bflb_get_root_clock(void)
 {
 	uint32_t tmp;
@@ -51,10 +74,25 @@ static inline uint32_t clock_bflb_get_root_clock(void)
 
 /** @cond INTERNAL_HIDDEN */
 
-/* Avoid overflow when calculating multipliers */
+/* Avoid overflow when calculating multipliers by reducing precision to 100 KHz
+ * Every _value and _base should be a multiple of this to stay exact
+ */
+#define BFLB_MUL_CLK_UNIT	100000U
+
+/* (_value * _top) / _base without 64-bit division. _top is evaluated twice. */
 #define BFLB_MUL_CLK(_value, _top, _base) \
+	((((uint32_t)(_top) / ((uint32_t)(_base) / BFLB_MUL_CLK_UNIT)) * \
+	  ((uint32_t)(_value) / BFLB_MUL_CLK_UNIT)) + \
+	 ((((uint32_t)(_top) % ((uint32_t)(_base) / BFLB_MUL_CLK_UNIT)) * \
+	   ((uint32_t)(_value) / BFLB_MUL_CLK_UNIT)) / \
+	  ((uint32_t)(_base) / BFLB_MUL_CLK_UNIT)))
+
+/* Runnable from XIP (__udivdi3 call from libgcc) */
+#define BFLB_MUL_CLK_XIP(_value, _top, _base) \
 	(((uint64_t)(_value) * (uint64_t)(_top)) / (uint64_t)(_base))
 
 /** @endcond */
 
-#endif /* ZEPHYR_INCLUDE_DRIVERS_CLOCK_CONTROL_BFLB_COMMON_H_ */
+/** @} */
+
+#endif /* ZEPHYR_INCLUDE_DRIVERS_CLOCK_CONTROL_CLOCK_CONTROL_BFLB_COMMON_H_ */

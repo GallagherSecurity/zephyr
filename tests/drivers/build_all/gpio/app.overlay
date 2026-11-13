@@ -407,6 +407,7 @@
 			test_i2c_aw9523b: aw9523b@16 {
 				status = "okay";
 				reg = <0x16>;
+				reset-gpios = <&test_gpio 0 0>;
 				compatible = "awinic,aw9523b";
 
 				aw9523_gpio: gpio {
@@ -414,7 +415,6 @@
 					gpio-controller;
 					#gpio-cells = <2>;
 					int-gpios = <&test_gpio 0 0>;
-					reset-gpios = <&test_gpio 0 0>;
 				};
 			};
 
@@ -494,6 +494,7 @@
 
 			test_i2c_npm1012: pmic@1f {
 				reg = <0x1f>;
+				compatible = "nordic,npm10xx";
 
 				npm1012_gpio: gpio-controller {
 					compatible = "nordic,npm10xx-gpio";
@@ -501,6 +502,27 @@
 					#gpio-cells = <2>;
 					ngpios = <3>;
 				};
+			};
+
+			test_i2c_tla2528: tla2528@20 {
+				compatible = "ti,tla2528";
+				reg = <0x20>;
+
+				test_i2c_tla2528_gpio: gpio {
+					compatible = "ti,tla2528-gpio";
+					gpio-controller;
+					#gpio-cells = <2>;
+					ngpios = <8>;
+				};
+			};
+
+			test_i2c_tca9554: tca9554@21 {
+				status = "okay";
+				compatible = "ti,tca9554";
+				reg = <0x21>;
+				ngpios = <8>;
+				#gpio-cells = <2>;
+				gpio-controller;
 			};
 		};
 

@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2017 Intel Corporation
- * Copyright (c) 2021 Espressif Systems (Shanghai) Co., Ltd.
+ * Copyright (c) 2021-2026 Espressif Systems (Shanghai) Co., Ltd.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -13,7 +13,8 @@
 #include <hal/i2c_ll.h>
 #include <hal/i2c_hal.h>
 #include <hal/gpio_hal.h>
-#include <clk_ctrl_os.h>
+#include <esp_clk_tree.h>
+#include <esp_private/esp_clk_tree_common.h>
 
 #include <soc.h>
 #include <errno.h>
@@ -25,10 +26,25 @@
 #include <zephyr/sys/util.h>
 #include <string.h>
 
+#if CONFIG_PM
+#include <zephyr/pm/policy.h>
+#endif
+
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(i2c_esp32, CONFIG_I2C_LOG_LEVEL);
 
 #include "i2c-priv.h"
+
+#if CONFIG_ESP32_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP && SOC_I2C_SUPPORT_SLEEP_RETENTION
+#define I2C_SLEEP_RETENTION_ENABLED 1
+#else
+#define I2C_SLEEP_RETENTION_ENABLED 0
+#endif
+
+#if I2C_SLEEP_RETENTION_ENABLED
+#include <hal/i2c_periph.h>
+#include <esp_private/sleep_retention.h>
+#endif
 
 #if defined(CONFIG_I2C_TARGET) && SOC_I2C_SUPPORT_SLAVE && SOC_I2C_SLAVE_CAN_GET_STRETCH_CAUSE
 #define I2C_ESP32_TARGET_ENABLED 1
@@ -50,21 +66,13 @@ LOG_MODULE_REGISTER(i2c_esp32, CONFIG_I2C_LOG_LEVEL);
 #define I2C_CLOCK_INVALID                 (-1)
 
 enum i2c_status_t {
-	I2C_STATUS_READ,	/* read status for current master command */
-	I2C_STATUS_WRITE,	/* write status for current master command */
-	I2C_STATUS_IDLE,	/* idle status for current master command */
-	I2C_STATUS_ACK_ERROR,	/* ack error status for current master command */
+	I2C_STATUS_READ,	/* read status for current controller command */
+	I2C_STATUS_WRITE,	/* write status for current controller command */
+	I2C_STATUS_IDLE,	/* idle status for current controller command */
+	I2C_STATUS_ACK_ERROR,	/* ack error status for current controller command */
 	I2C_STATUS_DONE,	/* I2C command done */
 	I2C_STATUS_TIMEOUT,	/* I2C bus status error, and operation timeout */
 };
-
-#ifndef I2C_LL_SUPPORT_HW_CLR_BUS
-struct i2c_esp32_pin {
-	struct gpio_dt_spec gpio;
-	int sig_out;
-	int sig_in;
-};
-#endif
 
 struct i2c_esp32_data {
 	i2c_hal_context_t hal;
@@ -74,12 +82,15 @@ struct i2c_esp32_data {
 	uint32_t dev_config;
 	int cmd_idx;
 	int irq_line;
+#if CONFIG_PM
+	bool pm_policy_state_on;
+#endif
 #if I2C_ESP32_TARGET_ENABLED
 	struct i2c_target_config *target_cfg;
 	bool target_attached;
 	bool target_reading;
 	bool target_writing;
-	bool target_in_master_xfer;
+	bool target_in_controller_xfer;
 #if defined(CONFIG_I2C_TARGET_BUFFER_MODE)
 	bool target_buf_mode;
 	uint32_t target_rx_len;
@@ -91,6 +102,32 @@ struct i2c_esp32_data {
 #endif
 };
 
+#if CONFIG_PM
+static void i2c_esp32_pm_policy_state_lock_get(struct i2c_esp32_data *data)
+{
+	unsigned int key = irq_lock();
+
+	if (!data->pm_policy_state_on) {
+		data->pm_policy_state_on = true;
+		pm_policy_state_all_lock_get();
+	}
+
+	irq_unlock(key);
+}
+
+static void i2c_esp32_pm_policy_state_lock_put(struct i2c_esp32_data *data)
+{
+	unsigned int key = irq_lock();
+
+	if (data->pm_policy_state_on) {
+		data->pm_policy_state_on = false;
+		pm_policy_state_all_lock_put();
+	}
+
+	irq_unlock(key);
+}
+#endif /* CONFIG_PM */
+
 typedef void (*irq_connect_cb)(void);
 
 struct i2c_esp32_config {
@@ -98,8 +135,8 @@ struct i2c_esp32_config {
 
 	const struct device *clock_dev;
 #ifndef I2C_LL_SUPPORT_HW_CLR_BUS
-	const struct i2c_esp32_pin scl;
-	const struct i2c_esp32_pin sda;
+	const struct gpio_dt_spec scl;
+	const struct gpio_dt_spec sda;
 #endif
 	const struct pinctrl_dev_config *pcfg;
 
@@ -135,8 +172,10 @@ static uint32_t i2c_get_src_clk_freq(i2c_clock_source_t clk_src)
 #endif
 #if SOC_I2C_SUPPORT_RTC
 	case I2C_CLK_SRC_RC_FAST:
-		periph_rtc_dig_clk8m_enable();
-		periph_src_clk_hz = periph_rtc_dig_clk8m_get_freq();
+		esp_clk_tree_enable_src(SOC_MOD_CLK_RC_FAST, true);
+		esp_clk_tree_src_get_freq_hz(SOC_MOD_CLK_RC_FAST,
+					     ESP_CLK_TREE_SRC_FREQ_PRECISION_APPROX,
+					     &periph_src_clk_hz);
 		break;
 #endif
 #if SOC_I2C_SUPPORT_REF_TICK
@@ -170,33 +209,36 @@ static i2c_clock_source_t i2c_get_clk_src(uint32_t clk_freq)
 static int i2c_esp32_config_pin(const struct device *dev)
 {
 	const struct i2c_esp32_config *config = dev->config;
-	int ret = 0;
 
 	if (config->index >= SOC_I2C_NUM) {
 		LOG_ERR("Invalid I2C peripheral number");
 		return -EINVAL;
 	}
 
-	gpio_pin_set_dt(&config->sda.gpio, 1);
-	ret = gpio_pin_configure_dt(&config->sda.gpio, GPIO_PULL_UP | GPIO_OUTPUT | GPIO_INPUT);
-	esp_rom_gpio_matrix_out(config->sda.gpio.pin, config->sda.sig_out, 0, 0);
-	esp_rom_gpio_matrix_in(config->sda.gpio.pin, config->sda.sig_in, 0);
-
-	gpio_pin_set_dt(&config->scl.gpio, 1);
-	ret |= gpio_pin_configure_dt(&config->scl.gpio, GPIO_PULL_UP | GPIO_OUTPUT | GPIO_INPUT);
-	esp_rom_gpio_matrix_out(config->scl.gpio.pin, config->scl.sig_out, 0, 0);
-	esp_rom_gpio_matrix_in(config->scl.gpio.pin, config->scl.sig_in, 0);
-
-	return ret;
+	/* Reattach the I2C peripheral signals to SDA/SCL after the bit-bang bus
+	 * recovery in i2c_controller_clear_bus() temporarily drove them as GPIOs.
+	 *
+	 * The previous esp_rom_gpio_matrix_*() reattach passed gpio.pin -- the
+	 * per-controller pin index -- as the absolute GPIO number. That only
+	 * holds for the gpio0 bank (GPIO0..31). For SDA/SCL on gpio1
+	 * (GPIO32..39, pin index 0..7) it rerouted the I2C signals onto
+	 * GPIO0/1 instead; GPIO1 is the default UART0 TX, so recovery hijacked
+	 * the console and the bus was never actually restored.
+	 *
+	 * Reapplying the pinctrl default state restores exactly the mux the
+	 * driver installed at init, regardless of which GPIO bank the pins are
+	 * on.
+	 */
+	return pinctrl_apply_state(config->pcfg, PINCTRL_STATE_DEFAULT);
 }
 #endif
 
-/* Some slave device will die by accident and keep the SDA in low level,
- * in this case, master should send several clock to make the slave release the bus.
- * Slave mode of ESP32 might also get in wrong state that held the SDA low,
- * in this case, master device could send a stop signal to make esp32 slave release the bus.
+/* Some target device will die by accident and keep the SDA in low level,
+ * in this case, controller should send several clock to make the target release the bus.
+ * Target mode of ESP32 might also get in wrong state that held the SDA low,
+ * in this case, controller device could send a stop signal to make esp32 target release the bus.
  **/
-static void IRAM_ATTR i2c_master_clear_bus(const struct device *dev)
+static void IRAM_ATTR i2c_controller_clear_bus(const struct device *dev)
 {
 	struct i2c_esp32_data *data = (struct i2c_esp32_data *const)(dev)->data;
 
@@ -205,25 +247,25 @@ static void IRAM_ATTR i2c_master_clear_bus(const struct device *dev)
 	const int scl_half_period = I2C_CLR_BUS_HALF_PERIOD_US; /* use standard 100kHz data rate */
 	int i = 0;
 
-	gpio_pin_configure_dt(&config->scl.gpio, GPIO_OUTPUT);
-	gpio_pin_configure_dt(&config->sda.gpio, GPIO_OUTPUT | GPIO_INPUT);
-	/* If a SLAVE device was in a read operation when the bus was interrupted, */
-	/* the SLAVE device is controlling SDA. If the slave is sending a stream of ZERO bytes, */
+	gpio_pin_configure_dt(&config->scl, GPIO_OUTPUT);
+	gpio_pin_configure_dt(&config->sda, GPIO_OUTPUT | GPIO_INPUT);
+	/* If a TARGET device was in a read operation when the bus was interrupted, */
+	/* the TARGET device is controlling SDA. If the target is sending a stream of ZERO bytes, */
 	/* it will only release SDA during the  ACK bit period. So, this reset code needs */
 	/* to synchronize the bit stream with either the ACK bit, or a 1 bit to correctly */
 	/* generate a STOP condition. */
-	gpio_pin_set_dt(&config->sda.gpio, 1);
+	gpio_pin_set_dt(&config->sda, 1);
 	esp_rom_delay_us(scl_half_period);
-	while (!gpio_pin_get_dt(&config->sda.gpio) && (i++ < I2C_CLR_BUS_SCL_NUM)) {
-		gpio_pin_set_dt(&config->scl.gpio, 1);
+	while (!gpio_pin_get_dt(&config->sda) && (i++ < I2C_CLR_BUS_SCL_NUM)) {
+		gpio_pin_set_dt(&config->scl, 1);
 		esp_rom_delay_us(scl_half_period);
-		gpio_pin_set_dt(&config->scl.gpio, 0);
+		gpio_pin_set_dt(&config->scl, 0);
 		esp_rom_delay_us(scl_half_period);
 	}
-	gpio_pin_set_dt(&config->sda.gpio, 0); /* setup for STOP */
-	gpio_pin_set_dt(&config->scl.gpio, 1);
+	gpio_pin_set_dt(&config->sda, 0); /* setup for STOP */
+	gpio_pin_set_dt(&config->scl, 1);
 	esp_rom_delay_us(scl_half_period);
-	gpio_pin_set_dt(&config->sda.gpio, 1); /* STOP, SDA low -> high while SCL is HIGH */
+	gpio_pin_set_dt(&config->sda, 1); /* STOP, SDA low -> high while SCL is HIGH */
 	i2c_esp32_config_pin(dev);
 #else
 	i2c_ll_master_clr_bus(data->hal.dev, I2C_LL_RESET_SLV_SCL_PULSE_NUM_DEFAULT, true);
@@ -253,7 +295,7 @@ static void IRAM_ATTR i2c_hw_fsm_reset(const struct device *dev)
 
 	/* to reset the I2C hw module, we need re-enable the hw */
 	clock_control_off(config->clock_dev, config->clock_subsys);
-	i2c_master_clear_bus(dev);
+	i2c_controller_clear_bus(dev);
 	clock_control_on(config->clock_dev, config->clock_subsys);
 
 	i2c_hal_init(&data->hal, config->index);
@@ -269,7 +311,10 @@ static void IRAM_ATTR i2c_hw_fsm_reset(const struct device *dev)
 	i2c_ll_master_set_filter(data->hal.dev, filter_cfg);
 #else
 	i2c_ll_master_fsm_rst(data->hal.dev);
-	i2c_master_clear_bus(dev);
+	i2c_controller_clear_bus(dev);
+	i2c_hal_master_init(&data->hal);
+	i2c_ll_disable_intr_mask(data->hal.dev, I2C_LL_INTR_MASK);
+	i2c_ll_clear_intr_mask(data->hal.dev, I2C_LL_INTR_MASK);
 #endif
 	i2c_ll_update(data->hal.dev);
 }
@@ -279,7 +324,23 @@ static int i2c_esp32_recover(const struct device *dev)
 	struct i2c_esp32_data *data = (struct i2c_esp32_data *const)(dev)->data;
 
 	k_sem_take(&data->transfer_sem, K_FOREVER);
+
+#if CONFIG_PM
+	i2c_esp32_pm_policy_state_lock_get(data);
+#endif
+
 	i2c_hw_fsm_reset(dev);
+
+#if CONFIG_PM
+#if I2C_ESP32_TARGET_ENABLED
+	if (!data->target_attached) {
+		i2c_esp32_pm_policy_state_lock_put(data);
+	}
+#else
+	i2c_esp32_pm_policy_state_lock_put(data);
+#endif
+#endif
+
 	k_sem_give(&data->transfer_sem);
 
 	return 0;
@@ -339,7 +400,7 @@ static int i2c_esp32_configure(const struct device *dev, uint32_t dev_config)
 	uint32_t bitrate;
 
 	if (!(dev_config & I2C_MODE_CONTROLLER)) {
-		LOG_ERR("Only I2C Master mode supported.");
+		LOG_ERR("Only I2C Controller mode supported.");
 		return -ENOTSUP;
 	}
 
@@ -404,7 +465,7 @@ static int IRAM_ATTR i2c_esp32_transmit(const struct device *dev)
 
 	ret = k_sem_take(&data->cmd_sem, K_MSEC(I2C_TRANSFER_TIMEOUT_MSEC));
 	if (ret != 0) {
-		/* If the I2C slave is powered off or the SDA/SCL is */
+		/* If the I2C target is powered off or the SDA/SCL is */
 		/* connected to ground, for example, I2C hw FSM would get */
 		/* stuck in wrong state, we have to reset the I2C module in this case. */
 		i2c_hw_fsm_reset(dev);
@@ -415,13 +476,13 @@ static int IRAM_ATTR i2c_esp32_transmit(const struct device *dev)
 		i2c_hw_fsm_reset(dev);
 		ret = -ETIMEDOUT;
 	} else if (data->status == I2C_STATUS_ACK_ERROR) {
-		ret = -EFAULT;
+		ret = -EIO;
 	}
 
 	return ret;
 }
 
-static void IRAM_ATTR i2c_esp32_master_start(const struct device *dev)
+static void IRAM_ATTR i2c_esp32_controller_start(const struct device *dev)
 {
 	struct i2c_esp32_data *data = (struct i2c_esp32_data *const)(dev)->data;
 
@@ -432,7 +493,7 @@ static void IRAM_ATTR i2c_esp32_master_start(const struct device *dev)
 	i2c_ll_master_write_cmd_reg(data->hal.dev, cmd, data->cmd_idx++);
 }
 
-static void IRAM_ATTR i2c_esp32_master_stop(const struct device *dev)
+static void IRAM_ATTR i2c_esp32_controller_stop(const struct device *dev)
 {
 	struct i2c_esp32_data *data = (struct i2c_esp32_data *const)(dev)->data;
 
@@ -476,7 +537,7 @@ static int IRAM_ATTR i2c_esp32_write_addr(const struct device *dev, uint16_t add
 	return i2c_esp32_transmit(dev);
 }
 
-static int IRAM_ATTR i2c_esp32_master_read(const struct device *dev, struct i2c_msg *msg)
+static int IRAM_ATTR i2c_esp32_controller_read(const struct device *dev, struct i2c_msg *msg)
 {
 	struct i2c_esp32_data *data = (struct i2c_esp32_data *const)(dev)->data;
 
@@ -497,8 +558,8 @@ static int IRAM_ATTR i2c_esp32_master_read(const struct device *dev, struct i2c_
 	while (msg_len) {
 		rd_filled = (msg_len > I2C_LL_FIFO_LEN) ? I2C_LL_FIFO_LEN : (msg_len - 1);
 
-		/* I2C master won't acknowledge the last byte read from the
-		 * slave device. Divide the read command in two segments as
+		/* I2C controller won't acknowledge the last byte read from the
+		 * target device. Divide the read command in two segments as
 		 * recommended by the ESP32 Technical Reference Manual.
 		 */
 		if (msg_len == 1) {
@@ -534,20 +595,20 @@ static int IRAM_ATTR i2c_esp32_read_msg(const struct device *dev,
 	addr |= BIT(0);
 
 	if (msg->flags & I2C_MSG_RESTART) {
-		i2c_esp32_master_start(dev);
+		i2c_esp32_controller_start(dev);
 		ret = i2c_esp32_write_addr(dev, addr);
 		if (ret < 0) {
 			return ret;
 		}
 	}
 
-	ret = i2c_esp32_master_read(dev, msg);
+	ret = i2c_esp32_controller_read(dev, msg);
 	if (ret < 0) {
 		return ret;
 	}
 
 	if (msg->flags & I2C_MSG_STOP) {
-		i2c_esp32_master_stop(dev);
+		i2c_esp32_controller_stop(dev);
 		ret = i2c_esp32_transmit(dev);
 		if (ret < 0) {
 			return ret;
@@ -557,7 +618,7 @@ static int IRAM_ATTR i2c_esp32_read_msg(const struct device *dev,
 	return 0;
 }
 
-static int IRAM_ATTR i2c_esp32_master_write(const struct device *dev, struct i2c_msg *msg)
+static int IRAM_ATTR i2c_esp32_controller_write(const struct device *dev, struct i2c_msg *msg)
 {
 	struct i2c_esp32_data *data = (struct i2c_esp32_data *const)(dev)->data;
 	uint8_t wr_filled = 0;
@@ -604,20 +665,20 @@ static int IRAM_ATTR i2c_esp32_write_msg(const struct device *dev,
 	int ret = 0;
 
 	if (msg->flags & I2C_MSG_RESTART) {
-		i2c_esp32_master_start(dev);
+		i2c_esp32_controller_start(dev);
 		ret = i2c_esp32_write_addr(dev, addr);
 		if (ret < 0) {
 			return ret;
 		}
 	}
 
-	ret = i2c_esp32_master_write(dev, msg);
+	ret = i2c_esp32_controller_write(dev, msg);
 	if (ret < 0) {
 		return ret;
 	}
 
 	if (msg->flags & I2C_MSG_STOP) {
-		i2c_esp32_master_stop(dev);
+		i2c_esp32_controller_stop(dev);
 		ret = i2c_esp32_transmit(dev);
 		if (ret < 0) {
 			return ret;
@@ -681,6 +742,10 @@ static int IRAM_ATTR i2c_esp32_transfer(const struct device *dev, struct i2c_msg
 
 	k_sem_take(&data->transfer_sem, K_FOREVER);
 
+#if CONFIG_PM
+	i2c_esp32_pm_policy_state_lock_get(data);
+#endif
+
 #if I2C_ESP32_TARGET_ENABLED
 	bool was_target = data->target_attached;
 
@@ -722,6 +787,16 @@ static int IRAM_ATTR i2c_esp32_transfer(const struct device *dev, struct i2c_msg
 	if (was_target) {
 		i2c_esp32_target_resume(dev);
 	}
+#endif
+
+#if CONFIG_PM
+#if I2C_ESP32_TARGET_ENABLED
+	if (!data->target_attached) {
+		i2c_esp32_pm_policy_state_lock_put(data);
+	}
+#else
+	i2c_esp32_pm_policy_state_lock_put(data);
+#endif
 #endif
 
 	k_sem_give(&data->transfer_sem);
@@ -771,7 +846,7 @@ static void i2c_esp32_target_pause(const struct device *dev)
 	const struct i2c_esp32_config *config = dev->config;
 	struct i2c_esp32_data *data = dev->data;
 
-	data->target_in_master_xfer = true;
+	data->target_in_controller_xfer = true;
 	i2c_esp32_target_teardown(dev);
 	i2c_hal_master_init(&data->hal);
 	i2c_esp32_configure_data_mode(dev);
@@ -785,7 +860,7 @@ static void i2c_esp32_target_resume(const struct device *dev)
 	i2c_esp32_target_setup(dev);
 	data->target_reading = false;
 	data->target_writing = false;
-	data->target_in_master_xfer = false;
+	data->target_in_controller_xfer = false;
 }
 
 static inline void IRAM_ATTR i2c_esp32_target_drain_rx(const struct device *dev)
@@ -976,7 +1051,7 @@ static void IRAM_ATTR i2c_esp32_isr(void *arg)
 	i2c_intr_event_t evt_type = I2C_INTR_EVENT_ERR;
 
 #if I2C_ESP32_TARGET_ENABLED
-	if (data->target_attached && !data->target_in_master_xfer) {
+	if (data->target_attached && !data->target_in_controller_xfer) {
 		i2c_esp32_target_isr(dev);
 		return;
 	}
@@ -1032,6 +1107,10 @@ static int i2c_esp32_target_register(const struct device *dev, struct i2c_target
 	data->target_attached = true;
 	data->dev_config = 0;
 
+#if CONFIG_PM
+	i2c_esp32_pm_policy_state_lock_get(data);
+#endif
+
 	k_sem_give(&data->transfer_sem);
 
 	return 0;
@@ -1067,6 +1146,10 @@ static int i2c_esp32_target_unregister(const struct device *dev, struct i2c_targ
 	i2c_hal_master_init(&data->hal);
 	i2c_esp32_configure_data_mode(dev);
 
+#if CONFIG_PM
+	i2c_esp32_pm_policy_state_lock_put(data);
+#endif
+
 	k_sem_give(&data->transfer_sem);
 
 	return 0;
@@ -1087,18 +1170,52 @@ static DEVICE_API(i2c, i2c_esp32_driver_api) = {
 #endif
 };
 
+#if I2C_SLEEP_RETENTION_ENABLED
+static esp_err_t i2c_esp32_create_sleep_retention_cb(void *arg)
+{
+	uint32_t port = (uint32_t)(uintptr_t)arg;
+
+	return sleep_retention_entries_create(i2c_regs_retention[port].link_list,
+					      i2c_regs_retention[port].link_num,
+					      REGDMA_LINK_PRI_I2C,
+					      i2c_regs_retention[port].module_id);
+}
+
+static void i2c_esp32_sleep_retention_init(uint32_t port)
+{
+	sleep_retention_module_init_param_t init_param = {
+		.cbs = {.create = {.handle = i2c_esp32_create_sleep_retention_cb,
+				   .arg = (void *)(uintptr_t)port}},
+		.depends = RETENTION_MODULE_BITMAP_INIT(CLOCK_SYSTEM),
+		.attribute = SLEEP_RETENTION_MODULE_ATTR_ATTACH};
+
+	esp_err_t err = sleep_retention_module_init(i2c_regs_retention[port].module_id,
+						    &init_param);
+
+	if (err == ESP_OK) {
+		err = sleep_retention_module_allocate(i2c_regs_retention[port].module_id);
+	}
+	if (err == ESP_OK) {
+		err = sleep_retention_module_attach(i2c_regs_retention[port].module_id);
+	}
+	if (err != ESP_OK) {
+		LOG_WRN("I2C%lu sleep retention init failed (%d)", (unsigned long)port, err);
+	}
+}
+#endif /* I2C_SLEEP_RETENTION_ENABLED */
+
 static int IRAM_ATTR i2c_esp32_init(const struct device *dev)
 {
 	const struct i2c_esp32_config *config = dev->config;
 	struct i2c_esp32_data *data = (struct i2c_esp32_data *const)(dev)->data;
 
 #ifndef I2C_LL_SUPPORT_HW_CLR_BUS
-	if (!gpio_is_ready_dt(&config->scl.gpio)) {
+	if (!gpio_is_ready_dt(&config->scl)) {
 		LOG_ERR("SCL GPIO device is not ready");
 		return -EINVAL;
 	}
 
-	if (!gpio_is_ready_dt(&config->sda.gpio)) {
+	if (!gpio_is_ready_dt(&config->sda)) {
 		LOG_ERR("SDA GPIO device is not ready");
 		return -EINVAL;
 	}
@@ -1135,23 +1252,27 @@ static int IRAM_ATTR i2c_esp32_init(const struct device *dev)
 
 	i2c_esp32_configure_data_mode(dev);
 
-	return i2c_esp32_configure(dev, I2C_MODE_CONTROLLER | i2c_map_dt_bitrate(config->bitrate));
+	ret = i2c_esp32_configure(dev, I2C_MODE_CONTROLLER | i2c_map_dt_bitrate(config->bitrate));
+
+	if (ret < 0) {
+		return ret;
+	}
+
+#if I2C_SLEEP_RETENTION_ENABLED
+	if (config->index < SOC_HP_I2C_NUM) {
+		i2c_esp32_sleep_retention_init(config->index);
+	}
+#endif
+
+	return 0;
 }
 
 #define I2C(idx) DT_NODELABEL(i2c##idx)
 
 #ifndef I2C_LL_SUPPORT_HW_CLR_BUS
 #define I2C_ESP32_GET_PIN_INFO(idx)					\
-	.scl = {							\
-		.gpio = GPIO_DT_SPEC_GET(I2C(idx), scl_gpios),		\
-		.sig_out = I2CEXT##idx##_SCL_OUT_IDX,			\
-		.sig_in = I2CEXT##idx##_SCL_IN_IDX,			\
-	},								\
-	.sda = {							\
-		.gpio = GPIO_DT_SPEC_GET(I2C(idx), sda_gpios),		\
-		.sig_out = I2CEXT##idx##_SDA_OUT_IDX,			\
-		.sig_in = I2CEXT##idx##_SDA_IN_IDX,			\
-	},
+	.scl = GPIO_DT_SPEC_GET(I2C(idx), scl_gpios),			\
+	.sda = GPIO_DT_SPEC_GET(I2C(idx), sda_gpios),
 #else
 #define I2C_ESP32_GET_PIN_INFO(idx)
 #endif /* I2C_LL_SUPPORT_HW_CLR_BUS */

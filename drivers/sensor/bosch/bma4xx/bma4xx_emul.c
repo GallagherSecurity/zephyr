@@ -5,7 +5,7 @@
 #include "bma4xx.h"
 #include "bma4xx_emul.h"
 
-#include "zephyr/sys/util.h"
+#include <zephyr/sys/util.h>
 
 #include <errno.h>
 #include <stdint.h>
@@ -27,9 +27,6 @@ LOG_MODULE_DECLARE(bma4xx, CONFIG_SENSOR_LOG_LEVEL);
 struct bma4xx_emul_data {
 	/* Holds register data. */
 	uint8_t regs[BMA4XX_NUM_REGS];
-};
-
-struct bma4xx_emul_cfg {
 };
 
 void bma4xx_emul_set_reg(const struct emul *target, uint8_t reg_addr, const uint8_t *val,
@@ -207,7 +204,7 @@ void bma4xx_emul_set_accel_data(const struct emul *target, q31_t value, int8_t s
 
 	unshifted = shift < 0 ? ((int64_t)value >> -shift) : ((int64_t)value << shift);
 
-	intermediate = (unshifted * BIT(11)) / (g << range_g);
+	intermediate = (unshifted * (int64_t)BIT(11)) / (g << range_g);
 
 	intermediate /= accel_range;
 
@@ -324,8 +321,7 @@ static struct i2c_emul_api bma4xx_emul_api_i2c = {
 
 #define INIT_BMA4XX(n)                                                                             \
 	static struct bma4xx_emul_data bma4xx_emul_data_##n = {};                                  \
-	static const struct bma4xx_emul_cfg bma4xx_emul_cfg_##n = {};                              \
-	EMUL_DT_INST_DEFINE(n, bma4xx_emul_init, &bma4xx_emul_data_##n, &bma4xx_emul_cfg_##n,      \
+	EMUL_DT_INST_DEFINE(n, bma4xx_emul_init, &bma4xx_emul_data_##n, NULL,                      \
 			    &bma4xx_emul_api_i2c, &bma4xx_emul_sensor_driver_api);
 
 DT_INST_FOREACH_STATUS_OKAY(INIT_BMA4XX)

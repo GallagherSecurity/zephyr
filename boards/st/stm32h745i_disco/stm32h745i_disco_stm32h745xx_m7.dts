@@ -228,6 +228,8 @@
 	status = "okay";
 	pinctrl-0 = <&i2c4_scl_pd12 &i2c4_sda_pd13>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiod 12 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiod 13 GPIO_ACTIVE_HIGH>;
 	clock-frequency = <I2C_BITRATE_FAST>;
 
 	/* FT5336 capacitive touch on the on-board LCD module.
@@ -330,7 +332,8 @@
 		power-up-delay = <100>;
 		num-auto-refresh = <8>;
 		mode-register = <0x220>;
-		refresh-rate = <0x603>;
+		/* 64 ms / 4096 rows x 80 MHz SDCLK (HCLK3 / 3) - 20 */
+		refresh-rate = <1230>;
 
 		bank@1 {
 			reg = <1>;
@@ -345,4 +348,8 @@
 			st,sdram-timing = <2 7 4 7 2 2 2>;
 		};
 	};
+};
+
+zephyr_jpegenc: &jpeg {
+	status = "okay";
 };

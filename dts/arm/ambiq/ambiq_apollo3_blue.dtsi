@@ -81,6 +81,7 @@
 		flash: flash-controller@0 {
 			compatible = "ambiq,flash-controller";
 			reg = <0x00000000 0x100000>;
+			ranges;
 
 			#address-cells = <1>;
 			#size-cells = <1>;
@@ -89,6 +90,11 @@
 			flash0: flash@0 {
 				compatible = "soc-nv-flash";
 				reg = <0x00000000 0x100000>;
+				ranges = <0x0 0x00000000 0x100000>;
+				erase-block-size = <8192>;
+				write-block-size = <4>;
+				#address-cells = <1>;
+				#size-cells = <1>;
 			};
 		};
 
@@ -434,9 +440,9 @@
 			#io-channel-cells = <1>;
 		};
 
-		mspi0: mspi@40020000 {
+		mspi0: mspi@50014000 {
 			compatible = "ambiq,mspi-controller";
-			reg = <0x40020000 0x400>;
+			reg = <0x50014000 0x400>, <0x51000000 0x00ffffff>;
 			clock-frequency = <48000000>;
 			interrupts = <20 0>;
 			#address-cells = <1>;

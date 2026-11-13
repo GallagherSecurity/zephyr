@@ -72,6 +72,7 @@ set_property(TARGET compiler-cpp PROPERTY dialect_cpp2a)
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp20)
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp2b)
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp23)
+set_property(TARGET compiler-cpp PROPERTY dialect_cpp26)
 
 # Flag for disabling strict aliasing rule in C and C++
 set_compiler_property(PROPERTY no_strict_aliasing)
@@ -98,6 +99,12 @@ set_compiler_property(PROPERTY no_printf_return_value)
 
 # Flags for coverage generation
 set_compiler_property(PROPERTY coverage)
+
+# Compiler-specific flags for heap KASAN (-fsanitize=kernel-address + tuning params).
+set_compiler_property(PROPERTY heap_kasan)
+
+# Flag to disable heap KASAN instrumentation on a specific source file.
+set_compiler_property(PROPERTY no_heap_kasan)
 
 # Security canaries flags.
 set_compiler_property(PROPERTY security_canaries)

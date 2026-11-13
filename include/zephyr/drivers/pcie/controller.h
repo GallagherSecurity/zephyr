@@ -2,6 +2,7 @@
  * @file
  *
  * @brief Public APIs for the PCIe Controllers drivers.
+ * @ingroup pcie_controller_interface
  */
 
 /*
@@ -30,6 +31,12 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @def_driverbackendgroup{PCIe Controller,pcie_controller_interface}
+ * @ingroup pcie_controller_interface
+ * @{
+ */
 
 /**
  * @brief Function called to read a 32-bit word from an endpoint's configuration space.
@@ -169,19 +176,30 @@ void pcie_generic_ctrl_conf_write(mm_reg_t cfg_addr, pcie_bdf_t bdf,
  */
 void pcie_generic_ctrl_enumerate(const struct device *dev, pcie_bdf_t bdf_start);
 
-/** @brief Structure providing callbacks to be implemented for devices
- * that supports the PCI Express Controller API
+/**
+ * @driver_ops{PCIe Controller}
  */
 __subsystem struct pcie_ctrl_driver_api {
+	/** @driver_ops_mandatory @copybrief pcie_ctrl_conf_read */
 	pcie_ctrl_conf_read_t conf_read;
+	/** @driver_ops_mandatory @copybrief pcie_ctrl_conf_write */
 	pcie_ctrl_conf_write_t conf_write;
+	/** @driver_ops_mandatory @copybrief pcie_ctrl_region_allocate */
 	pcie_ctrl_region_allocate_t region_allocate;
+	/** @driver_ops_mandatory @copybrief pcie_ctrl_region_get_allocate_base */
 	pcie_ctrl_region_get_allocate_base_t region_get_allocate_base;
+	/** @driver_ops_optional @copybrief pcie_ctrl_region_translate */
 	pcie_ctrl_region_translate_t region_translate;
-#ifdef CONFIG_PCIE_MSI
+#if defined(CONFIG_PCIE_MSI) || defined(__DOXYGEN__)
+	/**
+	 * @driver_ops_mandatory @copybrief pcie_ctrl_msi_device_setup
+	 * @kconfig_dep{CONFIG_PCIE_MSI}
+	 */
 	pcie_ctrl_msi_device_setup_t msi_device_setup;
 #endif
 };
+
+/** @} */
 
 /**
  * @brief Read a 32-bit word from an endpoint's configuration space.
@@ -297,7 +315,18 @@ static inline bool pcie_ctrl_region_translate(const struct device *dev, pcie_bdf
 	}
 }
 
-#ifdef CONFIG_PCIE_MSI
+#if defined(CONFIG_PCIE_MSI) || defined(__DOXYGEN__)
+/**
+ * @brief Configure the given PCI endpoint to generate MSIs.
+ *
+ * @kconfig_dep{CONFIG_PCIE_MSI}
+ *
+ * @param dev PCI Express Controller device pointer
+ * @param priority MSI priority
+ * @param vectors an array of allocated vector(s)
+ * @param n_vector the size of the vector array
+ * @return the number of vectors allocated
+ */
 static inline uint8_t pcie_ctrl_msi_device_setup(const struct device *dev, unsigned int priority,
 						 msi_vector_t *vectors, uint8_t n_vector)
 {
@@ -308,30 +337,40 @@ static inline uint8_t pcie_ctrl_msi_device_setup(const struct device *dev, unsig
 /** @brief Structure describing a device that supports the PCI Express Controller API
  */
 struct pcie_ctrl_config {
-#ifdef CONFIG_PCIE_MSI
+#if defined(CONFIG_PCIE_MSI) || defined(__DOXYGEN__)
+	/**
+	 * @brief MSI parent device
+	 * @kconfig_dep{CONFIG_PCIE_MSI}
+	 */
 	const struct device *msi_parent;
 #endif
-	/* Configuration space physical address */
+	/** Configuration space physical address */
 	uintptr_t cfg_addr;
-	/* Configuration space physical size */
+	/** Configuration space physical size */
 	size_t cfg_size;
-	/* BAR regions translation ranges count */
+	/** BAR regions translation ranges count */
 	size_t ranges_count;
-	/* BAR regions translation ranges table */
+	/** BAR regions translation ranges table */
 	struct {
-		/* Flags as defined in the PCI Bus Binding to IEEE Std 1275-1994 */
+		/** Flags as defined in the PCI Bus Binding to IEEE Std 1275-1994 */
 		uint32_t flags;
-		/* bus-centric offset from the start of the region */
+		/** bus-centric offset from the start of the region */
 		uintptr_t pcie_bus_addr;
-		/* CPU-centric offset from the start of the region */
+		/** CPU-centric offset from the start of the region */
 		uintptr_t host_map_addr;
-		/* region size */
+		/** region size */
 		size_t map_length;
 	} ranges[];
 };
 
-/*
- * Fills the pcie_ctrl_config.ranges table from DT
+/**
+ * @brief Fill a pcie_ctrl_config.ranges table entry from devicetree
+ *
+ * Intended to be used with DT_FOREACH_RANGE to fill the whole table from the
+ * controller's ranges property.
+ *
+ * @param node_id PCIe controller devicetree node identifier
+ * @param idx Index of the entry in the ranges property
  */
 #define PCIE_RANGE_FORMAT(node_id, idx)							\
 {											\

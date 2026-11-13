@@ -27,7 +27,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/util_macro.h>
 #include <zephyr/sys/util_utf8.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/toolchain.h>
 
 #include "aics_internal.h"
@@ -40,8 +40,8 @@ LOG_MODULE_REGISTER(bt_aics);
 #define VALID_AICS_OPCODE(opcode)                                              \
 	((opcode) >= BT_AICS_OPCODE_SET_GAIN && (opcode) <= BT_AICS_OPCODE_SET_AUTO)
 
-#define AICS_CP_LEN                 0x02
-#define AICS_CP_SET_GAIN_LEN        0x03
+#define AICS_CP_LEN                 0x02U
+#define AICS_CP_SET_GAIN_LEN        0x03U
 
 
 static ssize_t write_description(struct bt_conn *conn,
@@ -129,8 +129,9 @@ static ssize_t read_aics_state(struct bt_conn *conn,
 {
 	struct bt_aics *inst = BT_AUDIO_CHRC_USER_DATA(attr);
 
-	LOG_DBG("gain %d, mute %u, gain_mode %u, counter %u", inst->srv.state.gain,
-		inst->srv.state.mute, inst->srv.state.gain_mode, inst->srv.state.change_counter);
+	LOG_DBG("gain %d, mute %u, gain_mode %s (0x%02X), counter %u", inst->srv.state.gain,
+		inst->srv.state.mute, bt_aics_mode_to_str(inst->srv.state.gain_mode),
+		inst->srv.state.gain_mode, inst->srv.state.change_counter);
 
 	return bt_gatt_attr_read(conn, attr, buf, len, offset, &inst->srv.state,
 				 sizeof(inst->srv.state));
@@ -257,12 +258,12 @@ static uint8_t valid_control_point_write(uint16_t len, uint16_t offset,
 					 const struct bt_aics_gain_control *cp,
 					 uint8_t change_counter)
 {
-	if (offset != 0) {
+	if (offset != 0U) {
 		LOG_DBG("Invalid offset: %u", offset);
 		return BT_ATT_ERR_INVALID_OFFSET;
 	}
 
-	if (len == 0 || cp == NULL) {
+	if (len == 0U || cp == NULL) {
 		LOG_DBG("Invalid length (%u) or NULL data (%p)", len, cp);
 		return BT_ATT_ERR_INVALID_ATTRIBUTE_LEN;
 	}
@@ -410,8 +411,9 @@ static ssize_t write_aics_control(struct bt_conn *conn, const struct bt_gatt_att
 	if (state_change) {
 		inst->srv.state.change_counter++; /* May overflow which is OK */
 
-		LOG_DBG("New state: gain %d, mute %u, gain_mode %u, counter %u",
-			inst->srv.state.gain, inst->srv.state.mute, inst->srv.state.gain_mode,
+		LOG_DBG("New state: gain %d, mute %u, gain_mode %s (0x%02X), counter %u",
+			inst->srv.state.gain, inst->srv.state.mute,
+			bt_aics_mode_to_str(inst->srv.state.gain_mode), inst->srv.state.gain_mode,
 			inst->srv.state.change_counter);
 
 		value_changed(inst, AICS_NOTIFY_STATE);

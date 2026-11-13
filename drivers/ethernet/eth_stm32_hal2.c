@@ -6,7 +6,6 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/stm32_clock_control.h>
-#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/drivers/pinctrl.h>
 #include <zephyr/irq.h>
 #include <zephyr/kernel.h>
@@ -17,21 +16,18 @@
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/net/phy.h>
 #include <zephyr/sys/__assert.h>
-#include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
 #include <soc.h>
 #include "eth.h"
 
 LOG_MODULE_REGISTER(eth_stm32_hal, CONFIG_ETHERNET_LOG_LEVEL);
 
+#include "dwc_mac/eth_stm32_dwc.h"
+
 #define DT_DRV_COMPAT st_stm32_ethernet
 
 #define ETH_STM32_HAL_MTU NET_ETH_MTU
 #define ETH_STM32_HAL_FRAME_SIZE_MAX (ETH_STM32_HAL_MTU + 18)
-
-#define ST_OUI_B0 0x00
-#define ST_OUI_B1 0x80
-#define ST_OUI_B2 0xE1
 
 #define ETH_STM32_RX_BUF_SIZE HAL_ETH_MAX_PACKET_SIZE_BYTE /* full-frame RX DMA buffer */
 #define ETH_STM32_TX_BUF_SIZE HAL_ETH_MAX_PACKET_SIZE_BYTE /* full-frame TX DMA buffer */
@@ -49,6 +45,9 @@ LOG_MODULE_REGISTER(eth_stm32_hal, CONFIG_ETHERNET_LOG_LEVEL);
 NET_BUF_POOL_DEFINE(rx_net_buf_pool, CONFIG_ETH_STM32_HAL_RX_BUF_POOL_COUNT, ETH_STM32_RX_BUF_SIZE,
 		    0, NULL);
 
+/* Make memcpy() for MAC address array safe between the HAL structure and the Zephyr one */
+BUILD_ASSERT(sizeof(((hal_eth_config_t *)NULL)->mac_addr) == NET_ETH_ADDR_LEN);
+
 static struct net_buf *rx_net_buf[CONFIG_ETH_STM32_HAL_RX_DMA_BUF_COUNT];
 
 static hal_eth_tx_channel_config_t tx_ch_cfg;
@@ -58,7 +57,7 @@ static const struct device *eth_stm32_phy_dev = DEVICE_DT_GET(DT_INST_PHANDLE(0,
 
 struct eth_stm32_hal_dev_data {
 	struct net_if *iface;
-	uint8_t mac_addr[6];
+	uint8_t mac_addr[NET_ETH_ADDR_LEN];
 	hal_eth_handle_t heth;
 	struct k_event rx_event;
 	struct k_sem tx_int_sem;
@@ -132,7 +131,7 @@ hal_status_t rx_channel_callback(hal_eth_handle_t *h_eth, uint32_t channel, void
 	if (!frag || size == 0U || size > frag->size) {
 		LOG_ERR("RX: Invalid frag or size");
 		if (frag) {
-			net_buf_unref(frag);
+			net_pkt_frag_unref(frag);
 		}
 		return HAL_ERROR;
 	}
@@ -142,7 +141,7 @@ hal_status_t rx_channel_callback(hal_eth_handle_t *h_eth, uint32_t channel, void
 
 	if (!pkt) {
 		LOG_ERR("RX: net_pkt_rx_alloc failed");
-		net_buf_unref(frag);
+		net_pkt_frag_unref(frag);
 		return HAL_ERROR;
 	}
 
@@ -223,10 +222,9 @@ static void phy_link_state_changed(const struct device *phy_dev, struct phy_link
 
 	if (state->is_up) {
 		eth_stm32_set_mac_config(dev, state);
-		net_eth_carrier_on(dev_data->iface);
-	} else {
-		net_eth_carrier_off(dev_data->iface);
 	}
+
+	net_eth_carrier_set(dev_data->iface, state->is_up);
 }
 
 static void rx_thread(void *arg1, void *unused1, void *unused2)
@@ -332,8 +330,6 @@ static void eth_iface_init(struct net_if *iface)
 	ethernet_init(iface);
 
 	net_if_carrier_off(iface);
-
-	net_lldp_set_lldpdu(iface);
 
 	if (device_is_ready(eth_stm32_phy_dev)) {
 		phy_link_callback_set(eth_stm32_phy_dev, phy_link_state_changed, (void *)dev);
@@ -509,15 +505,8 @@ static int eth_initialize(const struct device *dev)
 
 	/* Set up gated and source clocks */
 	for (size_t n = 0; n < cfg->pclken_cnt; n++) {
-		if (IN_RANGE(cfg->pclken[n].bus, STM32_PERIPH_BUS_MIN, STM32_PERIPH_BUS_MAX)) {
-			ret = clock_control_on(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE),
-					(clock_control_subsys_t)&cfg->pclken[n]);
-		} else {
-			ret = clock_control_configure(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE),
-					(clock_control_subsys_t)&cfg->pclken[n],
-					NULL);
-		}
-
+		ret = clock_control_on(DEVICE_DT_GET(STM32_CLOCK_CONTROL_NODE),
+				       (clock_control_subsys_t)&cfg->pclken[n]);
 		if (ret != 0) {
 			LOG_ERR("Failed to setup ethernet clock #%zu", n);
 			return -EIO;
@@ -537,29 +526,8 @@ static int eth_initialize(const struct device *dev)
 
 	HAL_ETH_GetConfig(heth, &config_eth);
 
-	ret = net_eth_mac_load(&cfg->mac_config, dev_data->mac_addr);
-	if (ret == -ENODATA) {
-		uint8_t unique_device_ID_12_bytes[12];
-		uint32_t result_mac_32_bits;
-
-		/**
-		 * Set MAC address locally administered bit (LAA) as this is not assigned by the
-		 * manufacturer
-		 */
-		dev_data->mac_addr[0] = ST_OUI_B0 | 0x02;
-		dev_data->mac_addr[1] = ST_OUI_B1;
-		dev_data->mac_addr[2] = ST_OUI_B2;
-
-		/* Nothing defined by the user, use device id */
-		hwinfo_get_device_id(unique_device_ID_12_bytes, 12);
-		result_mac_32_bits = crc32_ieee((uint8_t *)unique_device_ID_12_bytes, 12);
-		memcpy(&dev_data->mac_addr[3], &result_mac_32_bits, 3);
-
-		ret = 0;
-	}
-
+	ret = eth_stm32_net_eth_mac_load(&cfg->mac_config, dev_data->mac_addr);
 	if (ret < 0) {
-		LOG_ERR("Failed to load MAC address (%d)", ret);
 		return ret;
 	}
 
@@ -606,8 +574,9 @@ static int eth_stm32_hal_set_config(const struct device *dev,
 
 	switch (type) {
 	case ETHERNET_CONFIG_TYPE_MAC_ADDRESS:
+		memcpy(dev_data->mac_addr, config->mac_address.addr, sizeof(dev_data->mac_addr));
 		HAL_ETH_GetConfig(heth, &eth_cfg);
-		memcpy(eth_cfg.mac_addr, dev_data->mac_addr, 6);
+		memcpy(eth_cfg.mac_addr, dev_data->mac_addr, sizeof(dev_data->mac_addr));
 
 		if (HAL_ETH_SetConfig(heth, &eth_cfg) != HAL_OK) {
 			return -EIO;

@@ -218,7 +218,7 @@ static void disconnect_device(struct bt_conn *conn, void *data)
 	SET_FLAG(is_connected);
 
 	err = bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
-	TEST_ASSERT(!err, "Failed to initate disconnect (err %d)", err);
+	TEST_ASSERT(!err, "Failed to initiate disconnect (err %d)", err);
 
 	LOG_DBG("Waiting for disconnection...");
 	WAIT_FOR_FLAG_UNSET(is_connected);
@@ -433,8 +433,10 @@ struct bst_test_list *test_main_l2cap_credits_install(struct bst_test_list *test
 }
 
 extern struct bst_test_list *test_main_l2cap_credits_install(struct bst_test_list *tests);
+extern struct bst_test_list *test_zero_initial_credits_install(struct bst_test_list *tests);
 
-bst_test_install_t test_installers[] = {test_main_l2cap_credits_install, NULL};
+bst_test_install_t test_installers[] = {test_main_l2cap_credits_install,
+					test_zero_initial_credits_install, NULL};
 
 int main(void)
 {

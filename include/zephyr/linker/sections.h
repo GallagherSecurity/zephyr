@@ -28,8 +28,6 @@
 #define _APP_BSS_SECTION_NAME		app_bss
 #define _APP_NOINIT_SECTION_NAME	app_noinit
 
-#define _APP_SMEM_PINNED_SECTION_NAME	app_smem_pinned
-
 #define _UNDEFINED_SECTION_NAME undefined
 
 /* Interrupts */
@@ -70,6 +68,7 @@
 #ifdef CONFIG_NOCACHE_MEMORY
 #define _NOCACHE_SECTION_NAME nocache
 #define _NOCACHE_LOAD_SECTION_NAME nocache_load
+#define _NOCACHE_PAD_SECTION_NAME nocache_pad
 #endif
 
 /* Symbol table section */
@@ -85,14 +84,6 @@
 #define BOOT_RODATA_SECTION_NAME	boot_rodata
 #define BOOT_DATA_SECTION_NAME		boot_data
 #define BOOT_NOINIT_SECTION_NAME	boot_noinit
-#endif
-
-#if defined(CONFIG_LINKER_USE_PINNED_SECTION)
-#define PINNED_TEXT_SECTION_NAME	pinned_text
-#define PINNED_BSS_SECTION_NAME		pinned_bss
-#define PINNED_RODATA_SECTION_NAME	pinned_rodata
-#define PINNED_DATA_SECTION_NAME	pinned_data
-#define PINNED_NOINIT_SECTION_NAME	pinned_noinit
 #endif
 
 #if defined(CONFIG_LINKER_USE_ONDEMAND_SECTION)
@@ -124,20 +115,6 @@
 #define BOOT_DATA			DATA
 #define BOOT_NOINIT			NOINIT
 #endif /* CONFIG_LINKER_USE_BOOT_SECTION */
-
-#if defined(CONFIG_LINKER_USE_PINNED_SECTION)
-#define PINNED_TEXT			PINNED_TEXT_SECTION_NAME
-#define PINNED_BSS			PINNED_BSS_SECTION_NAME
-#define PINNED_RODATA			PINNED_RODATA_SECTION_NAME
-#define PINNED_DATA			PINNED_DATA_SECTION_NAME
-#define PINNED_NOINIT			PINNED_NOINIT_SECTION_NAME
-#else
-#define PINNED_TEXT			TEXT
-#define PINNED_BSS			BSS
-#define PINNED_RODATA			RODATA
-#define PINNED_DATA			DATA
-#define PINNED_NOINIT			NOINIT
-#endif /* CONFIG_LINKER_USE_PINNED_SECTION */
 
 #if defined(CONFIG_LINKER_USE_ONDEMAND_SECTION)
 #define ONDEMAND_TEXT			ONDEMAND_TEXT_SECTION_NAME

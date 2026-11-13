@@ -9,23 +9,17 @@
 #ifndef ZEPHYR_DRIVERS_I2C_I2C_STM32_H_
 #define ZEPHYR_DRIVERS_I2C_I2C_STM32_H_
 
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/dma.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c/stm32.h>
 #include <zephyr/kernel.h>
-#include <zephyr/devicetree.h>
 #include <zephyr/pm/device.h>
-#include <zephyr/pm/device_runtime.h>
-#include <zephyr/logging/log.h>
-
-#ifdef CONFIG_I2C_STM32_BUS_RECOVERY
-#include <zephyr/drivers/gpio.h>
-#endif /* CONFIG_I2C_STM32_BUS_RECOVERY */
-
-#include <zephyr/drivers/dma.h>
 
 typedef void (*irq_config_func_t)(const struct device *port);
 
 #ifdef CONFIG_I2C_STM32_V2
-/*  Private I2C_MSG_* flags for STM32 I2C */
+/* Private I2C_MSG_* flags for STM32 I2C */
 #define I2C_MSG_STM32_USE_RELOAD_MODE	BIT(7)
 #endif
 
@@ -62,6 +56,7 @@ struct i2c_stm32_config {
 	size_t pclk_len;
 	I2C_TypeDef *i2c;
 	uint32_t bitrate;
+	k_timeout_t transfer_timeout;
 	const struct pinctrl_dev_config *pcfg;
 #if DT_HAS_COMPAT_STATUS_OKAY(st_stm32_i2c_v2)
 	const struct i2c_config_timing *timings;
@@ -80,6 +75,9 @@ struct i2c_stm32_data {
 	uint8_t *xfer_buf;
 	size_t xfer_len;
 	uint8_t xfer_flags;
+#ifdef CONFIG_I2C_STM32_BUS_RECOVERY
+	struct k_work recovery_work;
+#endif
 #ifdef CONFIG_I2C_STM32_V1
 	size_t msg_len;
 	uint8_t is_restart;
@@ -122,12 +120,18 @@ struct i2c_stm32_data {
 	i2c_stm32_smbalert_cb_func_t smbalert_cb_func;
 	const struct device *smbalert_cb_dev;
 #endif /* CONFIG_SMBUS_STM32_SMBALERT */
+#endif /* CONFIG_I2C_RTIO */
+
 #ifdef CONFIG_I2C_STM32_V2_DMA
 	struct dma_config dma_tx_cfg;
 	struct dma_config dma_rx_cfg;
 	struct dma_block_config dma_blk_cfg;
-#endif /* CONFIG_I2C_STM32_V2_DMA */
+	bool use_dma;
+#ifdef CONFIG_I2C_RTIO
+	uint8_t *dma_buf;	/* Base address of the Rx buffer fed by DMA */
+	size_t dma_len;		/* Byte size of the Rx buffer fed by DMA */
 #endif /* CONFIG_I2C_RTIO */
+#endif /* CONFIG_I2C_STM32_V2_DMA */
 
 #ifdef CONFIG_I2C_TARGET
 	bool controller_active;
@@ -139,16 +143,30 @@ struct i2c_stm32_data {
 #endif /* CONFIG_I2C_TARGET */
 };
 
+extern const struct i2c_driver_api i2c_stm32_driver_api;
+
+int i2c_stm32_init(const struct device *dev);
+
+#ifdef CONFIG_I2C_STM32_V2_DMA
+/* Return true if transfer shall use DMA. If so, also flush buffer on I2C write message */
+bool i2c_stm32_xfer_will_use_dma(const struct i2c_stm32_config *cfg, void *buf, size_t len,
+				 bool tx);
+#endif /* CONFIG_I2C_STM32_V2_DMA */
+
 #ifdef CONFIG_I2C_RTIO
-bool i2c_stm32_start(const struct device *dev);
-int i2c_stm32_msg_start(const struct device *dev, uint8_t flags,
-			uint8_t *buf, size_t buf_len, uint16_t i2c_addr);
+int i2c_stm32_msg_start(const struct device *dev, uint8_t flags, uint8_t *buf, size_t buf_len,
+			uint16_t i2c_addr);
+void i2c_stm32_rtio_complete(const struct device *dev, int status);
 #else /* CONFIG_I2C_RTIO */
 int i2c_stm32_transaction(const struct device *dev,
 			  struct i2c_msg msg, uint8_t *next_msg_flags,
 			  uint16_t periph);
 #endif /* CONFIG_I2C_RTIO */
 
+/* Reconfigure I2C bus according to @p config
+ * This function must be called with bus mutex locked (k_sem_take(i2c_stm32_data::bus_mutex))
+ * unless CONFIG_I2C_RTIO is enabled (in which case there is no bus_mutex to take).
+ */
 int i2c_stm32_runtime_configure(const struct device *dev, uint32_t config);
 
 #ifdef CONFIG_I2C_TARGET
@@ -163,6 +181,13 @@ int i2c_stm32_configure_timing(const struct device *dev, uint32_t clk);
 int i2c_stm32_pm_action(const struct device *dev, enum pm_device_action action);
 int i2c_stm32_suspend(const struct device *dev);
 #endif /* CONFIG_PM_DEVICE */
+
+int i2c_stm32_pm_get(const struct device *dev);
+void i2c_stm32_pm_put(const struct device *dev);
+
+#if CONFIG_I2C_STM32_BUS_RECOVERY
+int i2c_stm32_recover_bus(const struct device *dev);
+#endif
 
 int i2c_stm32_error(const struct device *dev);
 void i2c_stm32_event(const struct device *dev);
@@ -198,14 +223,16 @@ void i2c_stm32_error_isr(void *arg);
 #endif /* CONFIG_I2C_STM32_COMBINED_INTERRUPT */
 
 #define I2C_STM32_IRQ_HANDLER_DECL(index)							\
-static void i2c_stm32_irq_config_func_##index(const struct device *dev)
+	static void i2c_stm32_irq_config_func_##index(const struct device *dev)
+
 #define I2C_STM32_IRQ_HANDLER_FUNCTION(index)							\
 	.irq_config_func = i2c_stm32_irq_config_func_##index,
+
 #define I2C_STM32_IRQ_HANDLER(index)								\
-static void i2c_stm32_irq_config_func_##index(const struct device *dev)				\
-{												\
-	I2C_STM32_IRQ_CONNECT_AND_ENABLE(index);						\
-}
+	static void i2c_stm32_irq_config_func_##index(const struct device *dev __unused)	\
+	{											\
+		I2C_STM32_IRQ_CONNECT_AND_ENABLE(index);					\
+	}
 
 #else /* CONFIG_I2C_STM32_INTERRUPT */
 #define I2C_STM32_IRQ_HANDLER_DECL(index)
@@ -213,4 +240,4 @@ static void i2c_stm32_irq_config_func_##index(const struct device *dev)				\
 #define I2C_STM32_IRQ_HANDLER(index)
 #endif /* CONFIG_I2C_STM32_INTERRUPT */
 
-#endif	/* ZEPHYR_DRIVERS_I2C_I2C_STM32_H_ */
+#endif /* ZEPHYR_DRIVERS_I2C_I2C_STM32_H_ */

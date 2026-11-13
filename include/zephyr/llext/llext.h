@@ -5,8 +5,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef ZEPHYR_LLEXT_H
-#define ZEPHYR_LLEXT_H
+#ifndef ZEPHYR_INCLUDE_LLEXT_LLEXT_H_
+#define ZEPHYR_INCLUDE_LLEXT_LLEXT_H_
 
 #include <zephyr/sys/slist.h>
 #include <zephyr/llext/elf.h>
@@ -167,11 +167,29 @@ struct llext {
 	/** @endcond */
 };
 
+/**
+ * @brief Get the ELF section headers of an extension.
+ *
+ * The section headers are only available if the extension was loaded with
+ * @ref llext_load_param.keep_section_info set, and until
+ * @ref llext_free_inspection_data is called for it.
+ *
+ * @param ext Extension to inspect.
+ *
+ * @return Pointer to the first of @ref llext_section_count section headers.
+ */
 static inline const elf_shdr_t *llext_section_headers(const struct llext *ext)
 {
 	return ext->sect_hdrs;
 }
 
+/**
+ * @brief Get the number of ELF sections of an extension.
+ *
+ * @param ext Extension to inspect.
+ *
+ * @return Number of sections.
+ */
 static inline unsigned int llext_section_count(const struct llext *ext)
 {
 	return ext->sect_cnt;
@@ -324,24 +342,24 @@ int llext_teardown(struct llext *ext);
 void llext_bootstrap(struct llext *ext, llext_entry_fn_t entry_fn, void *user_data);
 
 /**
- * @brief Get pointers to setup or cleanup functions for an extension.
+ * @brief Get a pointer to a setup or cleanup function for an extension.
  *
- * This syscall can be used to get the addresses of all the functions that
- * have to be called for full extension setup or cleanup.
+ * This syscall can be used to get the addresses of every function that
+ * has to be called for full extension setup or cleanup.
  *
  * @see llext_bootstrap
  *
  * @param[in]    ext Extension to initialize.
  * @param[in]    is_init `true` to get functions to be called at setup time,
  *                       `false` to get the cleanup ones.
- * @param[inout] buf Buffer to store the function pointers in. Can be `NULL`
- *                   to only get the minimum required size.
- * @param[in]    size Allocated size of the buffer in bytes.
- * @returns the size used by the array in bytes, or a negative error code.
+ * @param[inout] ptr Address of pointer to store the function pointer in.
+ *                   Can be `NULL` to retrieve the number of defined functions.
+ * @param[in]    idx Index of the function to retrieve. Ignored if @a ptr is `NULL`.
+ * @returns the number of functions if ptr is NULL, 0 or a negative error code otherwise.
  * @retval -EFAULT A relocation issue was detected
  * @retval -ENOMEM Array does not fit in the allocated buffer
  */
-__syscall ssize_t llext_get_fn_table(struct llext *ext, bool is_init, void *buf, size_t size);
+__syscall ssize_t llext_get_fn_table_entry(struct llext *ext, bool is_init, void **ptr, size_t idx);
 
 /**
  * @brief Find the address for an arbitrary symbol.
@@ -530,4 +548,4 @@ int llext_restore(struct llext **ext, struct llext_loader **ldr, unsigned int n_
 
 #include <zephyr/syscalls/llext.h>
 
-#endif /* ZEPHYR_LLEXT_H */
+#endif /* ZEPHYR_INCLUDE_LLEXT_LLEXT_H_ */

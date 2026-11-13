@@ -1,8 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 
+if(CONFIG_BUILD_ONLY_NO_BLOBS)
+  message(WARNING "
+  ---------------------------------------------------------------------------
+  Building only the IEEE802154 driver without binary blobs and patches.
+  This is only for building (CI) purposes and will not work on a real device.
+  ---------------------------------------------------------------------------
+  ")
+else()
+  if(CONFIG_DT_HAS_ESPRESSIF_ESP32_IEEE802154_ENABLED)
+    zephyr_blobs_verify(MODULE hal_espressif REQUIRED)
+  endif()
+
+  if(CONFIG_DT_HAS_ST_STM32WBA_IEEE802154_ENABLED)
+    zephyr_blobs_verify(MODULE hal_stm32 REQUIRED)
+  endif()
+endif() # CONFIG_BUILD_ONLY_NO_BLOBS
+
 zephyr_library()
 
 # zephyr-keep-sorted-start
+zephyr_library_sources_ifdef(CONFIG_IEEE802154_BFLB ieee802154_bflb.c)
 zephyr_library_sources_ifdef(CONFIG_IEEE802154_CC1200 ieee802154_cc1200.c)
 zephyr_library_sources_ifdef(CONFIG_IEEE802154_CC13XX_CC26XX ieee802154_cc13xx_cc26xx.c)
 zephyr_library_sources_ifdef(CONFIG_IEEE802154_CC13XX_CC26XX_SUB_GHZ ieee802154_cc13xx_cc26xx_subg.c)

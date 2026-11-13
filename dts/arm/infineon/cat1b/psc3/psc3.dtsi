@@ -1,6 +1,6 @@
 /*
- * SPDX-FileCopyrightText: <text>Copyright (c) 2026 Infineon Technologies AG,
- * or an affiliate of Infineon Technologies AG. All rights reserved.</text>
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Infineon Technologies AG,
+ * SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -174,10 +174,9 @@
 			/* Default trigger 0 = FW pulse (used by SAR driver) */
 			trig-in-0-type = <3>;
 
-			adc0: adc@70000 {
+			adc0: adc@80000 {
 				compatible = "infineon,hppass-sar-adc";
-				/* Offset within HPPASS analog region => 0x42b70000 physical */
-				reg = <0x00070000 0x10000>;
+				reg = <0x00080000 0x10000>;
 				interrupts = <109 4>;
 				status = "disabled";
 				#io-channel-cells = <1>;
@@ -271,7 +270,9 @@
 			compatible = "infineon,ipc";
 			reg = <0x421d0000 0x1200>;
 			status = "disabled";
-			#ipc-config-cells = <3>;
+			#ipc-config-cells = <2>;
+			channel-count = <4>;
+			interrupt-count = <2>;
 		};
 
 		scb0: scb@42820000 {
@@ -279,6 +280,7 @@
 			reg = <0x42820000 0xfd0>;
 			interrupts = <23 4>;
 			clk-dst = <0x400>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -287,6 +289,7 @@
 			reg = <0x42840000 0xfd0>;
 			interrupts = <31 4>;
 			clk-dst = <0x401>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -295,6 +298,7 @@
 			reg = <0x42850000 0xfd0>;
 			interrupts = <32 4>;
 			clk-dst = <0x402>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -303,6 +307,7 @@
 			reg = <0x42860000 0xfd0>;
 			interrupts = <33 4>;
 			clk-dst = <0x403>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -311,6 +316,7 @@
 			reg = <0x42870000 0xfd0>;
 			interrupts = <34 4>;
 			clk-dst = <0x404>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -319,6 +325,7 @@
 			reg = <0x42c00000 0xfd0>;
 			interrupts = <35 4>;
 			clk-dst = <0x600>;
+			zephyr,disabling-power-states = <&deepsleep &deepsleep_ram>;
 			status = "disabled";
 		};
 
@@ -840,6 +847,21 @@
 				     <67 4>, /* CH14 */
 				     <68 4>; /* CH15 */
 			status = "disabled";
+		};
+
+		cryptolite0: crypto@42230000 {
+			compatible = "infineon,mxcryptolite";
+			reg = <0x42230000 0x10000>;
+
+			mxcryptolite_trng: mxcryptolite_trng {
+				compatible = "infineon,mxcryptolite-trng";
+				status = "disabled";
+			};
+
+			mxcryptolite_crypto: mxcryptolite_crypto {
+				compatible = "infineon,mxcryptolite-crypto";
+				status = "disabled";
+			};
 		};
 	};
 };

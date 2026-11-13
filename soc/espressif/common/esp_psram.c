@@ -10,6 +10,11 @@
 #include <esp_private/esp_psram_extram.h>
 #include <hal/cache_hal.h>
 #include <zephyr/multi_heap/shared_multi_heap.h>
+#if defined(CONFIG_SOC_ESP32_SPI_MEM_SUPPORT_TIMING_TUNING)
+#include <esp_flash.h>
+#include <esp_private/spi_flash_os.h>
+#include <hal/spi_flash_hal.h>
+#endif
 
 extern int _instruction_reserved_start;
 extern int _instruction_reserved_end;
@@ -31,6 +36,34 @@ int esp_psram_smh_init(void)
 	return shared_multi_heap_add(&smh_psram, NULL);
 }
 
+#if defined(CONFIG_SOC_ESP32_SPI_MEM_SUPPORT_TIMING_TUNING)
+/*
+ * PSRAM timing tuning reprograms the MSPI core clock, which is shared
+ * between flash and PSRAM. The esp_flash driver latched the flash
+ * timing into its HAL context back in esp_flash_config(), so those
+ * cached values are stale once tuning has run and SPI1 accesses
+ * (erase, write) fail. Re-read the timing the tuning code settled on.
+ */
+static void esp_psram_refresh_flash_timing(void)
+{
+	spi_flash_hal_context_t *host;
+	spi_flash_hal_timing_config_t timing = {0};
+
+	if (!spi_flash_timing_is_tuned() || esp_flash_default_chip == NULL) {
+		return;
+	}
+
+	host = (spi_flash_hal_context_t *)esp_flash_default_chip->host;
+
+	spi_timing_get_flash_timing_param(&timing);
+
+	host->clock_conf = timing.clock_config;
+	host->extra_dummy = timing.extra_dummy;
+	host->cs_setup = timing.cs_setup;
+	host->cs_hold = timing.cs_hold;
+}
+#endif
+
 void esp_init_psram(void)
 {
 	intptr_t mapped_vaddr = 0;
@@ -49,6 +82,10 @@ void esp_init_psram(void)
 		ets_printf("Failed to Initialize external RAM, aborting.\n");
 		return;
 	}
+
+#if defined(CONFIG_SOC_ESP32_SPI_MEM_SUPPORT_TIMING_TUNING)
+	esp_psram_refresh_flash_timing();
+#endif
 
 #if !defined(CONFIG_SOC_SERIES_ESP32)
 	cache_hal_invalidate_addr((uint32_t)&_instruction_reserved_start,
@@ -96,3 +133,26 @@ void esp_init_psram(void)
 	memset(&_ext_ram_bss_start, 0,
 	       (&_ext_ram_bss_end - &_ext_ram_bss_start) * sizeof(_ext_ram_bss_start));
 }
+
+#if CONFIG_ESP_SPIRAM && defined(CONFIG_SOC_SERIES_ESP32P4)
+static int esp32p4_psram_init(void)
+{
+	esp_init_psram();
+
+#if defined(CONFIG_SHARED_MULTI_HEAP)
+	if (esp_psram_smh_init()) {
+		printk("Failed to initialize PSRAM shared multi heap\n");
+	}
+#endif
+	return 0;
+}
+
+/*
+ * On ESP32-P4 the PSRAM/MPLL rail is powered by an internal LDO owned by the
+ * devicetree regulator driver, which comes up at PRE_KERNEL_1. Initialize
+ * PSRAM at PRE_KERNEL_1 as well, at the default priority so it runs after the
+ * regulator (lower priority value), and before POST_KERNEL consumers of the
+ * external RAM heap.
+ */
+SYS_INIT(esp32p4_psram_init, PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
+#endif

@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 #include <errno.h>
+#include <zephyr/bluetooth/hci_types.h>
 #include <zephyr/kernel.h>
 #include <zephyr/types.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -55,9 +56,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
 	printk("Disconnected: %s (reason 0x%02x)\n", bt_conn_dst_str(conn), reason);
 
-	bt_conn_unref(g_conn);
+	bt_conn_drop(&g_conn);
 
-	g_conn = NULL;
 	UNSET_FLAG(flag_is_connected);
 }
 
@@ -289,7 +289,7 @@ static void test_main(void)
 			gatt_read(long_chrc_handle);
 		}
 
-		err = bt_conn_disconnect(g_conn, 0x13);
+		err = bt_conn_disconnect(g_conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
 		if (err != 0) {
 			TEST_FAIL("Disconnect failed (err %d)", err);
 			return;

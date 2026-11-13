@@ -6,7 +6,6 @@ import os
 import re
 import tempfile
 from copy import deepcopy
-from typing import Optional
 
 import pytest
 
@@ -107,9 +106,9 @@ def temporary_chdir(dirname):
         os.chdir(here)
 
 @contextlib.contextmanager
-def dtlib_raises(err: Optional[str] = None,
-                 err_endswith: Optional[str] = None,
-                 err_matches: Optional[str] = None):
+def dtlib_raises(err: str | None = None,
+                 err_endswith: str | None = None,
+                 err_matches: str | None = None):
     '''A context manager for running a block of code that should raise
     DTError. Exactly one of the arguments 'err', 'err_endswith',
     and 'err_matches' must be given. The semantics are:
@@ -2305,7 +2304,7 @@ def test_names():
 /dts-v1/;
 
 / {
-	// A leading \ is accepted but ignored in node/propert names
+	// A leading \ is accepted but ignored in node/property names
 	\aA0,._+*#?- = &_, &{/aA0,._+@-};
 
 	// Names that overlap with operators and integer literals

@@ -14,9 +14,9 @@
 #include <zephyr/drivers/usb/uhc.h>
 
 #include "uhc_common.h"
-#include "usb.h"
-#include "usb_host_config.h"
-#include "usb_host_mcux_drv_port.h"
+#include <usb.h>
+#include <usb_host_config.h>
+#include <usb_host_mcux_drv_port.h>
 #include "uhc_mcux_common.h"
 
 #include <zephyr/logging/log.h>
@@ -178,14 +178,51 @@ usb_status_t USB_HostHelperGetPeripheralInformation(usb_device_handle deviceHand
 		break;
 
 	case kUSB_HostGetDeviceHubNumber:
+		if (udev->hub != NULL) {
+			*infoValue = udev->hub->addr;
+		} else {
+			*infoValue = 0;
+		}
+		break;
+
 	case kUSB_HostGetDevicePortNumber:
+		*infoValue = udev->hub_port;
+		break;
+
 	case kUSB_HostGetDeviceHSHubNumber:
-	case kUSB_HostGetDeviceHSHubPort:
-	case kUSB_HostGetHubThinkTime:
+		for (; udev->hub != NULL; udev = udev->hub) {
+			if (udev->hub->speed == USB_SPEED_SPEED_HS) {
+				*infoValue = udev->hub->addr;
+				return kStatus_USB_Success;
+			}
+		}
 		*infoValue = 0;
 		break;
+
+	case kUSB_HostGetDeviceHSHubPort:
+		for (; udev->hub != NULL; udev = udev->hub) {
+			if (udev->hub->speed == USB_SPEED_SPEED_HS) {
+				*infoValue = udev->hub_port;
+				return kStatus_USB_Success;
+			}
+		}
+		*infoValue = 0;
+		break;
+
+	case kUSB_HostGetHubThinkTime: {
+		uint32_t total_think_time = 0;
+
+		if (udev->speed != USB_SPEED_SPEED_HS) {
+			for (; udev->hub != NULL; udev = udev->hub) {
+				total_think_time += udev->hub->tt;
+			}
+		}
+		*infoValue = total_think_time;
+		break;
+	}
+
 	case kUSB_HostGetDeviceLevel:
-		*infoValue = 1;
+		*infoValue = udev->level;
 		break;
 
 	case kUSB_HostGetDeviceSpeed:
@@ -242,10 +279,17 @@ static usb_host_pipe_handle uhc_mcux_check_hal_ep(const struct device *dev,
 		}
 	}
 
-	if (mcux_ep != NULL && mcux_ep->pipeType == xfer->type &&
-	    (mcux_ep->maxPacketSize != xfer->mps ||
-	    priv->mcux_eps_interval[i] != xfer->interval)) {
-		/* re-initialize the ep */
+	if (mcux_ep == NULL) {
+		return NULL;
+	}
+
+	/* If the ep's attributes have changed, close the ep and return NULL.
+	 * The ep will be re-initialized with new attributes.
+	 */
+	if (mcux_ep->pipeType != xfer->type ||
+	    mcux_ep->maxPacketSize != USB_MPS_EP_SIZE(xfer->mps) ||
+	    mcux_ep->numberPerUframe != USB_MPS_ADDITIONAL_TRANSACTIONS(xfer->mps) + 1 ||
+	    priv->mcux_eps_interval[i] != xfer->interval) {
 		status = priv->mcux_if->controllerClosePipe(priv->mcux_host.controllerHandle,
 							    mcux_ep);
 		if (status != kStatus_USB_Success) {

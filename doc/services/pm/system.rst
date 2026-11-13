@@ -78,20 +78,34 @@ The following diagram describes system power management:
 The idle thread locks interrupts before calling :c:func:`pm_system_suspend`
 and keeps ownership of the original architecture interrupt key. If the PM
 subsystem enters a low-power state, PM resume bookkeeping runs with interrupts
-still locked after any system-managed devices have been resumed, including
-:c:func:`pm_state_exit_post_ops`, PM exit notifications, and system clock
-idle-exit accounting. After that bookkeeping is complete and
+still locked. By default, system-managed devices are resumed first, followed
+by :c:func:`pm_state_exit_post_ops`, PM exit notifications, and system clock
+idle-exit accounting. A device resume callback cannot rely on a timer-based
+:c:func:`k_busy_wait` if the low-power state stopped that timer.
+After that bookkeeping is complete and
 :c:func:`pm_system_suspend` returns, the idle thread restores the original
 interrupt key.
 
-Architectures and SoCs that opt in to the ``CONFIG_PM_STATE_SET_IRQ_LOCKED``
-contract use the architecture hooks immediately around the low-power instruction
-so that it can still observe a wake event without dispatching the wake-source ISR
-first. In that mode, :c:func:`pm_state_set` and
+.. note::
+
+   The default-off experimental option
+   :kconfig:option:`CONFIG_PM_EARLY_SYSTEM_TIMER_RESUME` changes the sequence to
+   :c:func:`pm_state_exit_post_ops`, system clock idle-exit accounting, device
+   resume, then PM exit notifications. This can make a timer-based
+   :c:func:`k_busy_wait` usable in device resume callbacks, but requires
+   platform-specific validation. SoC post-ops must not depend on resumed
+   devices, and timer idle-exit must not depend on still-suspended devices.
+   Timer idle-exit may also invoke :c:struct:`k_timer` expiry functions before
+   devices are resumed.
+
+Architectures and SoCs that do not select ``CONFIG_PM_STATE_SET_IRQ_UNLOCKED``
+use the architecture hooks immediately around the low-power instruction so that
+it can still observe a wake event without dispatching the wake-source ISR first.
+In that mode, :c:func:`pm_state_set` and
 :c:func:`pm_state_exit_post_ops` must be used for SoC-specific hardware work
 only, not as final interrupt unmask points.
 
-When this contract is enabled, the interrupt ownership sequence is:
+When this default contract is used, the interrupt ownership sequence is:
 
 .. mermaid::
    :caption: System PM interrupt restore ownership
@@ -136,11 +150,17 @@ When this contract is enabled, the interrupt ownership sequence is:
             Note over Workers: Non-idle thread starts executing
         end
 
-SoC implementations that use this contract must not unmask interrupts from
-:c:func:`pm_state_set` or :c:func:`pm_state_exit_post_ops`. Legacy
+SoC implementations that use this default contract must not unmask interrupts
+from :c:func:`pm_state_set` or :c:func:`pm_state_exit_post_ops`. Legacy
 implementations that still call ``irq_unlock(0)``, ``arch_irq_unlock(0)``,
-``__enable_irq()``, or equivalent operations from those hooks must be migrated
-before they can opt in to the kernel-owned ordering guarantee.
+``__enable_irq()``, or equivalent operations from those hooks must select
+``CONFIG_PM_STATE_SET_IRQ_UNLOCKED`` until they are migrated.
+
+.. note::
+
+    The ordering guarantee above applies only to interrupts that
+    :c:func:`arch_irq_lock` can mask. Zero-latency interrupts are outside this
+    ordering. See :ref:`zlis`.
 
 
 Power States

@@ -1,9 +1,15 @@
 /*
- * SPDX-FileCopyrightText: <text>Copyright (c) 2026 Infineon Technologies AG,
- * or an affiliate of Infineon Technologies AG. All rights reserved.</text>
+ * SPDX-FileCopyrightText: Copyright (c) 2026 Infineon Technologies AG,
+ * SPDX-FileCopyrightText: or an affiliate of Infineon Technologies AG. All rights reserved.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+
+/ {
+	aliases {
+		dmic0 = &dmic_dev;
+	};
+};
 
 dmic_dev: &dmic0 {
 	pinctrl-0 = <&p8_5_pdm3_pdm_clk &p8_6_pdm3_pdm_data>;

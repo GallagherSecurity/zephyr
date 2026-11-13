@@ -30,3 +30,23 @@
 	pinctrl-0 = <&lpuart3_default>;
 	pinctrl-names = "default";
 };
+
+&sar_adc {
+	status = "okay";
+};
+
+&tstmr2 {
+	status = "okay";
+};
+
+&gpio2 {
+	status = "okay";
+};
+
+&edma1 {
+	status = "okay";
+};
+
+&edma2 {
+	status = "okay";
+};

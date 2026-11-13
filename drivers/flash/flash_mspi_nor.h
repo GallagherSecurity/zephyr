@@ -75,12 +75,13 @@ struct flash_mspi_nor_config {
 	const struct device *bus;
 	uint32_t packet_data_limit;
 	uint32_t flash_size;
+	uint32_t erase_block_size;
 	uint16_t page_size;
 	struct mspi_dev_id mspi_id;
 	struct mspi_dev_cfg mspi_nor_cfg;
 	struct mspi_dev_cfg mspi_control_cfg;
-#if defined(CONFIG_MSPI_XIP)
-	struct mspi_xip_cfg xip_cfg;
+#if defined(CONFIG_MSPI_MEMMAP)
+	struct mspi_memmap_cfg memmap_cfg;
 #endif
 #if defined(WITH_SUPPLY_GPIO)
 	struct gpio_dt_spec supply;

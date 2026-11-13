@@ -104,6 +104,13 @@ struct k_spinlock {
 bool z_spin_lock_valid(struct k_spinlock *l);
 bool z_spin_unlock_valid(struct k_spinlock *l);
 void z_spin_lock_set_owner(struct k_spinlock *l);
+void z_spin_lock_transfer_owner(struct k_spinlock *l, struct k_thread *thread);
+void z_assert_can_swap(unsigned int key, struct k_spinlock *swap_lock);
+void z_spin_validate_reset(bool lock_held);
+extern const uint8_t z_spinlock_abort_sentinel;
+#ifdef CONFIG_TEST
+struct k_spinlock *z_spin_get_held_lock(void);
+#endif /* CONFIG_TEST */
 #if defined(CONFIG_64BIT)
 BUILD_ASSERT(CONFIG_MP_MAX_NUM_CPUS <= 8, "Too many CPUs for mask");
 #else
@@ -178,6 +185,8 @@ static ALWAYS_INLINE void z_spinlock_validate_post(struct k_spinlock *l)
  * @warning
  * Holding a spinlock when a context switch occurs is illegal.
  *
+ * @isr_ok
+ *
  * @param l A pointer to the spinlock to lock
  * @return A key value that must be passed to k_spin_unlock() when the
  *         lock is released.
@@ -223,6 +232,8 @@ static ALWAYS_INLINE k_spinlock_key_t k_spin_lock(struct k_spinlock *l)
  *
  * This routine makes one attempt to lock @p l. If it is successful, then
  * it will store the key into @p k.
+ *
+ * @isr_ok
  *
  * @param[in] l A pointer to the spinlock to lock
  * @param[out] k A pointer to the spinlock key
@@ -297,6 +308,8 @@ busy:
  * to passing a key parameter other than the one returned from
  * k_spin_lock(), are illegal.  When CONFIG_SPIN_VALIDATE is set, some
  * of these errors can be detected by the framework.
+ *
+ * @isr_ok
  *
  * @param l A pointer to the spinlock to release
  * @param key The value returned from k_spin_lock() when this lock was

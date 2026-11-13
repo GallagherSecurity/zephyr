@@ -56,6 +56,7 @@ LOG_MODULE_REGISTER(LOG_MODULE_NAME, LOG_LEVEL);
 #endif /* SUPPORT_RADIO_SECURITY_OT_1_2 */
 
 extern uint32_t llhwc_cmn_is_dp_slp_enabled(void);
+extern bool standby_entered;
 
 static struct stm32wba_802154_data_t stm32wba_802154_data;
 static volatile bool stm32wba_tx_wait_pending;
@@ -119,6 +120,15 @@ static void stm32wba_802154_rx_thread(void *arg1, void *arg2, void *arg3)
 
 		__ASSERT_NO_MSG(rx_frame->psdu != NULL);
 
+		/* The length is supplied by the radio firmware; reject one that
+		 * cannot hold the FCS before subtracting it.
+		 */
+		if (rx_frame->length < IEEE802154_FCS_LENGTH) {
+			LOG_ERR("Invalid frame length %u", rx_frame->length);
+			rx_frame->psdu = NULL;
+			continue;
+		}
+
 		/* Depending on the net L2 layer, the FCS may be included in length or not */
 		if (IS_ENABLED(CONFIG_IEEE802154_L2_PKT_INCL_FCS)) {
 			pkt_len = rx_frame->length;
@@ -127,7 +137,11 @@ static void stm32wba_802154_rx_thread(void *arg1, void *arg2, void *arg3)
 		}
 
 #if defined(CONFIG_NET_BUF_DATA_SIZE)
-		__ASSERT_NO_MSG(pkt_len <= CONFIG_NET_BUF_DATA_SIZE);
+		if (pkt_len > CONFIG_NET_BUF_DATA_SIZE) {
+			LOG_ERR("Frame too long: %u", pkt_len);
+			rx_frame->psdu = NULL;
+			continue;
+		}
 #endif
 
 		LOG_DBG("Frame received - sequence nb: %u, length: %u", rx_frame->psdu[2],
@@ -363,7 +377,6 @@ static enum ieee802154_hw_caps stm32wba_802154_get_capabilities(const struct dev
 #if (SUPPORT_RADIO_SECURITY_OT_1_2 == 1)
 		IEEE802154_HW_TX_SEC |
 #endif
-		IEEE802154_HW_SLEEP_TO_TX |
 		IEEE802154_RX_ON_WHEN_IDLE;
 }
 
@@ -754,7 +767,7 @@ static void stm32wba_802154_iface_init(struct net_if *iface)
 		.stm32wba_802154_ral_cbk_tx_ack_started = stm32wba_802154_tx_ack_started,
 	};
 
-	link_layer_register_isr(false);
+	link_layer_register_isr();
 
 #if !defined(CONFIG_NET_L2_CUSTOM_IEEE802154_STM32WBA)
 	ll_sys_thread_init();
@@ -1145,12 +1158,12 @@ static int radio_pm_action(const struct device *dev, enum pm_device_action actio
 	case PM_DEVICE_ACTION_RESUME:
 		LL_AHB5_GRP1_EnableClock(LL_AHB5_GRP1_PERIPH_RADIO);
 #if defined(CONFIG_PM_S2RAM)
-		if (ll_sys_dp_slp_get_state() == LL_SYS_DP_SLP_ENABLED) {
-			if (LL_PWR_IsActiveFlag_SB() == 1U) {
-				/* Restore NVIC configuration for radio */
-				link_layer_register_isr(true);
-				ll_sys_dp_slp_exit();
-			}
+		if (standby_entered) {
+			/* Restore NVIC configuration for radio */
+			link_layer_register_isr();
+		}
+		if (ll_sys_dp_slp_exit() != LL_SYS_OK) {
+			LOG_ERR("Failed to exit low-power sleep mode");
 		}
 #endif /* CONFIG_PM_S2RAM */
 		LINKLAYER_PLAT_NotifyWFIExit();

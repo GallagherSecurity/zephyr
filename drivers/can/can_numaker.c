@@ -150,7 +150,6 @@ static DEVICE_API(can, can_numaker_driver_api) = {
 	.recover = can_mcan_recover,
 #endif /* CONFIG_CAN_MANUAL_RECOVERY_MODE */
 	.get_state = can_mcan_get_state,
-	.set_state_change_callback = can_mcan_set_state_change_callback,
 	.get_core_clock = can_numaker_get_core_clock,
 	.get_max_filters = can_mcan_get_max_filters,
 	.timing_min = CAN_MCAN_TIMING_MIN_INITIALIZER,
@@ -245,8 +244,7 @@ static const struct can_mcan_ops can_numaker_ops = {
                                                                                                    \
 	static uint32_t can_numaker_data_##inst;                                                   \
                                                                                                    \
-	static struct can_mcan_data can_mcan_data_##inst =                                         \
-		CAN_MCAN_DATA_INITIALIZER(&can_numaker_data_##inst);                               \
+	CAN_MCAN_DATA_DEFINE(can_mcan_data_##inst, &can_numaker_data_##inst);                      \
                                                                                                    \
 	CAN_DEVICE_DT_INST_DEFINE(inst, can_numaker_init, NULL, &can_mcan_data_##inst,             \
 				  &can_mcan_config_##inst, POST_KERNEL, CONFIG_CAN_INIT_PRIORITY,  \

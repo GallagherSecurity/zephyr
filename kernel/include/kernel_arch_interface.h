@@ -27,7 +27,7 @@ extern "C" {
 #endif
 
 /**
- * @defgroup arch-timing Architecture timing APIs
+ * @addtogroup arch-timing
  * @{
  */
 #ifdef CONFIG_ARCH_HAS_CUSTOM_BUSY_WAIT
@@ -249,7 +249,7 @@ int arch_coprocessors_disable(struct k_thread *thread);
  * @return 0 on success
  * @return -EBADF Bad thread object
  * @return -EPERM No permissions on thread object
- * #return -ENOTSUP Forbidden by hardware policy
+ * @return -ENOTSUP Forbidden by hardware policy
  * @return -EINVAL Thread is uninitialized or exited or not a user thread
  * @return -EFAULT Bad memory address for unused_ptr
  */
@@ -329,8 +329,16 @@ static inline bool arch_is_in_isr(void);
  * @param phys Page-aligned Source physical address to map
  * @param size Page-aligned size of the mapped memory region in bytes
  * @param flags Caching, access and control flags, see K_MAP_* macros
+ *
+ * @retval 0 On success
+ * @retval -EINVAL If invalid arguments are given
+ * @retval -ENOTSUP If the requested cache/attribute combination in @a flags
+ *                  is not supported by the target architecture
+ * @retval -ENOMEM If the underlying page table could not be updated
+ * @retval -errno Other negative error codes may be returned by
+ *                architecture-specific implementations for other failure modes
  */
-void arch_mem_map(void *virt, uintptr_t phys, size_t size, uint32_t flags);
+int arch_mem_map(void *virt, uintptr_t phys, size_t size, uint32_t flags);
 
 /**
  * Remove mappings for a provided virtual address range
@@ -357,31 +365,13 @@ void arch_mem_map(void *virt, uintptr_t phys, size_t size, uint32_t flags);
  *
  * @param addr Page-aligned base virtual address to un-map
  * @param size Page-aligned region size
+ *
+ * @retval 0 On success
+ * @retval -EINVAL If invalid arguments are given
+ * @retval -errno Other negative error codes may be returned by
+ *                architecture-specific implementations for other failure modes
  */
-void arch_mem_unmap(void *addr, size_t size);
-
-/**
- * Get the mapped physical memory address from virtual address.
- *
- * The function only needs to query the current set of page tables as
- * the information it reports must be common to all of them if multiple
- * page tables are in use. If multiple page tables are active it is unnecessary
- * to iterate over all of them.
- *
- * Unless otherwise specified, virtual pages have the same mappings
- * across all page tables. Calling this function on data pages that are
- * exceptions to this rule (such as the scratch page) is undefined behavior.
- * Just check the currently installed page tables and return the information
- * in that.
- *
- * @param virt Page-aligned virtual address
- * @param[out] phys Mapped physical address (can be NULL if only checking
- *                  if virtual address is mapped)
- *
- * @retval 0 if mapping is found and valid
- * @retval -EFAULT if virtual address is not mapped
- */
-int arch_page_phys_get(void *virt, uintptr_t *phys);
+int arch_mem_unmap(void *addr, size_t size);
 
 /**
  * Update page frame database with reserved pages
@@ -672,6 +662,39 @@ uint16_t arch_coredump_tgt_code_get(void);
  */
 uintptr_t arch_coredump_stack_ptr_get(const struct k_thread *thread);
 
+#if defined(CONFIG_DEBUG_COREDUMP_SMP_FREEZE_CPUS) || defined(__DOXYGEN__)
+
+/**
+ * @brief Freeze every other online CPU and capture its live register state
+ *
+ * Sends an architecture-specific IPI to every CPU other than the caller and
+ * waits (with a bounded timeout) for each to report a captured snapshot.
+ * A CPU that doesn't respond in time (never booted, or busy with IRQs
+ * masked) is simply skipped -- this must never block indefinitely.
+ *
+ * Must be paired with a later call to arch_coredump_thaw_other_cpus() so
+ * frozen CPUs resume; must not be called from more than one CPU at a time.
+ */
+void arch_coredump_freeze_other_cpus(void);
+
+/**
+ * @brief Release every CPU frozen by arch_coredump_freeze_other_cpus()
+ */
+void arch_coredump_thaw_other_cpus(void);
+
+/**
+ * @brief Emit a live register snapshot captured for the given CPU index
+ *
+ * No-op if that CPU was never successfully frozen (self, never booted, or
+ * timed out). Only valid to call between arch_coredump_freeze_other_cpus()
+ * and arch_coredump_thaw_other_cpus().
+ *
+ * @param cpu CPU index (0..CONFIG_MP_MAX_NUM_CPUS-1)
+ */
+void arch_coredump_cpu_snapshot_dump(unsigned int cpu);
+
+#endif /* CONFIG_DEBUG_COREDUMP_SMP_FREEZE_CPUS */
+
 #if defined(CONFIG_USERSPACE) || defined(__DOXYGEN__)
 
 /**
@@ -684,6 +707,39 @@ uintptr_t arch_coredump_stack_ptr_get(const struct k_thread *thread);
 void arch_coredump_priv_stack_dump(struct k_thread *thread);
 
 #endif /* CONFIG_USERSPACE || __DOXYGEN__ */
+
+#ifdef CONFIG_DEBUG_COREDUMP_FATAL_UNLOCK_IRQS
+
+/**
+ * @brief Allow device IRQs while running coredump on the fatal path
+ *
+ * Called from z_fatal_error() with interrupts locked (@a key is the value
+ * returned by arch_irq_lock()). The default implementation calls
+ * arch_irq_unlock(key).
+ *
+ * Architectures where exception state keeps IRQs masked independently of the
+ * kernel IRQ lock (e.g. ARM64 DAIF.I) must override to clear that mask and
+ * may use @a cookie (non-NULL pointer to unsigned int) to save/restore
+ * the prior DAIF value.
+ *
+ * @param key IRQ lock key from the enclosing z_fatal_error()
+ * @param cookie Arch-specific storage (unsigned int); ignored on the weak default
+ */
+void arch_coredump_fatal_irq_unlock(unsigned int key, void *cookie);
+
+/**
+ * @brief Restore interrupt masking after coredump on the fatal path
+ *
+ * Pairs with arch_coredump_fatal_irq_unlock(). Returns a refreshed
+ * arch_irq_lock() key for the remainder of z_fatal_error().
+ *
+ * @param cookie Same pointer passed to arch_coredump_fatal_irq_unlock()
+ *
+ * @return Fresh IRQ lock key from arch_irq_lock() after restoring masks
+ */
+unsigned int arch_coredump_fatal_irq_lock(void *cookie);
+
+#endif /* CONFIG_DEBUG_COREDUMP_FATAL_UNLOCK_IRQS */
 
 /** @} */
 

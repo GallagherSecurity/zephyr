@@ -8,7 +8,7 @@
 #include "lwm2m_object.h"
 #include "lwm2m_observation.h"
 
-/* LWM2M / CoAP Content-Formats */
+/* LwM2M / CoAP Content-Formats */
 #define LWM2M_FORMAT_PLAIN_TEXT	      0
 #define LWM2M_FORMAT_APP_LINK_FORMAT  40
 #define LWM2M_FORMAT_APP_OCTET_STREAM 42
@@ -72,6 +72,9 @@ int lwm2m_discover_handler(struct lwm2m_message *msg, bool is_bootstrap);
 int lwm2m_write_handler(struct lwm2m_engine_obj_inst *obj_inst, struct lwm2m_engine_res *res,
 			struct lwm2m_engine_res_inst *res_inst,
 			struct lwm2m_engine_obj_field *obj_field, struct lwm2m_message *msg);
+
+/* Check that the server of msg->ctx may perform msg->operation on msg->path */
+int lwm2m_check_path_access(struct lwm2m_message *msg);
 
 enum coap_block_size lwm2m_default_block_size(void);
 

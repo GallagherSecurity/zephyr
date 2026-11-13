@@ -64,7 +64,7 @@ def test_parse_remainder(test_case):
 
 
 TEST_CASES_CMAKE_ARGS = [
-    # check that given args (a) lead to expected cmake arguments (e) in correct oder
+    # check that given args (a) lead to expected cmake arguments (e) in correct order
     # cmake_opts
     {'a': ['--cmake-opt=-Da=1', '--cmake-opt=-Db=2'],
      'e': ['-Da=1', '-Db=2']},
@@ -173,6 +173,7 @@ def test_cmake_args(monkeypatch, test_case):
             previous_position = current_position
 
     monkeypatch.setattr('build.run_cmake', run_cmake_mock)
+    monkeypatch.setattr('build.west_topdir', lambda start=None, fall_back=True: '/west/topdir')
     monkeypatch.setattr(b, '_banner', lambda _: True)
 
     # --- Trigger CMake run ---

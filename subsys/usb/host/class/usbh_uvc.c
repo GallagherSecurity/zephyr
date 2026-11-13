@@ -15,18 +15,18 @@
 #include <zephyr/usb/usb_ch9.h>
 #include <zephyr/drivers/usb/udc.h>
 #include <zephyr/drivers/video.h>
-#include <zephyr/drivers/video-controls.h>
+#include <zephyr/video/video.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/util.h>
 
-#include "usbh_ch9.h"
-#include "usbh_class.h"
-#include "usbh_desc.h"
-#include "usbh_device.h"
+#include <usbh_ch9.h>
+#include <usbh_class.h>
+#include <usbh_desc.h>
+#include <usbh_device.h>
 
-#include "uvc.h"
-#include "../../../drivers/video/video_ctrls.h"
-#include "../../../drivers/video/video_device.h"
+#include <uvc.h>
+
+#include "../../../../drivers/video/video_common.h"
 
 LOG_MODULE_REGISTER(usbh_uvc, CONFIG_USBH_UVC_LOG_LEVEL);
 
@@ -1530,7 +1530,7 @@ static int initiate_transfer(struct uvc_host_data *const host_data,
 	buf = usbh_xfer_buf_alloc(host_data->udev, stream_info->ep_mps_mult);
 	if (buf == NULL) {
 		LOG_ERR("Failed to allocate buffer");
-		usbh_xfer_free(host_data->udev, xfer);
+		(void)uhc_xfer_unref(xfer);
 		return -ENOMEM;
 	}
 
@@ -1544,7 +1544,7 @@ static int initiate_transfer(struct uvc_host_data *const host_data,
 	if (ret != 0) {
 		LOG_ERR("Enqueue failed: ret=%d", ret);
 		net_buf_unref(buf);
-		usbh_xfer_free(host_data->udev, xfer);
+		(void)uhc_xfer_unref(xfer);
 		return ret;
 	}
 
@@ -2451,6 +2451,11 @@ static int usbh_uvc_removed(struct usbh_class_data *const c_data)
 	while ((vbuf = k_fifo_get(&host_data->fifo_in, K_NO_WAIT)) != NULL) {
 		vbuf->bytesused = 0;
 		k_fifo_put(&host_data->fifo_out, vbuf);
+	}
+
+	if (IS_ENABLED(CONFIG_POLL) && host_data->sig != NULL) {
+		LOG_DBG("Raising VIDEO_BUF_ABORTED signal");
+		k_poll_signal_raise(host_data->sig, VIDEO_BUF_ABORTED);
 	}
 
 	k_mutex_unlock(&host_data->lock);

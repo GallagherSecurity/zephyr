@@ -16,6 +16,8 @@
 
 	aliases {
 		watchdog0 = &wdog5;
+		i2s-codec-tx = &sai3_2;
+		i2s-tx = &sai3_2;
 	};
 
 	chosen {
@@ -57,6 +59,7 @@
 	pinctrl-names = "default";
 	phy-handle = <&phy0>;
 	phy-connection-type = "rgmii";
+	ptp-clock = <&enetc_ptp_clock>;
 	status = "okay";
 };
 
@@ -144,6 +147,37 @@
 	status = "okay";
 };
 
+&lpi2c4 {
+	pinctrl-0 = <&lpi2c4_default>;
+	pinctrl-names = "default";
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	gpio_exp1: gpio-exp@21 {
+		compatible = "nxp,pcal6408";
+		reg = <0x21>;
+		#gpio-cells = <2>;
+		gpio-controller;
+		ngpios = <8>;
+
+		codec-sai3-sel-hog {
+			gpio-hog;
+			gpios = <7 GPIO_ACTIVE_LOW>;
+			output-low;
+			line-name = "CODEC_SLOT_SAI3_SEL";
+		};
+	};
+
+	audio_codec: wm8962@1a {
+		compatible = "wolfson,wm8962";
+		reg = <0x1a>;
+		clock-source = "MCLK";
+		clocks = <&scmi_clk IMX95_CLK_SAI3>;
+		clock-names = "mclk";
+	};
+};
+
 &lpi2c5 {
 	pinctrl-0 = <&lpi2c5_default>;
 	pinctrl-names = "default";
@@ -204,6 +238,25 @@
 	pinctrl-names = "default";
 };
 
+&sai3_2 {
+	mclk-output;
+	pinctrl-0 = <&sai3_default>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * NOTE: PDM shares the PDM_CLK/PDM_BIT_STREAM0 pins with FLEXCAN1.
+ * The PDM_CAN_SEL line (gpio_can bit 10) selects between them:
+ *   0 = PDM
+ *   1 = FLEXCAN1
+ * To use PDM, FLEXCAN1 must be disabled and PDM_CAN_SEL set to 0 (PDM).
+ */
+&pdm {
+	pinctrl-0 = <&pinmux_pdm>;
+	pinctrl-names = "default";
+};
+
 &tpm2 {
 	pinctrl-0 = <&tpm2_default>;
 	pinctrl-names = "default";
@@ -211,6 +264,10 @@
 };
 
 &lptmr1 {
+	status = "okay";
+};
+
+&tstmr2 {
 	status = "okay";
 };
 

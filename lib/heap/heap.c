@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2019 Intel Corporation
+ * Copyright (c) 2026 Qualcomm Technologies, Inc.
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -19,6 +20,19 @@ LOG_MODULE_REGISTER(os_heap, CONFIG_SYS_HEAP_LOG_LEVEL);
 
 #ifdef CONFIG_SYS_HEAP_CANARIES_RANDOM
 #include <zephyr/random/random.h>
+#endif
+
+#ifdef CONFIG_SYS_HEAP_SANITIZER_HOOKS
+#include "heap_sanitizer.h"
+#endif
+
+#ifdef CONFIG_SYS_HEAP_CALLER_POINTER
+/*
+ * Must be a macro: __builtin_return_address() must be evaluated in the
+ * allocator's own stack frame to capture the correct call site.
+ */
+#define HEAP_CAPTURE_CALLER() \
+	__builtin_return_address(CONFIG_SYS_HEAP_CALLER_LEVEL)
 #endif
 
 #ifdef CONFIG_SYS_HEAP_RUNTIME_STATS
@@ -296,6 +310,9 @@ void sys_heap_free(struct sys_heap *heap, void *mem)
 		k_panic();
 	}
 
+	IF_ENABLED(CONFIG_SYS_HEAP_RELEASE_HOOK,
+		   (sys_heap_release_hook(mem, chunk_usable_bytes(h, c) - mem_align_gap(h, mem));))
+
 	/*
 	 * Header fields are ordered as LEFT_SIZE then SIZE_AND_USED.
 	 * This places SIZE_AND_USED immediately before the user data,
@@ -340,11 +357,16 @@ void sys_heap_free(struct sys_heap *heap, void *mem)
 	h->allocated_bytes -= chunk_usable_bytes(h, c);
 #endif
 
+	IF_ENABLED(CONFIG_SYS_HEAP_THREAD_STATS, (z_heap_stats_on_free(heap, c, mem)));
+
 #ifdef CONFIG_SYS_HEAP_LISTENER
 	heap_listener_notify_free(HEAP_ID_FROM_POINTER(heap), mem,
 				  chunk_usable_bytes(h, c) - mem_align_gap(h, mem));
 #endif
 
+	IF_ENABLED(CONFIG_SYS_HEAP_SANITIZER_HOOKS,
+		   (heap_sanitizer_on_free(heap, mem,
+				      chunk_usable_bytes(h, c) - mem_align_gap(h, mem))));
 	free_chunk(h, c);
 }
 
@@ -447,6 +469,10 @@ void *sys_heap_alloc(struct sys_heap *heap, size_t bytes)
 	}
 
 	mem = chunk_mem(h, c);
+#ifdef CONFIG_SYS_HEAP_CALLER_POINTER
+	chunk_trailer(h, c)->caller = HEAP_CAPTURE_CALLER();
+#endif
+	IF_ENABLED(CONFIG_SYS_HEAP_THREAD_STATS, (z_heap_stats_on_alloc(heap, c, mem)));
 
 #ifdef CONFIG_SYS_HEAP_RUNTIME_STATS
 	increase_allocated_bytes(h, chunk_usable_bytes(h, c));
@@ -457,6 +483,7 @@ void *sys_heap_alloc(struct sys_heap *heap, size_t bytes)
 				   chunk_usable_bytes(h, c));
 #endif
 
+	IF_ENABLED(CONFIG_SYS_HEAP_SANITIZER_HOOKS, (heap_sanitizer_on_alloc(heap, mem, bytes)));
 	IF_ENABLED(CONFIG_MSAN, (__msan_allocated_memory(mem, bytes)));
 	return mem;
 }
@@ -536,6 +563,11 @@ void *sys_heap_aligned_alloc(struct sys_heap *heap, size_t align, size_t bytes)
 		set_chunk_canary(h, c);
 	}
 
+#ifdef CONFIG_SYS_HEAP_CALLER_POINTER
+	chunk_trailer(h, c)->caller = HEAP_CAPTURE_CALLER();
+#endif
+	IF_ENABLED(CONFIG_SYS_HEAP_THREAD_STATS, (z_heap_stats_on_alloc(heap, c, mem)));
+
 #ifdef CONFIG_SYS_HEAP_RUNTIME_STATS
 	increase_allocated_bytes(h, chunk_usable_bytes(h, c));
 #endif
@@ -546,6 +578,7 @@ void *sys_heap_aligned_alloc(struct sys_heap *heap, size_t align, size_t bytes)
 #endif
 
 	IF_ENABLED(CONFIG_MSAN, (__msan_allocated_memory(mem, bytes)));
+	IF_ENABLED(CONFIG_SYS_HEAP_SANITIZER_HOOKS, (heap_sanitizer_on_alloc(heap, mem, bytes)));
 	return mem;
 }
 
@@ -585,11 +618,32 @@ static bool inplace_realloc(struct sys_heap *heap, void *ptr, size_t bytes)
 		return true;
 	}
 
+	/*
+	 * Capture trailer metadata before any resize.  split_chunks() and
+	 * merge_chunks() change chunk_size(h, c), which moves the trailer to
+	 * a new position; we must write it there after set_chunk_canary().
+	 */
+#ifdef CONFIG_SYS_HEAP_THREAD_STATS
+	struct k_thread *old_owner = NULL;
+	size_t old_usable = 0;
+
+	if (h->stats != NULL) {
+		old_owner = chunk_trailer(h, c)->thread;
+		old_usable = chunk_usable_bytes(h, c) - align_gap;
+	}
+#endif
+#ifdef CONFIG_SYS_HEAP_CALLER_POINTER
+	void *saved_caller = chunk_trailer(h, c)->caller;
+#endif
+
 	if (chunk_size(h, c) > chunks_need) {
 		/* Shrink in place, split off and free unused suffix */
 #ifdef CONFIG_SYS_HEAP_LISTENER
 		size_t bytes_freed = chunk_usable_bytes(h, c) - align_gap;
 #endif
+		IF_ENABLED(CONFIG_SYS_HEAP_RELEASE_HOOK,
+			   (sys_heap_release_hook((uint8_t *)ptr + bytes,
+						  chunk_usable_bytes(h, c) - align_gap - bytes);))
 
 #ifdef CONFIG_SYS_HEAP_RUNTIME_STATS
 		h->allocated_bytes -=
@@ -601,6 +655,14 @@ static bool inplace_realloc(struct sys_heap *heap, void *ptr, size_t bytes)
 		if (SYS_HEAP_HARDENING_FULL) {
 			set_chunk_canary(h, c);
 		}
+
+		/* Restore trailer at the new (smaller) position. */
+#ifdef CONFIG_SYS_HEAP_THREAD_STATS
+		z_heap_stats_on_realloc(heap, c, ptr, old_usable, old_owner);
+#endif
+#ifdef CONFIG_SYS_HEAP_CALLER_POINTER
+		chunk_trailer(h, c)->caller = saved_caller;
+#endif
 
 		/* Left neighbor is c (used, just validated) so only
 		 * attempt a right merge inline and add to free list.
@@ -654,6 +716,11 @@ static bool inplace_realloc(struct sys_heap *heap, void *ptr, size_t bytes)
 			set_chunk_canary(h, c);
 		}
 
+		z_heap_stats_on_realloc(heap, c, ptr, old_usable, old_owner);
+#ifdef CONFIG_SYS_HEAP_CALLER_POINTER
+		chunk_trailer(h, c)->caller = saved_caller;
+#endif
+
 #ifdef CONFIG_SYS_HEAP_LISTENER
 		heap_listener_notify_alloc(HEAP_ID_FROM_POINTER(heap), ptr,
 					   chunk_usable_bytes(h, c) - align_gap);
@@ -678,7 +745,15 @@ void *sys_heap_realloc(struct sys_heap *heap, void *ptr, size_t bytes)
 		return NULL;
 	}
 
+#ifdef CONFIG_SYS_HEAP_SANITIZER_HOOKS
+	size_t old_usable = sys_heap_usable_size(heap, ptr);
+#endif
+
 	if (inplace_realloc(heap, ptr, bytes)) {
+		IF_ENABLED(CONFIG_SYS_HEAP_SANITIZER_HOOKS,
+			   (heap_sanitizer_on_free(heap, ptr, old_usable)));
+		IF_ENABLED(CONFIG_SYS_HEAP_SANITIZER_HOOKS,
+			   (heap_sanitizer_on_alloc(heap, ptr, bytes)));
 		return ptr;
 	}
 
@@ -688,6 +763,14 @@ void *sys_heap_realloc(struct sys_heap *heap, void *ptr, size_t bytes)
 	if (ptr2 != NULL) {
 		size_t prev_size = sys_heap_usable_size(heap, ptr);
 
+		/*
+		 * The copy reads the source block's whole usable region, which
+		 * a sanitizer backend keeps poisoned past the user-requested
+		 * size. Re-grant access to the full region for the duration of
+		 * the copy; the free below re-poisons it.
+		 */
+		IF_ENABLED(CONFIG_SYS_HEAP_SANITIZER_HOOKS,
+			   (heap_sanitizer_on_alloc(heap, ptr, prev_size)));
 		memcpy(ptr2, ptr, min(prev_size, bytes));
 		sys_heap_free(heap, ptr);
 	}
@@ -708,8 +791,16 @@ void *sys_heap_aligned_realloc(struct sys_heap *heap, void *ptr,
 
 	__ASSERT((align & (align - 1)) == 0, "align must be a power of 2");
 
+#ifdef CONFIG_SYS_HEAP_SANITIZER_HOOKS
+	size_t old_usable = sys_heap_usable_size(heap, ptr);
+#endif
+
 	if ((align == 0 || ((uintptr_t)ptr & (align - 1)) == 0) &&
 	    inplace_realloc(heap, ptr, bytes)) {
+		IF_ENABLED(CONFIG_SYS_HEAP_SANITIZER_HOOKS,
+			   (heap_sanitizer_on_free(heap, ptr, old_usable)));
+		IF_ENABLED(CONFIG_SYS_HEAP_SANITIZER_HOOKS,
+			   (heap_sanitizer_on_alloc(heap, ptr, bytes)));
 		return ptr;
 	}
 
@@ -722,6 +813,14 @@ void *sys_heap_aligned_realloc(struct sys_heap *heap, void *ptr,
 	if (ptr2 != NULL) {
 		size_t prev_size = sys_heap_usable_size(heap, ptr);
 
+		/*
+		 * The copy reads the source block's whole usable region, which
+		 * a sanitizer backend keeps poisoned past the user-requested
+		 * size. Re-grant access to the full region for the duration of
+		 * the copy; the free below re-poisons it.
+		 */
+		IF_ENABLED(CONFIG_SYS_HEAP_SANITIZER_HOOKS,
+			   (heap_sanitizer_on_alloc(heap, ptr, prev_size)));
 		memcpy(ptr2, ptr, min(prev_size, bytes));
 		sys_heap_free(heap, ptr);
 	}
@@ -742,6 +841,9 @@ void sys_heap_init(struct sys_heap *heap, void *mem, size_t bytes)
 
 	/* Reserve the end marker chunk's header */
 	__ASSERT(bytes > heap_footer_bytes(bytes), "heap size is too small");
+#ifdef CONFIG_SYS_HEAP_SANITIZER_HOOKS
+	const size_t orig_bytes = bytes; /* preserve for heap_sanitizer_on_init */
+#endif
 	bytes -= heap_footer_bytes(bytes);
 
 	/* Round the start up, the end down */
@@ -762,6 +864,8 @@ void sys_heap_init(struct sys_heap *heap, void *mem, size_t bytes)
 	h->allocated_bytes = 0;
 	h->max_allocated_bytes = 0;
 #endif
+
+	IF_ENABLED(CONFIG_SYS_HEAP_THREAD_STATS, (z_heap_stats_on_init(heap)));
 
 #if CONFIG_SYS_HEAP_ARRAY_SIZE
 	sys_heap_array_save(heap);
@@ -800,4 +904,8 @@ void sys_heap_init(struct sys_heap *heap, void *mem, size_t bytes)
 	set_chunk_used(h, heap_sz, true);
 
 	free_list_add(h, chunk0_size);
+
+#ifdef CONFIG_SYS_HEAP_SANITIZER_HOOKS
+	heap_sanitizer_on_init(heap, mem, orig_bytes);
+#endif
 }

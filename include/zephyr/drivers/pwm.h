@@ -34,7 +34,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/sys/math_extras.h>
 #include <zephyr/sys/slist.h>
 #include <zephyr/toolchain.h>
@@ -202,10 +202,10 @@ struct pwm_dt_spec {
 	}
 
 /**
- * @brief Static initializer for a struct pwm_dt_spec from a DT_DRV_COMPAT
+ * @brief Static initializer for a struct pwm_dt_spec from a @c DT_DRV_COMPAT
  *        instance.
  *
- * @param inst DT_DRV_COMPAT instance number
+ * @param inst @c DT_DRV_COMPAT instance number
  * @param name Lowercase-and-underscores name of a pwms element as defined by
  *             the node's pwm-names property.
  *
@@ -243,7 +243,7 @@ struct pwm_dt_spec {
  * @brief Like PWM_DT_SPEC_INST_GET_BY_NAME(), with a fallback to a default
  *        value.
  *
- * @param inst DT_DRV_COMPAT instance number
+ * @param inst @c DT_DRV_COMPAT instance number
  * @param name Lowercase-and-underscores name of a pwms element as defined by
  *             the node's pwm-names property.
  * @param default_value Fallback value to expand to.
@@ -307,10 +307,10 @@ struct pwm_dt_spec {
 	}
 
 /**
- * @brief Static initializer for a struct pwm_dt_spec from a DT_DRV_COMPAT
+ * @brief Static initializer for a struct pwm_dt_spec from a @c DT_DRV_COMPAT
  *        instance.
  *
- * @param inst DT_DRV_COMPAT instance number
+ * @param inst @c DT_DRV_COMPAT instance number
  * @param idx Logical index into 'pwms' property.
  *
  * @return Static initializer for a struct pwm_dt_spec for the property.
@@ -346,7 +346,7 @@ struct pwm_dt_spec {
  * @brief Like PWM_DT_SPEC_INST_GET_BY_IDX(), with a fallback to a default
  *        value.
  *
- * @param inst DT_DRV_COMPAT instance number
+ * @param inst @c DT_DRV_COMPAT instance number
  * @param idx Logical index into 'pwms' property.
  * @param default_value Fallback value to expand to.
  *
@@ -373,7 +373,7 @@ struct pwm_dt_spec {
 /**
  * @brief Equivalent to <tt>PWM_DT_SPEC_INST_GET_BY_IDX(inst, 0)</tt>.
  *
- * @param inst DT_DRV_COMPAT instance number
+ * @param inst @c DT_DRV_COMPAT instance number
  *
  * @return Static initializer for a struct pwm_dt_spec for the property.
  *
@@ -401,7 +401,7 @@ struct pwm_dt_spec {
  * @brief Equivalent to
  *        <tt>PWM_DT_SPEC_INST_GET_BY_IDX_OR(inst, 0, default_value)</tt>.
  *
- * @param inst DT_DRV_COMPAT instance number
+ * @param inst @c DT_DRV_COMPAT instance number
  * @param default_value Fallback value to expand to.
  *
  * @return Static initializer for a struct pwm_dt_spec for the property.
@@ -448,7 +448,7 @@ struct pwm_event_callback;
  * support.
  *
  * @param[in] dev PWM device instance.
- * @param callback Original struct gpio_callback owning this handler.
+ * @param callback Original struct pwm_event_callback owning this handler.
  * @param channel PWM channel.
  * @param events Event mask. See @ref PWM_EVENT_TYPES.
  *
@@ -921,9 +921,11 @@ static inline int z_impl_pwm_disable_capture(const struct device *dev,
  *                    width (in clock cycles). HW specific.
  * @param[out] pulse Pointer to the memory to store the captured PWM pulse width
  *                   (in clock cycles). HW specific.
- * @param timeout Waiting period for the capture to complete.
+ * @param timeout Waiting period for the capture to complete. K_NO_WAIT is not
+ *                supported.
  *
  * @retval 0 on success.
+ * @retval -EINVAL A K_NO_WAIT timeout was given.
  * @retval -EBUSY PWM capture already in progress.
  * @retval -EAGAIN Waiting period timed out.
  * @retval -EIO IO error while capturing.
@@ -951,9 +953,11 @@ __syscall int pwm_capture_cycles(const struct device *dev, uint32_t channel,
  *                    width (in usec).
  * @param[out] pulse Pointer to the memory to store the captured PWM pulse width
  *                   (in usec).
- * @param timeout Waiting period for the capture to complete.
+ * @param timeout Waiting period for the capture to complete. K_NO_WAIT is not
+ *                supported.
  *
  * @return 0 on success, negative errno value on failure.
+ * @retval -EINVAL A K_NO_WAIT timeout was given.
  * @retval -EBUSY PWM capture already in progress.
  * @retval -EAGAIN Waiting period timed out.
  * @retval -EIO IO error while capturing.
@@ -1004,9 +1008,11 @@ static inline int pwm_capture_usec(const struct device *dev, uint32_t channel,
  *                    width (in nsec).
  * @param[out] pulse Pointer to the memory to store the captured PWM pulse width
  *                   (in nsec).
- * @param timeout Waiting period for the capture to complete.
+ * @param timeout Waiting period for the capture to complete. K_NO_WAIT is not
+ *                supported.
  *
  * @return 0 on success, negative errno value on failure.
+ * @retval -EINVAL A K_NO_WAIT timeout was given.
  * @retval -EBUSY PWM capture already in progress.
  * @retval -EAGAIN Waiting period timed out.
  * @retval -EIO IO error while capturing.

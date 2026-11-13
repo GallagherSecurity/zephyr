@@ -4,7 +4,7 @@
  */
 /dts-v1/;
 
-#include <espressif/esp32c5/esp32c5_lpcore_wroom_n8.dtsi>
+#include <espressif/esp32c5/esp32c5_lpcore.dtsi>
 #include <espressif/partitions_0x2000_default_8M.dtsi>
 
 / {
@@ -12,11 +12,17 @@
 	compatible = "seeed,xiao-esp32c5";
 
 	chosen {
+		zephyr,flash = &flash0;
 		zephyr,sram = &sramlp;
 		zephyr,code-partition = &slot0_lpcore_partition;
 		zephyr,console = &lp_uart;
 		zephyr,shell-uart = &lp_uart;
 	};
+};
+
+&flash0 {
+	reg = <0x0 DT_SIZE_M(8)>;
+	ranges = <0x0 0x0 DT_SIZE_M(8)>;
 };
 
 &lp_uart {

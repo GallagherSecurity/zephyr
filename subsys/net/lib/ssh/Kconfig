@@ -7,7 +7,6 @@ config SSH_SERVER
 	select EXPERIMENTAL
 	select ZVFS
 	select ZVFS_EVENTFD
-	select RING_BUFFER
 	select NET_IPV4_MAPPING_TO_IPV6 if NET_IPV4 && NET_IPV6
 	help
 	  SSH-2 server support.
@@ -18,7 +17,6 @@ config SSH_CLIENT
 	select EXPERIMENTAL
 	select ZVFS
 	select ZVFS_EVENTFD
-	select RING_BUFFER
 	select NET_IPV4_MAPPING_TO_IPV6 if NET_IPV4 && NET_IPV6
 	help
 	  SSH-2 client support.
@@ -63,6 +61,13 @@ config SSH_SERVER_MAX_CLIENTS
 	int "SSH Server max clients (per server)"
 	default 1
 
+config ZVFS_EVENTFD_ADD_SIZE_SSH_SERVER
+	int "Number of eventfds needed by the SSH server"
+	default SSH_SERVER_MAX_SERVERS
+	help
+	  Each SSH server instance allocates one zvfs eventfd to wake up its
+	  poll loop.
+
 endif
 
 if SSH_CLIENT
@@ -70,6 +75,13 @@ if SSH_CLIENT
 config SSH_CLIENT_MAX_CLIENTS
 	int "SSH Client max instances"
 	default 1
+
+config ZVFS_EVENTFD_ADD_SIZE_SSH_CLIENT
+	int "Number of eventfds needed by the SSH client"
+	default SSH_CLIENT_MAX_CLIENTS
+	help
+	  Each SSH client instance allocates one zvfs eventfd to wake up its
+	  poll loop.
 
 endif
 
@@ -130,10 +142,10 @@ config SSH_DEFAULT_WELCOME_BANNER
 config SSH_SHELL
 	bool
 	depends on NET_SHELL
+	depends on SHELL_BACKEND_SSH
 	select GETOPT_LONG
 	select SHELL_GETOPT
 	select POSIX_C_LIB_EXT
-	depends on DNS_RESOLVER
 	default y
 
 endif
@@ -152,7 +164,7 @@ config SSH_HAS_INFO_BANNER
 
 config SSH_SERVER_SHELL_COUNT
 	int "SSH shell max channels (per transport)"
-	depends on SSH_SHELL && SSH_SERVER
+	depends on SHELL_BACKEND_SSH && SSH_SERVER
 	default 1
 	help
 	  This tells how many simultaneous SSH shell connections

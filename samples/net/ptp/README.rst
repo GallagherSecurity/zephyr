@@ -45,6 +45,16 @@ Follow these steps to build the PTP sample application:
    :goals: build
    :compact:
 
+PPS Output
+==========
+
+Some Ethernet controllers can output a pulse-per-second (PPS) signal derived
+from the PTP hardware clock. On supported boards, the board devicetree or an
+overlay routes this output to a pin, given by the pinctrl configuration of the
+PTP clock node. The 1 Hz signal can be observed with an oscilloscope or a logic
+analyzer. Comparing the PPS outputs of two boards, or of a board and the
+grandmaster, shows how well the clocks are synchronized.
+
 Interpreting net ptp Output
 ===========================
 
@@ -244,11 +254,36 @@ Create a configuration file for ptp4l, for example
     tx_timestamp_timeout   20
     summary_interval       1
 
-and start it like this:
+Start this E2E configuration like this:
 
 .. code-block:: console
 
     sudo ./ptp4l -i zeth -f /path/to/config/e2e.cfg -m
+
+For a Zephyr build using :kconfig:option:`CONFIG_PTP_DELAY_MECHANISM_P2P`,
+create a separate configuration file such as :file:`p2p.cfg` and use ``P2P``
+on the Linux host as well:
+
+.. code-block:: ini
+
+    [global]
+    delay_mechanism         P2P
+    time_stamping           hardware
+    network_transport       UDPv4
+    domainNumber            0
+    logSyncInterval         -3
+    logMinPdelayReqInterval -3
+    tx_timestamp_timeout    20
+    summary_interval        1
+
+Zephyr currently supports two-step P2P delay measurement. One-step
+``Pdelay_Resp`` packets are rejected and logged.
+
+Start the P2P configuration like this:
+
+.. code-block:: console
+
+    sudo ./ptp4l -i zeth -f /path/to/config/p2p.cfg -m
 
 Use Linux host with native_sim
 ------------------------------

@@ -206,6 +206,41 @@ disabled system (e.g. without TF-M support).
 You can use STM32CubeProgrammer_ to disable the SoC TZEN Option Byte config. Refer
 to `How to disable STM32WBA65 TZEN Option Byte`_.
 
+Secure bootloader
+=================
+STM32 OEMiROT integration
+-------------------------
+
+STM32CubeWBA provides an external secure bootloader called STM32 OEMiROT
+that takes advantage of the secure features of the STM32WBA65RI
+microcontroller. Refer to the `OEMiRoT/OEMuRoT for STM32WBA wiki article`_ for
+details on this bootloader.
+
+Integration of this bootloader in the Zephyr build environment is available
+in the external `STM32 OEMxROT module`_.
+
+.. |st_board_name| replace:: STM32WBA65I-DK1
+.. |st_board_target| replace:: stm32wba65i_dk1
+
+.. include:: ../../common/doc/stm32_common_doc.rst.inc
+  :start-after: stm32_default_zephyr_bootloader_start
+  :end-before: stm32_default_zephyr_bootloader_end
+
+.. include:: ../../common/doc/stm32_common_doc.rst.inc
+  :start-after: stm32wba_default_zephyr_fota_start
+  :end-before: stm32wba_default_zephyr_fota_end
+
+Low Power
+=========
+
+.. |stm32wba_lp_board_name| replace:: STM32WBA65I-DK1
+.. |stm32wba_lp_board_target| replace:: stm32wba65i_dk1
+
+.. include:: ../../common/doc/stm32_common_doc.rst.inc
+  :start-after: stm32wba_low_power_start
+  :end-before: stm32wba_low_power_end
+
+
 Connections and IOs
 ===================
 
@@ -295,6 +330,12 @@ you can debug an application in the usual way using OpenOCD. Here is an example 
 
 .. _How to disable STM32WBA65 TZEN Option Byte:
    https://wiki.st.com/stm32mcu/wiki/Connectivity:STM32WBA_BLE_%26_TrustZone#How_to_disable_the_TrustZone
+
+.. _OEMiRoT/OEMuRoT for STM32WBA wiki article:
+   https://wiki.st.com/stm32mcu/wiki/Security:OEMiRoT_OEMuRoT_for_STM32WBA
+
+.. _STM32 OEMxROT module:
+   https://github.com/stm32-hotspot/zephyr-stm32-oemxrot
 
 .. _OpenOCD WBA6xx commit:
    https://github.com/openocd-org/openocd/commit/df14f586629a70878636d138ec3bffd9148aaf1b

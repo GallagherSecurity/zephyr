@@ -19,6 +19,7 @@
 		zephyr,sram = &sram0;
 		zephyr,flash = &flash0;
 		zephyr,canbus = &fdcan1;
+		zephyr,system-timer = &lptim1;
 	};
 
 	aliases {
@@ -28,6 +29,7 @@
 		led3 = &led_3;
 		mcuboot-led0 = &led_0;
 		watchdog0 = &iwdg;
+		eeprom-0 = &eeprom0;
 	};
 
 	leds {
@@ -140,6 +142,8 @@
 &i2c2 {
 	pinctrl-0 = <&i2c2_scl_pa9 &i2c2_sda_pa8>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpioa 9 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpioa 8 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 
 	atecc608a@60 {
@@ -191,7 +195,7 @@
 		 <&rcc STM32_SRC_LSE RTC_SEL(1)>;
 };
 
-stm32_lp_tick_source: &lptim1 {
+&lptim1 {
 	status = "okay";
 	clocks = <&rcc STM32_CLOCK(APB1, 31)>,
 		 <&rcc STM32_SRC_LSE LPTIM1_SEL(3)>;

@@ -23,9 +23,18 @@ LOG_MODULE_REGISTER(mipi_dbi_bflb, CONFIG_MIPI_DBI_LOG_LEVEL);
 #include <common_defines.h>
 #include <zephyr/dt-bindings/clock/bflb_clock_common.h>
 #include <zephyr/drivers/clock_control/clock_control_bflb_common.h>
-#include <zephyr/dt-bindings/clock/bflb_bl61x_clock.h>
 #include <bouffalolab/common/dbi_reg.h>
 #include <bouffalolab/common/dma_reg.h>
+
+#if defined(CONFIG_SOC_SERIES_BL61X)
+#include <zephyr/dt-bindings/clock/bflb_bl61x_clock.h>
+#define DBI_160M_CLK	BL61X_CLKID_CLK_160M
+#elif defined(CONFIG_SOC_SERIES_BL616CL)
+#include <zephyr/dt-bindings/clock/bflb_bl616cl_clock.h>
+#define DBI_160M_CLK	BL616CL_CLKID_CLK_160M
+#else
+#error Unsupported platform
+#endif
 
 #define DBI_MAX_FREQ		MHZ(80)
 #define DBI_MAX_XCLK_FREQ	MHZ(20)
@@ -87,10 +96,10 @@ static inline void mipi_dbi_bflb_cs_control(const struct device *dev,
 {
 	const struct mipi_dbi_bflb_config *cfg = dev->config;
 
-	if (config->config.slave < cfg->num_cs_gpios) {
-		if (mipi_dbi_has_pin(&cfg->cs_gpios[config->config.slave])) {
+	if (config->config.peripheral < cfg->num_cs_gpios) {
+		if (mipi_dbi_has_pin(&cfg->cs_gpios[config->config.peripheral])) {
 			if (on) {
-				gpio_pin_set_dt(&cfg->cs_gpios[config->config.slave], 1);
+				gpio_pin_set_dt(&cfg->cs_gpios[config->config.peripheral], 1);
 				k_busy_wait(config->config.cs.delay);
 			} else {
 				if (!force_off
@@ -99,7 +108,7 @@ static inline void mipi_dbi_bflb_cs_control(const struct device *dev,
 					return;
 				}
 				k_busy_wait(config->config.cs.delay);
-				gpio_pin_set_dt(&cfg->cs_gpios[config->config.slave], 0);
+				gpio_pin_set_dt(&cfg->cs_gpios[config->config.peripheral], 0);
 			}
 		}
 	}
@@ -189,7 +198,7 @@ static uint32_t mipi_dbi_get_clk(void)
 		return uclk / (dbi_divider + 1);
 	}
 
-	clock_control_get_rate(clock_ctrl, (void *)BL61X_CLKID_CLK_160M, &uclk);
+	clock_control_get_rate(clock_ctrl, (void *)DBI_160M_CLK, &uclk);
 
 	return uclk / (dbi_divider + 1);
 }
@@ -210,7 +219,7 @@ static int mipi_dbi_bflb_configure_freqs(const struct device *dev,
 	if (config->config.frequency > DBI_MAX_FREQ) {
 		return -EINVAL;
 	} else if (config->config.frequency > DBI_MAX_XCLK_FREQ
-		&& clock_control_get_rate(clock_ctrl, (void *)BL61X_CLKID_CLK_160M, &div_0) >= 0) {
+		&& clock_control_get_rate(clock_ctrl, (void *)DBI_160M_CLK, &div_0) >= 0) {
 		/* select PLL mux */
 		tmp |= 0U <<  GLB_DBI_CLK_SEL_POS;
 	} else {
@@ -265,7 +274,7 @@ static int mipi_dbi_bflb_configure(const struct device *dev, const struct mipi_d
 	    && config->config.operation == data->configured.config.operation
 	    && config->config.cs.gpio.port == data->configured.config.cs.gpio.port
 	    && config->config.cs.gpio.pin == data->configured.config.cs.gpio.pin
-	    && config->config.slave == data->configured.config.slave) {
+	    && config->config.peripheral == data->configured.config.peripheral) {
 		return 0;
 	}
 

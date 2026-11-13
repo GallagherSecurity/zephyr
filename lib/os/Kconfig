@@ -132,6 +132,12 @@ config REBOOT
 	  needed to perform a "safe" reboot (e.g. to stop the system clock before
 	  issuing a reset).
 
+config RESET_ON_FATAL_ERROR
+	bool "Reset the system when a fatal error occurs after printing relevant debug output"
+	select REBOOT
+	help
+		Initiate a system reset when a fatal error would normally halt the system.
+
 config HAS_POWEROFF
 	bool
 	help
@@ -147,9 +153,8 @@ config BOOT_BANNER
 	bool "Boot banner"
 	default y
 	select PRINTK
-	select EARLY_CONSOLE
 	help
-	  This option outputs a banner to the console device during boot up.
+	  This option outputs a banner to the console device at the end of boot.
 
 config BOOT_BANNER_STRING
 	string "Boot banner string"
@@ -204,6 +209,12 @@ config BOOTARGS_ARGS_BUFFER_SIZE
 	  Configures size of buffer containing all arguments passed to main.
 
 endif # BOOTARGS
+
+config BOOT_FDT
+	bool "Boot firmware device tree helpers"
+	help
+	  Enable helpers for validating and copying boot firmware device tree
+	  blobs into caller-owned storage.
 
 rsource "Kconfig.atomics"
 rsource "Kconfig.cbprintf"

@@ -188,6 +188,22 @@ static inline void trigger_irq(int irq)
 
 	__asm__ volatile("csrrs %0, sip, %1\n" : "=r"(sip) : "r"(1 << irq));
 }
+#elif defined(CONFIG_PLIC_SUPPORTS_SOFT_INTERRUPT)
+#include <zephyr/irq_multilevel.h>
+#include <zephyr/drivers/interrupt_controller/riscv_plic.h>
+
+static inline void trigger_irq(int irq)
+{
+	unsigned int level = irq_get_level(irq);
+
+	if (level == 1) {
+		uint32_t mip;
+
+		__asm__ volatile("csrrs %0, mip, %1\n" : "=r"(mip) : "r"(1 << irq));
+	} else {
+		riscv_plic_irq_set_pending(irq);
+	}
+}
 #else
 static inline void trigger_irq(int irq)
 {
@@ -267,6 +283,26 @@ static inline void trigger_irq(int irq)
 		 irq);
 	_sw_isr_table[irq - CONFIG_GEN_IRQ_START_VECTOR].isr(
 		_sw_isr_table[irq - CONFIG_GEN_IRQ_START_VECTOR].arg);
+}
+
+#elif defined(CONFIG_HEXAGON)
+
+/* Posts the interrupt through the Hexagon VM, the same hypercall the arch's
+ * irq_offload() uses.
+ */
+extern int hexagon_irq_trigger(unsigned int irq);
+
+static inline void trigger_irq(int irq)
+{
+	hexagon_irq_trigger((unsigned int)irq);
+}
+
+#elif defined(CONFIG_TRICORE)
+#include <zephyr/drivers/interrupt_controller/intc_infineon_aurix.h>
+
+static inline void trigger_irq(int irq)
+{
+	intc_aurix_ir_irq_raise(irq);
 }
 
 #else

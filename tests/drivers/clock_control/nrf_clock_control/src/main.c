@@ -132,7 +132,7 @@ static const struct test_clk_context global_hsfll_test_clk_contexts[] = {
 };
 #endif
 
-#if defined(CONFIG_CLOCK_CONTROL_NRF_LFCLK)
+#if defined(CONFIG_CLOCK_CONTROL_NRFS_LFCLK)
 const struct nrf_clock_spec test_clk_specs_lfclk[] = {
 	{
 		.frequency = 32768,
@@ -264,7 +264,7 @@ static void test_clock_control_request(const struct test_clk_context *clk_contex
 								 &startup_time_us);
 			zassert(ret == 0 || ret == -ENOSYS, "failed to get startup time");
 			if (ret == 0) {
-				TC_PRINT("startup time for resloved spec: %uus\n", startup_time_us);
+				TC_PRINT("startup time for resolved spec: %uus\n", startup_time_us);
 			} else if (ret == -ENOSYS) {
 				TC_PRINT("get startup time not supported\n");
 			}
@@ -359,8 +359,8 @@ ZTEST(nrf2_clock_control, test_global_hsfll_control)
 
 ZTEST(nrf2_clock_control, test_lfclk_control)
 {
-	Z_TEST_SKIP_IFNDEF(CONFIG_CLOCK_CONTROL_NRF_LFCLK);
-#if defined(CONFIG_CLOCK_CONTROL_NRF_LFCLK)
+	Z_TEST_SKIP_IFNDEF(CONFIG_CLOCK_CONTROL_NRFS_LFCLK);
+#if defined(CONFIG_CLOCK_CONTROL_NRFS_LFCLK)
 	TC_PRINT("LFCLK test\n");
 	test_clock_control_request(lfclk_test_clk_contexts, ARRAY_SIZE(lfclk_test_clk_contexts));
 #endif
@@ -368,8 +368,8 @@ ZTEST(nrf2_clock_control, test_lfclk_control)
 
 ZTEST(nrf2_clock_control, test_safe_request_cancellation)
 {
-	Z_TEST_SKIP_IFNDEF(CONFIG_CLOCK_CONTROL_NRF_LFCLK);
-#if defined(CONFIG_CLOCK_CONTROL_NRF_LFCLK)
+	Z_TEST_SKIP_IFNDEF(CONFIG_CLOCK_CONTROL_NRFS_LFCLK);
+#if defined(CONFIG_CLOCK_CONTROL_NRFS_LFCLK)
 	int ret = 0;
 	int res = 0;
 	struct onoff_client cli;
@@ -421,7 +421,7 @@ static void *setup(void)
 	/* Constantly make requests to DVFS until one is successful (what also
 	 * means that the service has finished its initialization). This loop
 	 * also verifies that the clock control driver is able to recover after
-	 * an unsuccesful attempt to start a clock (at least one initial request
+	 * an unsuccessful attempt to start a clock (at least one initial request
 	 * is expected to fail here due to DFVS not being initialized yet).
 	 */
 	TC_PRINT("Polling DVFS until it is ready\n");

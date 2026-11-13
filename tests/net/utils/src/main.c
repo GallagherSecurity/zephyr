@@ -322,10 +322,12 @@ static ZTEST_DMEM struct net_addr_test_data ipv6_ntop_7 = {
 	.ipv6.addr.s6_addr16 = { 0, net_htons(0xff08), 0, 0, 0, 0, 0, 0 },
 };
 
-static const struct {
+struct net_addr_test_case {
 	const char *name;
 	struct net_addr_test_data *data;
-} tests[] = {
+};
+
+static const struct net_addr_test_case net_addr_test_cases[] = {
 	/* IPv4 net_addr_pton */
 	{ "test_ipv4_pton_1", &ipv4_pton_1},
 	{ "test_ipv4_pton_2", &ipv4_pton_2},
@@ -366,6 +368,21 @@ static const struct {
 	{ "test_ipv6_ntop_5", &ipv6_ntop_5},
 	{ "test_ipv6_ntop_6", &ipv6_ntop_6},
 	{ "test_ipv6_ntop_7", &ipv6_ntop_7},
+};
+
+static const char *net_addr_test_name(size_t index, const void *value)
+{
+	const struct net_addr_test_case *tc = value;
+
+	ARG_UNUSED(index);
+	return tc->name;
+}
+
+static const struct ztest_param_values net_addr_cases = {
+	.values    = net_addr_test_cases,
+	.count     = ARRAY_SIZE(net_addr_test_cases),
+	.elem_size = sizeof(net_addr_test_cases[0]),
+	.name_cb   = net_addr_test_name,
 };
 
 static bool check_net_addr(struct net_addr_test_data *data)
@@ -495,22 +512,44 @@ static bool check_net_addr(struct net_addr_test_data *data)
 	return true;
 }
 
-ZTEST(test_utils_fn, test_net_addr)
+ZTEST_P(test_utils_fn, test_net_addr)
 {
-	int count, pass;
+	const struct net_addr_test_case *tc =
+		ZTEST_GET_PARAM_PTR(struct net_addr_test_case);
 
-	for (count = 0, pass = 0; count < ARRAY_SIZE(tests); count++) {
-		TC_PRINT("Running test: %s: ", tests[count].name);
+	zassert_true(check_net_addr(tc->data), "check_net_addr failed: %s", tc->name);
+}
 
-		if (check_net_addr(tests[count].data)) {
-			TC_PRINT("passed\n");
-			pass++;
-		} else {
-			TC_PRINT("failed\n");
-		}
+/* Check that net_addr_ntop() wrote nothing after the terminator. This runs
+ * in a user thread, where a failed zexpect cannot be recorded, so zassert
+ * is used.
+ */
+static void check_ntop_tail(const char *buf, size_t size, const char *expected)
+{
+	size_t len = strlen(expected) + 1U;
+
+	zassert_str_equal(buf, expected, "Unexpected address string");
+
+	for (size_t i = len; i < size; i++) {
+		zassert_equal((uint8_t)buf[i], 0xaaU,
+			      "Byte %zu after \"%s\" was written", i, expected);
 	}
+}
 
-	zassert_equal(pass, ARRAY_SIZE(tests), "check_net_addr error");
+ZTEST_USER(test_utils_fn, test_net_addr_ntop_writes_only_the_string)
+{
+	struct net_in6_addr addr6 = { { { 0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+					  0, 0, 0, 0, 0, 0, 0, 0x1 } } };
+	struct net_in_addr addr4 = { { { 192, 0, 2, 1 } } };
+	char buf[NET_INET6_ADDRSTRLEN];
+
+	memset(buf, 0xaa, sizeof(buf));
+	zassert_not_null(net_addr_ntop(NET_AF_INET6, &addr6, buf, sizeof(buf)));
+	check_ntop_tail(buf, sizeof(buf), "fe80::1");
+
+	memset(buf, 0xaa, sizeof(buf));
+	zassert_not_null(net_addr_ntop(NET_AF_INET, &addr4, buf, sizeof(buf)));
+	check_ntop_tail(buf, sizeof(buf), "192.0.2.1");
 }
 
 ZTEST(test_utils_fn, test_addr_parse)
@@ -1007,7 +1046,7 @@ static const char *check_ipaddr(const char *addresses)
 
 		zassert_mem_equal(addr_str, expecting,
 				  *addresses == '\0' ? strlen(orig) : addresses - orig - 1,
-				  "Address mismatch, expecing %s, got %s (len %td)\n",
+				  "Address mismatch, expecting %s, got %s (len %td)\n",
 				  expecting, addr_str, addresses - orig - 1);
 	} while (addresses != NULL && *addresses != '\0');
 
@@ -1441,7 +1480,7 @@ ZTEST(test_utils_fn, test_ip_checksum)
 			      "Mismatch between reference and calculated checksum 1\n");
 	}
 
-	/* Create a different patten in the data */
+	/* Create a different pattern in the data */
 	for (int i = 0; i < CHECKSUM_TEST_LENGTH; i++) {
 		testdata[i] = (uint8_t)(i + 13) * 17;
 	}
@@ -1571,7 +1610,7 @@ ZTEST(test_utils_fn, test_linkaddr_handling)
 
 ZTEST(test_utils_fn, test_parse_ipv4_overflow)
 {
-	struct net_sockaddr_storage saddr;
+	struct net_sockaddr_storage saddr = {};
 	struct net_sockaddr *addr = net_sad(&saddr);
 	bool ret;
 
@@ -1725,7 +1764,7 @@ ZTEST(test_utils_fn, test_parse_ipv4_overflow)
 
 ZTEST(test_utils_fn, test_parse_ipv6_overflow)
 {
-	struct net_sockaddr_storage saddr;
+	struct net_sockaddr_storage saddr = {};
 	struct net_sockaddr *addr = net_sad(&saddr);
 	bool ret;
 
@@ -1884,4 +1923,44 @@ ZTEST(test_utils_fn, test_parse_ipv6_overflow)
 	}
 }
 
+ZTEST(test_utils_fn, test_ipv6_ll_sl_prefix)
+{
+	static const struct {
+		const char *addr;
+		bool ll;
+		bool sl;
+	} cases[] = {
+		{ "fe80::1", true, false },
+		{ "fe81::1", true, false },
+		{ "febf::1", true, false },
+		{ "fe7f::1", false, false },
+		{ "fec0::1", false, true },
+		{ "feff::1", false, true },
+		{ "ff02::1", false, false },
+	};
+	struct net_in6_addr addr;
+
+	ARRAY_FOR_EACH(cases, i) {
+		zassert_ok(net_addr_pton(NET_AF_INET6, cases[i].addr, &addr));
+		zassert_equal(net_ipv6_is_ll_addr(&addr), cases[i].ll,
+			      "%s link-local mismatch", cases[i].addr);
+		zassert_equal(net_ipv6_is_sl_addr(&addr), cases[i].sl,
+			      "%s site-local mismatch", cases[i].addr);
+	}
+}
+
+ZTEST_USER(test_utils_fn, test_net_addr_ntop_short_buffer)
+{
+	struct net_in6_addr addr6 = { { { 0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+					  0, 0, 0, 0, 0, 0, 0, 0x1 } } };
+	struct net_in_addr addr4 = { { { 192, 0, 2, 1 } } };
+	char str6[NET_INET6_ADDRSTRLEN - 1];
+	char str4[NET_INET_ADDRSTRLEN - 1];
+
+	/* Same result in user and kernel mode: the buffer is too small */
+	zassert_is_null(net_addr_ntop(NET_AF_INET6, &addr6, str6, sizeof(str6)));
+	zassert_is_null(net_addr_ntop(NET_AF_INET, &addr4, str4, sizeof(str4)));
+}
+
 ZTEST_SUITE(test_utils_fn, NULL, NULL, NULL, NULL, NULL);
+ZTEST_INSTANTIATE_TEST_SUITE_P(all, test_utils_fn, test_net_addr, net_addr_cases);

@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 NXP
+ * Copyright 2024-2026 NXP
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -29,6 +29,7 @@
 		zephyr,flash-controller = &ext_flash_ctrl;
 		zephyr,code-partition = &slot0_partition;
 		zephyr,uart-mcumgr = &flexcomm3;
+		zephyr,bt-c2h-uart = &flexcomm3;
 		zephyr,crc = &crc;
 	};
 
@@ -157,6 +158,7 @@ mikrobus_serial: &flexcomm0 {};
 		reg = <0>;
 		size = <DT_SIZE_M(64 * 8)>;
 		status = "okay";
+		power-domains = <&peripheral_domain>;
 		jedec-id = [ef 40 20];
 		spi-max-frequency = <DT_FREQ_M(104)>;
 
@@ -296,8 +298,8 @@ mikrobus_serial: &flexcomm0 {};
 		compatible = "microchip,ksz8081";
 		reg = <2>;
 		status = "okay";
-		reset-gpios = <&hsgpio1 23 GPIO_ACTIVE_LOW>;
-		int-gpios = <&hsgpio0 21 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&hsgpio0 21 GPIO_ACTIVE_LOW>;
+		int-gpios = <&hsgpio1 23 GPIO_ACTIVE_LOW>;
 		microchip,interface-type = "rmii";
 	};
 };
@@ -439,4 +441,8 @@ nxp_pmod_touch_panel_i2c: &arduino_i2c {
 &standby {
 	exit-latency-us = <13460>;
 	min-residency-us = <1690>;
+};
+
+&powerquad {
+	status = "okay";
 };

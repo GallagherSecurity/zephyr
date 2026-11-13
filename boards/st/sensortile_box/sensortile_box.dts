@@ -105,6 +105,8 @@
 &i2c1 {
 	pinctrl-0 = <&i2c1_scl_pb6 &i2c1_sda_pb7>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiob 6 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiob 7 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 	clock-frequency = <I2C_BITRATE_FAST>;
 
@@ -124,6 +126,8 @@
 &i2c3 {
 	pinctrl-0 = <&i2c3_scl_pg7 &i2c3_sda_pg8>;
 	pinctrl-names = "default";
+	scl-gpios = <&gpiog 7 GPIO_ACTIVE_HIGH>;
+	sda-gpios = <&gpiog 8 GPIO_ACTIVE_HIGH>;
 	status = "okay";
 	clock-frequency = <I2C_BITRATE_FAST>;
 
@@ -180,6 +184,8 @@
 		spi-max-frequency = <DT_FREQ_M(1)>;
 		spi-cpha;
 		spi-hold-cs;
+		reset-event;
+		req-ll-only;
 		reset-assert-duration-ms = <6>;
 	};
 };
@@ -247,10 +253,10 @@ zephyr_udc0: &usbotg_fs {
 			reg = <0x000f8000 DT_SIZE_K(24)>;
 		};
 
-		storage_partition: partition@fc000 {
+		storage_partition: partition@fe000 {
 			compatible = "zephyr,mapped-partition";
 			label = "storage";
-			reg = <0x000fc000 DT_SIZE_K(24)>;
+			reg = <0x000fe000 DT_SIZE_K(16)>;
 		};
 	};
 };

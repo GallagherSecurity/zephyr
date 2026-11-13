@@ -94,8 +94,8 @@ struct uac2_ctx {
 /* UAC2 device constant data */
 struct uac2_cfg {
 	struct usbd_class_data *const c_data;
-	const struct usb_desc_header **fs_descriptors;
-	const struct usb_desc_header **hs_descriptors;
+	const struct usb_desc_header *const *fs_descriptors;
+	const struct usb_desc_header *const *hs_descriptors;
 	/* Entity 1 type is at entity_types[0] */
 	const entity_type_t *entity_types;
 	/* Array of indexes to data endpoint descriptor in descriptors set.
@@ -131,7 +131,7 @@ get_as_data_ep(struct usbd_class_data *const c_data, int as_idx)
 	const struct device *dev = usbd_class_get_private(c_data);
 	const struct uac2_cfg *cfg = dev->config;
 	const struct usb_desc_header *desc = NULL;
-	const struct usb_desc_header **descriptors;
+	const struct usb_desc_header *const *descriptors;
 
 	if (usbd_bus_speed(c_data->uds_ctx) == USBD_SPEED_FS) {
 		descriptors = cfg->fs_descriptors;
@@ -153,7 +153,7 @@ get_as_feedback_ep(struct usbd_class_data *const c_data, int as_idx)
 	const struct device *dev = usbd_class_get_private(c_data);
 	const struct uac2_cfg *cfg = dev->config;
 	const struct usb_desc_header *desc = NULL;
-	const struct usb_desc_header **descriptors;
+	const struct usb_desc_header *const *descriptors;
 
 	if (usbd_bus_speed(c_data->uds_ctx) == USBD_SPEED_FS) {
 		descriptors = cfg->fs_descriptors;
@@ -462,7 +462,7 @@ void uac2_update(struct usbd_class_data *const c_data,
 	struct usbd_context *uds_ctx = usbd_class_get_ctx(c_data);
 	const struct uac2_cfg *cfg = dev->config;
 	struct uac2_ctx *ctx = dev->data;
-	const struct usb_desc_header **descriptors;
+	const struct usb_desc_header *const *descriptors;
 	const struct usb_association_descriptor *iad;
 	const struct usb_ep_descriptor *data_ep, *fb_ep;
 	uint8_t as_idx;
@@ -571,14 +571,23 @@ static uint32_t find_closest(const uint32_t input, const uint32_t *values,
 }
 
 /* Table 5-6: 4-byte Control CUR Parameter Block */
-static void layout3_cur_response(struct net_buf *const buf, uint16_t length,
-				 const uint32_t value)
+static struct net_buf *layout3_cur_response(struct usbd_class_data *const c_data,
+					    uint16_t length, const uint32_t value)
 {
+	struct net_buf *buf;
 	uint8_t tmp[4];
+
+	length = MIN(length, 4);
+	buf = usbd_ep_ctrl_data_in_alloc(usbd_class_get_ctx(c_data), length);
+	if (buf == NULL) {
+		return NULL;
+	}
 
 	/* dCUR */
 	sys_put_le32(value, tmp);
-	net_buf_add_mem(buf, tmp, MIN(length, 4));
+	net_buf_add_mem(buf, tmp, length);
+
+	return buf;
 }
 
 static int layout3_cur_request(const struct net_buf *const buf, uint32_t *out)
@@ -595,14 +604,26 @@ static int layout3_cur_request(const struct net_buf *const buf, uint32_t *out)
 }
 
 /* Table 5-7: 4-byte Control RANGE Parameter Block */
-static void layout3_range_response(struct net_buf *const buf, uint16_t length,
-				   const uint32_t *min, const uint32_t *max,
-				   const uint32_t *res, int n)
+static struct net_buf *layout3_range_response(struct usbd_class_data *const c_data,
+					      uint16_t length,
+					      const uint32_t *min, const uint32_t *max,
+					      const uint32_t *res, int n)
 {
+	struct net_buf *buf;
 	uint16_t to_add;
 	uint8_t tmp[4];
 	int i;
 	int item;
+
+	/* Host can set wLength as large as it wants, but we only need to
+	 * allocate memory for maximum number of entries consisting of:
+	 *   2 (wNumSubRanges) + 12 (dMIN, dMAX, dRES) * n
+	 */
+	length = MIN(2 + 12 * n, length);
+	buf = usbd_ep_ctrl_data_in_alloc(usbd_class_get_ctx(c_data), length);
+	if (buf == NULL) {
+		return NULL;
+	}
 
 	/* wNumSubRanges */
 	sys_put_le16(n, tmp);
@@ -635,11 +656,12 @@ static void layout3_range_response(struct net_buf *const buf, uint16_t length,
 			i++;
 		}
 	}
+
+	return buf;
 }
 
-static int get_clock_source_request(struct usbd_class_data *const c_data,
-				    const struct usb_setup_packet *const setup,
-				    struct net_buf *const buf)
+static struct net_buf *get_clock_source_request(struct usbd_class_data *const c_data,
+						const struct usb_setup_packet *const setup)
 {
 	const struct device *dev = usbd_class_get_private(c_data);
 	struct uac2_ctx *ctx = dev->data;
@@ -651,8 +673,7 @@ static int get_clock_source_request(struct usbd_class_data *const c_data,
 	if (CONTROL_CHANNEL_NUMBER(setup) != 0) {
 		LOG_DBG("Clock source control with channel %d",
 			CONTROL_CHANNEL_NUMBER(setup));
-		errno = -EINVAL;
-		return 0;
+		return NULL;
 	}
 
 	count = clock_frequencies(c_data, clock_id, &frequencies);
@@ -660,9 +681,8 @@ static int get_clock_source_request(struct usbd_class_data *const c_data,
 	if (CONTROL_SELECTOR(setup) == CS_SAM_FREQ_CONTROL) {
 		if (CONTROL_ATTRIBUTE(setup) == CUR) {
 			if (count == 1) {
-				layout3_cur_response(buf, setup->wLength,
-						     frequencies[0]);
-				return 0;
+				return layout3_cur_response(c_data, setup->wLength,
+							    frequencies[0]);
 			}
 
 			if (ctx->ops->get_sample_rate) {
@@ -670,21 +690,18 @@ static int get_clock_source_request(struct usbd_class_data *const c_data,
 
 				hz = ctx->ops->get_sample_rate(dev, clock_id,
 							       ctx->user_data);
-				layout3_cur_response(buf, setup->wLength, hz);
-				return 0;
+				return layout3_cur_response(c_data, setup->wLength, hz);
 			}
 		} else if (CONTROL_ATTRIBUTE(setup) == RANGE) {
-			layout3_range_response(buf, setup->wLength, frequencies,
-					       frequencies, NULL, count);
-			return 0;
+			return layout3_range_response(c_data, setup->wLength, frequencies,
+						      frequencies, NULL, count);
 		}
 	} else {
 		LOG_DBG("Unhandled clock control selector 0x%02x",
 			CONTROL_SELECTOR(setup));
 	}
 
-	errno = -ENOTSUP;
-	return 0;
+	return NULL;
 }
 
 static int set_clock_source_request(struct usbd_class_data *const c_data,
@@ -701,8 +718,7 @@ static int set_clock_source_request(struct usbd_class_data *const c_data,
 	if (CONTROL_CHANNEL_NUMBER(setup) != 0) {
 		LOG_DBG("Clock source control with channel %d",
 			CONTROL_CHANNEL_NUMBER(setup));
-		errno = -EINVAL;
-		return 0;
+		return -EINVAL;
 	}
 
 	count = clock_frequencies(c_data, clock_id, &frequencies);
@@ -712,10 +728,18 @@ static int set_clock_source_request(struct usbd_class_data *const c_data,
 			uint32_t requested, hz;
 			int err;
 
+			if (buf == NULL) {
+				if (setup->wLength == 4) {
+					/* Data OUT can be received */
+					return 0;
+				}
+
+				return -EINVAL;
+			}
+
 			err = layout3_cur_request(buf, &requested);
 			if (err) {
-				errno = err;
-				return 0;
+				return err;
 			}
 
 			hz = find_closest(requested, frequencies, count);
@@ -725,26 +749,22 @@ static int set_clock_source_request(struct usbd_class_data *const c_data,
 				 * if there is only one supported sample rate.
 				 */
 				if (count > 1) {
-					errno = -ENOTSUP;
+					return -ENOTSUP;
 				}
 				return 0;
 			}
 
 			err = ctx->ops->set_sample_rate(dev, clock_id, hz,
 							ctx->user_data);
-			if (err) {
-				errno = err;
-			}
 
-			return 0;
+			return err;
 		}
 	} else {
 		LOG_DBG("Unhandled clock control selector 0x%02x",
 			CONTROL_SELECTOR(setup));
 	}
 
-	errno = -ENOTSUP;
-	return 0;
+	return -ENOTSUP;
 }
 
 static int uac2_control_to_dev(struct usbd_class_data *const c_data,
@@ -754,8 +774,7 @@ static int uac2_control_to_dev(struct usbd_class_data *const c_data,
 	entity_type_t entity_type;
 
 	if (CONTROL_ATTRIBUTE(setup) != CUR) {
-		errno = -ENOTSUP;
-		return 0;
+		return -ENOTSUP;
 	}
 
 	if (setup->bmRequestType == SET_CLASS_REQUEST_TYPE) {
@@ -765,31 +784,27 @@ static int uac2_control_to_dev(struct usbd_class_data *const c_data,
 		}
 	}
 
-	errno = -ENOTSUP;
-	return 0;
+	return -ENOTSUP;
 }
 
-static int uac2_control_to_host(struct usbd_class_data *const c_data,
-				const struct usb_setup_packet *const setup,
-				struct net_buf *const buf)
+static struct net_buf *uac2_control_to_host(struct usbd_class_data *const c_data,
+					    const struct usb_setup_packet *const setup)
 {
 	entity_type_t entity_type;
 
 	if ((CONTROL_ATTRIBUTE(setup) != CUR) &&
 	    (CONTROL_ATTRIBUTE(setup) != RANGE)) {
-		errno = -ENOTSUP;
-		return 0;
+		return NULL;
 	}
 
 	if (setup->bmRequestType == GET_CLASS_REQUEST_TYPE) {
 		entity_type = id_type(c_data, CONTROL_ENTITY_ID(setup));
 		if (entity_type == ENTITY_TYPE_CLOCK_SOURCE) {
-			return get_clock_source_request(c_data, setup, buf);
+			return get_clock_source_request(c_data, setup);
 		}
 	}
 
-	errno = -ENOTSUP;
-	return 0;
+	return NULL;
 }
 
 static int uac2_request(struct usbd_class_data *const c_data, struct net_buf *buf,
@@ -905,8 +920,8 @@ static void uac2_sof(struct usbd_class_data *const c_data)
 	}
 }
 
-static void *uac2_get_desc(struct usbd_class_data *const c_data,
-			   const enum usbd_speed speed)
+static const void *uac2_get_desc(struct usbd_class_data *const c_data,
+				 const enum usbd_speed speed)
 {
 	struct device *dev = usbd_class_get_private(c_data);
 	const struct uac2_cfg *cfg = dev->config;
@@ -951,7 +966,7 @@ static int uac2_init(struct usbd_class_data *const c_data)
 	return 0;
 }
 
-struct usbd_class_api uac2_api = {
+static const struct usbd_class_api uac2_api = {
 	.update = uac2_update,
 	.control_to_dev = uac2_control_to_dev,
 	.control_to_host = uac2_control_to_host,
@@ -1019,11 +1034,11 @@ struct usbd_class_api uac2_api = {
 	static struct uac2_ctx uac2_ctx_##inst;					\
 	UAC2_DESCRIPTOR_ARRAYS(DT_DRV_INST(inst))				\
 	IF_ENABLED(UAC2_ALLOWED_AT_FULL_SPEED(DT_DRV_INST(inst)), (		\
-		static const struct usb_desc_header *uac2_fs_desc_##inst[] =	\
+		static const struct usb_desc_header *const uac2_fs_desc_##inst[] =	\
 			UAC2_FS_DESCRIPTOR_PTRS_ARRAY(DT_DRV_INST(inst));	\
 	))									\
 	IF_ENABLED(UAC2_ALLOWED_AT_HIGH_SPEED(DT_DRV_INST(inst)), (		\
-		static const struct usb_desc_header *uac2_hs_desc_##inst[] =	\
+		static const struct usb_desc_header *const uac2_hs_desc_##inst[] =	\
 			UAC2_HS_DESCRIPTOR_PTRS_ARRAY(DT_DRV_INST(inst));	\
 	))									\
 	USBD_DEFINE_CLASS(uac2_##inst, &uac2_api,				\

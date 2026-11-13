@@ -57,7 +57,7 @@ const struct shell_alias shell_aliases[] = {
 	{ "?", "help" },
 
 #if defined(CONFIG_SHELL_ALIASES_HAS_FILE)
-#include "generated-shell-aliases.inc"
+#include <generated-shell-aliases.inc>
 #endif
 	/* NULL is used to mark the end of the array */
 	{ NULL, NULL }
@@ -116,11 +116,10 @@ static int cmd_precheck(const struct shell *sh,
 	return 0;
 }
 
-static inline void state_set(const struct shell *sh, enum shell_state state)
+/* Print prompt if shell is active and not in bypass mode. */
+static void cond_print_prompt(const struct shell *sh)
 {
-	sh->ctx->state = state;
-
-	if (state == SHELL_STATE_ACTIVE && !sh->ctx->bypass) {
+	if (sh->ctx->state == SHELL_STATE_ACTIVE && !sh->ctx->bypass) {
 		cmd_buffer_clear(sh);
 		if (z_flag_print_noinit_get(sh)) {
 			z_shell_fprintf(sh, SHELL_WARNING, "%s",
@@ -129,6 +128,11 @@ static inline void state_set(const struct shell *sh, enum shell_state state)
 		}
 		z_shell_print_prompt_and_cmd(sh);
 	}
+}
+
+static inline void state_set(const struct shell *sh, enum shell_state state)
+{
+	sh->ctx->state = state;
 }
 
 static inline enum shell_state state_get(const struct shell *sh)
@@ -979,6 +983,10 @@ static int exec_cmd(const struct shell *sh, size_t argc, const char **argv, size
 		     (SHELL_CMD_FLAG_REMOTE_ROOT | SHELL_CMD_FLAG_REMOTE_SUBCMD))) {
 			ret_val = z_shell_remote_cmd_exec(sh, &sh->ctx->active_cmd,
 							  argc, argv, cmd_lvl);
+			if (ret_val < 0) {
+				z_shell_fprintf(sh, SHELL_ERROR,
+						"Failed to execute remote command: %d\n", ret_val);
+			}
 		} else {
 			ret_val = sh->ctx->active_cmd.handler(sh, cmd_argc, cmd_argv);
 		}
@@ -1367,7 +1375,7 @@ static void ctrl_metakeys_handle(const struct shell *sh, char data)
 		if (sh->ctx->readline_state == SHELL_READLINE_ACTIVE) {
 			sh->ctx->readline_state = SHELL_READLINE_CANCELED;
 		} else {
-			state_set(sh, SHELL_STATE_ACTIVE);
+			cond_print_prompt(sh);
 		}
 		break;
 
@@ -1485,7 +1493,7 @@ static void state_collect(const struct shell *sh)
 				z_flag_cmd_ctx_set(sh, false);
 				/* Check if bypass mode ended. */
 				if (!(volatile shell_bypass_cb_t *)sh->ctx->bypass) {
-					state_set(sh, SHELL_STATE_ACTIVE);
+					cond_print_prompt(sh);
 				} else {
 					continue;
 				}
@@ -1528,7 +1536,7 @@ static void state_collect(const struct shell *sh)
 				/* Function responsible for printing prompt
 				 * on received NL.
 				 */
-				state_set(sh, SHELL_STATE_ACTIVE);
+				cond_print_prompt(sh);
 				continue;
 			}
 
@@ -1684,22 +1692,38 @@ static void transport_evt_handler(enum shell_transport_evt evt_type, void *ctx)
 static void shell_log_process(const struct shell *sh)
 {
 	bool processed = false;
+	bool readline_active = sh->ctx->readline_state == SHELL_READLINE_ACTIVE;
 
 	do {
 		if (!IS_ENABLED(CONFIG_LOG_MODE_IMMEDIATE)) {
-			z_shell_cmd_line_erase(sh);
+			if (readline_active) {
+				z_cursor_restore(sh);
+				z_clear_eos(sh);
+			} else if (!sh->ctx->bypass) {
+				z_shell_cmd_line_erase(sh);
+			}
 
 			processed = z_shell_log_backend_process(
 					sh->log_backend);
 		}
 
-		z_shell_print_prompt_and_cmd(sh);
+		if (readline_active) {
+			z_cursor_save(sh);
+			if (sh->ctx->readline_prompt != NULL) {
+				z_shell_fprintf(sh, SHELL_NORMAL, "%s",
+						sh->ctx->readline_prompt);
+			}
+			z_shell_print_cmd(sh);
+			z_shell_op_cursor_position_synchronize(sh);
+		} else if (!sh->ctx->bypass) {
+			z_shell_print_prompt_and_cmd(sh);
+		}
 
 		/* Arbitrary delay added to ensure that prompt is
 		 * readable and can be used to enter further commands.
 		 */
 		if (sh->ctx->cmd_buff_len) {
-			k_sleep(K_MSEC(15));
+			k_msleep(15);
 		}
 
 	} while (processed && !k_event_test(&sh->ctx->signal_event, SHELL_SIGNAL_RXRDY));
@@ -1813,19 +1837,13 @@ static void kill_handler(const struct shell *sh)
 	CODE_UNREACHABLE;
 }
 
-void shell_thread(void *shell_handle, void *arg_log_backend,
-		  void *arg_log_level)
+void shell_thread(void *shell_handle, void *p2, void *p3)
 {
 	struct shell *sh = shell_handle;
 	int err;
 
-	z_flag_handle_log_set(sh, (bool)arg_log_backend);
-	sh->ctx->log_level = POINTER_TO_UINT(arg_log_level);
-
-	err = sh->iface->api->enable(sh->iface, false);
-	if (err != 0) {
-		return;
-	}
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
 
 	if (IS_ENABLED(CONFIG_SHELL_AUTOSTART)) {
 		/* Enable shell and print prompt. */
@@ -1877,10 +1895,18 @@ int shell_init(const struct shell *sh, const void *transport_config,
 		return err;
 	}
 
+	z_flag_handle_log_set(sh, log_backend);
+	sh->ctx->log_level = init_log_level;
+
+	err = sh->iface->api->enable(sh->iface, false);
+	if (err != 0) {
+		instance_uninit(sh);
+		return err;
+	}
+
 	k_tid_t tid = k_thread_create(sh->thread,
 				  sh->stack, CONFIG_SHELL_STACK_SIZE,
-				  shell_thread, (void *)sh, (void *)log_backend,
-				  UINT_TO_POINTER(init_log_level),
+				  shell_thread, (void *)sh, NULL, NULL,
 				  SHELL_THREAD_PRIORITY, 0, K_NO_WAIT);
 
 	sh->ctx->tid = tid;
@@ -1944,6 +1970,9 @@ int shell_start(const struct shell *sh)
 	z_cursor_next_line_move(sh);
 	state_set(sh, SHELL_STATE_ACTIVE);
 
+	/* Print prompt. */
+	cond_print_prompt(sh);
+
 	z_shell_unlock(sh);
 
 	return 0;
@@ -1961,11 +1990,26 @@ int shell_stop(const struct shell *sh)
 		return -ENOTSUP;
 	}
 
+	/*
+	 * This is the same lock shell_thread() holds for as long as it's
+	 * busy in shell_process()/state_collect(). If we don't grab it here
+	 * too, we can race with a command that's still running on the shell
+	 * thread: it ends with an unconditional state_set(ACTIVE), which
+	 * stomps on the SHELL_STATE_INITIALIZED we're setting below and the
+	 * log backend is left disabled for good (shell_start() won't touch
+	 * it since the state looks wrong).
+	 */
+	if (!z_shell_trylock(sh, SHELL_TX_MTX_TIMEOUT)) {
+		return -EBUSY;
+	}
+
 	state_set(sh, SHELL_STATE_INITIALIZED);
 
 	if (IS_ENABLED(CONFIG_SHELL_LOG_BACKEND)) {
 		z_shell_log_backend_disable(sh->log_backend);
 	}
+
+	z_shell_unlock(sh);
 
 	return 0;
 }
@@ -2244,6 +2288,11 @@ bool shell_ready(const struct shell *sh)
 	return state_get(sh) ==	SHELL_STATE_ACTIVE;
 }
 
+void shell_readline_prompt_set(const struct shell *sh, const char *prompt)
+{
+	sh->ctx->readline_prompt = prompt;
+}
+
 int shell_readline(const struct shell *sh, uint8_t *buf, size_t len, k_timeout_t timeout)
 {
 	k_timepoint_t end = sys_timepoint_calc(timeout);
@@ -2266,8 +2315,24 @@ int shell_readline(const struct shell *sh, uint8_t *buf, size_t len, k_timeout_t
 	/* Clear the buffer for user input */
 	cmd_buffer_clear(sh);
 
+	/* Save cursor position so log output can return here, then print
+	 * the readline prompt.  After every log message the position is
+	 * re-saved so it always points to the line right after the last log.
+	 */
+	z_cursor_save(sh);
+	if (sh->ctx->readline_prompt != NULL) {
+		z_shell_fprintf(sh, SHELL_NORMAL, "%s", sh->ctx->readline_prompt);
+	}
+
 	while (true) {
 		state_collect(sh);
+
+		/* Process deferred logs during readline */
+		if (IS_ENABLED(CONFIG_SHELL_LOG_BACKEND) &&
+		    k_event_test(&sh->ctx->signal_event, SHELL_SIGNAL_LOG_MSG)) {
+			k_event_clear(&sh->ctx->signal_event, SHELL_SIGNAL_LOG_MSG);
+			shell_log_process(sh);
+		}
 
 		if (sh->ctx->readline_state == SHELL_READLINE_DONE) {
 			if (buf == NULL || sh->ctx->cmd_buff_len >= len) {
@@ -2302,6 +2367,7 @@ int shell_readline(const struct shell *sh, uint8_t *buf, size_t len, k_timeout_t
 	sh->ctx->cmd_buff_pos = sh->ctx->cmd_tmp_buff_pos;
 	memcpy(sh->ctx->cmd_buff, sh->ctx->temp_buff, sh->ctx->cmd_buff_len);
 
+	sh->ctx->readline_prompt = NULL;
 	sh->ctx->readline_state = SHELL_READLINE_INACTIVE;
 	return ret;
 }

@@ -9,6 +9,7 @@
 #include <zephyr/dt-bindings/gpio/arduino-header-r3.h>
 #include <zephyr/dt-bindings/gpio/dvp-20pin-connector.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/wuc/wuc_nxp_wuu.h>
 
 / {
 	aliases {
@@ -17,12 +18,14 @@
 		led2 = &blue_led;
 		sw0 = &user_button_2;
 		sw1 = &user_button_3;
+		wakeup-button = &user_button_2;
 		sdhc0 = &usdhc0;
 		mcuboot-button0 = &user_button_2;
 	};
 
 	chosen {
 		zephyr,edac = &erm0;
+		zephyr,system-timer-companion = &lptmr0;
 		zephyr,crc = &crc;
 	};
 
@@ -55,7 +58,9 @@
 			label = "User SW2";
 			gpios = <&gpio0 23 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
 			zephyr,code = <INPUT_KEY_0>;
-			status = "disabled";
+			/* SW2 wakes via WUU external pin 5. */
+			wakeup-ctrls = <&wuu NXP_WUU_PIN_5_FALLING_INT>;
+			status = "okay";
 		};
 
 		user_button_3: button_1 {
@@ -234,13 +239,13 @@ arduino_serial: &flexcomm2_lpuart2 {};
 	};
 };
 
-/*
- * MCXN947 board uses OS timer as the kernel timer
- * In case we need to switch to SYSTICK timer, then
- * replace &os_timer with &systick
+/* The MCXN947 can use ostimer as the kernel timer.
+ * We enable it in the dts, and which specific timer
+ * to use as the system timer can be controlled through
+ * Kconfig option based on application requirements.
  */
 &os_timer {
-	status = "disabled";
+	status = "okay";
 };
 
 &systick {
@@ -329,6 +334,44 @@ arduino_serial: &flexcomm2_lpuart2 {};
 			ranges;
 		};
 	};
+
+	/*
+	 * Macronix MX35LF1GE4AB SPI NAND - FlexSPI PortA CS0.
+	 * Drop-in replacement for W25Q64 NOR (board rework).
+	 * Mutually exclusive with ext_flash_ctrl: enable at most one.
+	 */
+	mx35lf1ge4ab: mx35lf1ge4ab@0 {
+		compatible = "nxp,imx-flexspi-nand";
+		reg = <0>;
+		status = "disabled";
+
+		/* MX35LF1GE4AB: 1 Gbit = 128 MiB; DT size is in bits */
+		size = <DT_SIZE_M(128 * 8)>;
+
+		spi-max-frequency = <DT_FREQ_M(104)>;
+		write-block-size = <2048>;
+		erase-block-size = <DT_SIZE_K(128)>;
+
+		cs-interval-unit = <1>;
+		cs-interval = <2>;
+		cs-hold-time = <3>;
+		cs-setup-time = <3>;
+		data-valid-time = <2>;
+		column-space = <11>;
+		ahb-write-wait-unit = <2>;
+		ahb-write-wait-interval = <0>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			nand_storage: partition@0 {
+				label = "nand-storage";
+				reg = <0x0 DT_SIZE_M(128)>;
+			};
+		};
+	};
 };
 
 &dac0 {
@@ -349,9 +392,6 @@ arduino_serial: &flexcomm2_lpuart2 {};
 &enet {
 	pinctrl-0 = <&pinmux_enet_qos>;
 	pinctrl-names = "default";
-};
-
-&enet_mac {
 	phy-connection-type = "rmii";
 	zephyr,random-mac-address;
 	phy-handle = <&phy>;
@@ -440,5 +480,13 @@ dvp_20pin_i2c: &flexcomm7_lpi2c7 {};
 dvp_20pin_interface: &video_sdma {};
 
 &crc {
+	status = "okay";
+};
+
+&powerquad {
+	status = "okay";
+};
+
+&otpc {
 	status = "okay";
 };

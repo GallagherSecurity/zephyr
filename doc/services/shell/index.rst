@@ -499,7 +499,7 @@ Simple command handler implementation:
 		ARG_UNUSED(argc);
 		ARG_UNUSED(argv);
 
-		shell_fprintf(shell, SHELL_INFO, "Print info message\n");
+		shell_fprintf(sh, SHELL_INFO, "Print info message\n");
 
 		shell_print(sh, "Print simple text.");
 
@@ -821,6 +821,11 @@ The function reads from the shell transport until a newline character is receive
 storing the data in a provided buffer. The newline character itself is not included
 in the buffer. The buffer is automatically null-terminated on success.
 
+Use :c:func:`shell_readline_prompt_set` before calling :c:func:`shell_readline` to
+display a prompt string (e.g. ``"Proceed? [y/N]: "``). The prompt is printed
+automatically at the start of readline and restored after any log messages that
+interrupt the input line. It is cleared when :c:func:`shell_readline` returns.
+
 .. note::
 
    The :c:func:`shell_readline` function should be called from the shell thread in a
@@ -835,9 +840,8 @@ Example usage:
            uint8_t input_buf[256];
            int ret;
 
-           shell_fprintf_normal(sh, "Enter your secret: ");
-
            shell_obscure_set(sh, true);
+           shell_readline_prompt_set(sh, "Enter your secret: ");
            ret = shell_readline(sh, input_buf, sizeof(input_buf), K_SECONDS(10));
            shell_obscure_set(sh, false);
 
@@ -885,6 +889,29 @@ This feature is activated by: :kconfig:option:`CONFIG_SHELL_LOG_BACKEND` set to 
 	RTT (:kconfig:option:`CONFIG_LOG_BACKEND_RTT`), which are available earlier
 	during system initialization.
 
+.. note::
+	The shell log backend is enabled by :c:func:`shell_start`. With
+	:kconfig:option:`CONFIG_SHELL_AUTOSTART` set to ``y`` this happens in the
+	shell thread, when it is scheduled for the first time. The shell thread runs
+	at a low priority by default, so this moment depends on when higher priority
+	threads, including the main thread executing system initialization, block or
+	finish. Log messages and ``printk()`` output routed through the logger
+	(:kconfig:option:`CONFIG_LOG_PRINTK`) issued before that point are handled by
+	the logging core, not by the shell:
+
+	* In deferred mode (:kconfig:option:`CONFIG_LOG_MODE_DEFERRED`) they are
+	  buffered and printed once the shell starts, as long as they fit in
+	  :kconfig:option:`CONFIG_LOG_BUFFER_SIZE`.
+	* In immediate mode (:kconfig:option:`CONFIG_LOG_MODE_IMMEDIATE`) they are
+	  lost, because there is no active backend to output them.
+
+	If the application needs early output on the shell, set
+	:kconfig:option:`CONFIG_SHELL_AUTOSTART` to ``n`` and call
+	:c:func:`shell_start` explicitly, for example from a :c:macro:`SYS_INIT`
+	hook with a priority higher than the shell backend initialization priority
+	(e.g. :kconfig:option:`CONFIG_SHELL_BACKEND_SERIAL_INIT_PRIORITY`).
+	Alternatively, do not route ``printk()`` through the logger.
+
 RTT Backend Channel Selection
 *****************************
 
@@ -907,6 +934,8 @@ This allows interactive use of the shell through JLinkRTTViewer, while the log
 is written to file.
 
 See `shell backends <backends_>`_ for details on how to enable RTT as a Shell backend.
+
+.. _shell_remote:
 
 Remote Shell
 ************
@@ -935,6 +964,18 @@ This approach has two main benefits:
    modules that use string formatting (for example, logging).
 
 See :zephyr:code-sample:`shell-module` for details on how to enable remote shell.
+
+Security considerations
+=======================
+
+The host and the remote client validate commands and message lengths received from each other.
+Print messages are not validated: the host formats the :ref:`cbprintf package <cbprintf_packaging>`
+received from the remote client as is. The format string and string arguments in the package can
+point to any host address, and ``%n`` writes to host memory when
+:kconfig:option:`CONFIG_CBPRINTF_N_SPECIFIER` is enabled. With
+:kconfig:option:`CONFIG_SHELL_REMOTE_CLI_SKIP_RO_STRINGS` enabled, the host reads read-only
+strings directly from the remote core memory by design. Enable
+:kconfig:option:`CONFIG_SHELL_REMOTE` only if the host core trusts every remote client core.
 
 Configuration
 =============

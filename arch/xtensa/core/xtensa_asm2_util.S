@@ -12,6 +12,18 @@
 #endif
 
 /*
+ * xtensa_triple_fault_breadcrumb - record triple fault state for host diagnosis.
+ *
+ * Weak default is a no-op. SoC families that support it link in a strong
+ * override, so the shared vector code stays free of per-SoC #ifdefs.
+ * Called via CALL0; may clobber a2/a3/a4.
+ */
+.weak xtensa_triple_fault_breadcrumb
+.align 4
+xtensa_triple_fault_breadcrumb:
+	ret
+
+/*
  * xtensa_spill_reg_windows
  *
  * Spill all register windows.  Not a C function, enter this via CALL0
@@ -243,13 +255,38 @@ xtensa_switch:
 #ifdef CONFIG_USERSPACE
 	entry a1, 32
 
-	s32i a4, a1, 0
 	s32i a5, a1, 4
 	s32i a6, a1, 8
 	s32i a7, a1, 12
 
+	/* Pointer to incoming thread in A6 */
 	rsr a6, ZSR_CPU
 	l32i a6, a6, ___cpu_t_current_OFFSET
+
+#if defined(CONFIG_XTENSA_MPU) || defined(CONFIG_XTENSA_MMU_FLUSH_AUTOREFILL_DTLBS_ON_SWAP)
+	/* With MMU, SWAP_PAGE_TABLE is pretty lightweight so there is
+	 * no need for all these extra code to skip swapping.
+	 */
+
+	/* Pointer to outgoing thread in A7 */
+	mov a7, a3
+	addi a7, a7, -___thread_t_switch_handle_OFFSET
+
+	/* Load pointer to memory domain for both
+	 * incoming (in A5) and outgoing (in A7) threads.
+	 */
+	l32i a5, a6, _thread_offset_to_mem_domain
+	l32i a7, a7, _thread_offset_to_mem_domain
+
+	/* If both threads are using the same memory domain,
+	 * skip swapping page table or MPU entries as they
+	 * are the same.
+	 */
+	beq a5, a7, __switch_swap_same_domain
+#endif /* CONFIG_XTENSA_MPU || CONFIG_XTENSA_MMU_FLUSH_AUTOREFILL_DTLBS_ON_SWAP */
+
+	s32i a4, a1, 0
+
 #ifdef CONFIG_XTENSA_MMU
 #ifdef CONFIG_XTENSA_MMU_FLUSH_AUTOREFILL_DTLBS_ON_SWAP
 	call4 xtensa_swap_update_page_tables
@@ -258,13 +295,17 @@ xtensa_switch:
 #endif
 #endif
 #ifdef CONFIG_XTENSA_MPU
-	call4 xtensa_mpu_map_write
+	call4 xtensa_mpu_thread_map_write
 #endif
 
+	l32i a4, a1, 0
+
+#if defined(CONFIG_XTENSA_MPU) || defined(CONFIG_XTENSA_MMU_FLUSH_AUTOREFILL_DTLBS_ON_SWAP)
+__switch_swap_same_domain:
+#endif /* CONFIG_XTENSA_MPU || CONFIG_XTENSA_MMU_FLUSH_AUTOREFILL_DTLBS_ON_SWAP */
 	l32i a7, a1, 12
 	l32i a6, a1, 8
 	l32i a5, a1, 4
-	l32i a4, a1, 0
 #else
 	entry a1, 16
 #endif
@@ -318,7 +359,7 @@ xtensa_switch:
 	/* Now the high registers */
 	call0 xtensa_save_high_regs
 
-#if defined(CONFIG_KERNEL_COHERENCE) && !defined(CONFIG_SCHED_CPU_MASK_PIN_ONLY)
+#if defined(CONFIG_KERNEL_COHERENCE)
 	/* Flush the stack.  The top of stack was stored for us by
 	 * arch_cohere_stacks().  It can be NULL for a dummy thread.
 	 */
@@ -383,40 +424,44 @@ DEF_EXCINT 1, _handle_excint, xtensa_excint1_c
 #define MAX_INTR_LEVEL 0
 #endif
 
-#if MAX_INTR_LEVEL >= 2
+#if MAX_INTR_LEVEL >= 2 && (!XCHAL_HAVE_NMI || XCHAL_NMILEVEL != 2)
 #if !(defined(CONFIG_GDBSTUB) && (XCHAL_DEBUGLEVEL == 2))
 DEF_EXCINT 2, _handle_excint, xtensa_int2_c
 #endif
 #endif
 
-#if MAX_INTR_LEVEL >= 3
+#if MAX_INTR_LEVEL >= 3 && (!XCHAL_HAVE_NMI || XCHAL_NMILEVEL != 3)
 #if !(defined(CONFIG_GDBSTUB) && (XCHAL_DEBUGLEVEL == 3))
 DEF_EXCINT 3, _handle_excint, xtensa_int3_c
 #endif
 #endif
 
-#if MAX_INTR_LEVEL >= 4
+#if MAX_INTR_LEVEL >= 4 && (!XCHAL_HAVE_NMI || XCHAL_NMILEVEL != 4)
 #if !(defined(CONFIG_GDBSTUB) && (XCHAL_DEBUGLEVEL == 4))
 DEF_EXCINT 4, _handle_excint, xtensa_int4_c
 #endif
 #endif
 
-#if MAX_INTR_LEVEL >= 5
+#if MAX_INTR_LEVEL >= 5 && (!XCHAL_HAVE_NMI || XCHAL_NMILEVEL != 5)
 #if !(defined(CONFIG_GDBSTUB) && (XCHAL_DEBUGLEVEL == 5))
 DEF_EXCINT 5, _handle_excint, xtensa_int5_c
 #endif
 #endif
 
-#if MAX_INTR_LEVEL >= 6
+#if MAX_INTR_LEVEL >= 6 && (!XCHAL_HAVE_NMI || XCHAL_NMILEVEL != 6)
 #if !(defined(CONFIG_GDBSTUB) && (XCHAL_DEBUGLEVEL == 6))
 DEF_EXCINT 6, _handle_excint, xtensa_int6_c
 #endif
 #endif
 
-#if MAX_INTR_LEVEL >= 7
+#if MAX_INTR_LEVEL >= 7 && (!XCHAL_HAVE_NMI || XCHAL_NMILEVEL != 7)
 #if !(defined(CONFIG_GDBSTUB) && (XCHAL_DEBUGLEVEL == 7))
 DEF_EXCINT 7, _handle_excint, xtensa_int7_c
 #endif
+#endif
+
+#if XCHAL_HAVE_NMI
+DEF_EXCINT XCHAL_NMILEVEL, _handle_excint, xtensa_nmi_c
 #endif
 
 #if defined(CONFIG_GDBSTUB)
@@ -433,7 +478,7 @@ _Level1RealVectorExtended:
  * caller function of the code that took the exception, and that can't
  * be done in C).  A prototype exists which mucks with the stack frame
  * from the C handler instead, but that would add a LARGE overhead to
- * some alloca() calls (those whent he caller has been spilled) just
+ * some alloca() calls (those when the caller has been spilled) just
  * to save these five cycles during other exceptions and L1
  * interrupts.  Maybe revisit at some point, with better benchmarking.
  * Note that _xt_alloca_exc is Xtensa-authored code which expects A0
@@ -599,6 +644,7 @@ _TripleFault:
 	movi a2, SYS_exit
 	simcall
 #endif
+	call0 xtensa_triple_fault_breadcrumb
 1:
 	j	1b
 

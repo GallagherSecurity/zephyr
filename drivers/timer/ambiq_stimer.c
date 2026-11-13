@@ -16,7 +16,7 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/timer/system_timer.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/irq.h>
 #include <zephyr/spinlock.h>
 
@@ -137,7 +137,7 @@ void stimer_isr(const void *arg)
 	}
 }
 
-void sys_clock_set_timeout(int32_t ticks, bool idle)
+void sys_clock_set_timeout(uint32_t ticks, bool idle)
 {
 	ARG_UNUSED(idle);
 
@@ -146,8 +146,7 @@ void sys_clock_set_timeout(int32_t ticks, bool idle)
 	}
 
 	/* Adjust the ticks to the range of [1, MAX_TICKS]. */
-	ticks = (ticks == K_TICKS_FOREVER) ? MAX_TICKS : ticks;
-	ticks = CLAMP(ticks, 1, (int32_t)MAX_TICKS);
+	ticks = CLAMP(ticks, 1, MAX_TICKS);
 
 	k_spinlock_key_t key = k_spin_lock(&g_lock);
 
@@ -225,11 +224,11 @@ static int stimer_init(void)
 	/* A Possible clock glitch could rarely cause the Stimer interrupt to be lost.
 	 * Set up a backup comparator to handle this case
 	 */
-	NVIC_ClearPendingIRQ(COMPAREA_IRQ);
+	k_irq_clear_pending(COMPAREA_IRQ);
 	IRQ_CONNECT(COMPAREA_IRQ, 0, stimer_isr, 0, 0);
 	irq_enable(COMPAREA_IRQ);
 #if !defined(CONFIG_SOC_SERIES_APOLLO5X)
-	NVIC_ClearPendingIRQ(COMPAREB_IRQ);
+	k_irq_clear_pending(COMPAREB_IRQ);
 	IRQ_CONNECT(COMPAREB_IRQ, 0, stimer_isr, 0, 0);
 	irq_enable(COMPAREB_IRQ);
 #endif

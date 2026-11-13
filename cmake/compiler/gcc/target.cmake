@@ -6,6 +6,7 @@ set_ifndef(C++ g++)
 # GCC-based toolchains
 
 find_program(CMAKE_C_COMPILER ${CROSS_COMPILE}${CC} PATHS ${TOOLCHAIN_HOME} NO_DEFAULT_PATH)
+find_program(CMAKE_GCOV ${CROSS_COMPILE}gcov   PATHS ${TOOLCHAIN_HOME} NO_DEFAULT_PATH)
 
 if(${CMAKE_C_COMPILER} STREQUAL CMAKE_C_COMPILER-NOTFOUND)
   message(FATAL_ERROR "C compiler ${CROSS_COMPILE}${CC} not found - Please check your toolchain installation")
@@ -41,11 +42,10 @@ execute_process(
     OUTPUT_VARIABLE GCC_COMPILER_VERSION
     )
 
-if("${GCC_COMPILER_VERSION}" VERSION_LESS 4.3.0 OR
-    "${GCC_COMPILER_VERSION}" VERSION_GREATER_EQUAL 13.1.0)
-    set(fix_header_file include/limits.h)
+if("${GCC_COMPILER_VERSION}" VERSION_GREATER_EQUAL 13.1.0)
+  set(fix_header_file include/limits.h)
 else()
-    set(fix_header_file include-fixed/limits.h)
+  set(fix_header_file include-fixed/limits.h)
 endif()
 
 foreach(file_name include/stddef.h "${fix_header_file}")
@@ -80,6 +80,10 @@ elseif("${ARCH}" STREQUAL "xtensa")
   include(${CMAKE_CURRENT_LIST_DIR}/target_xtensa.cmake)
 elseif("${ARCH}" STREQUAL "rx")
   include(${CMAKE_CURRENT_LIST_DIR}/target_rx.cmake)
+elseif("${ARCH}" STREQUAL "openrisc")
+  include(${CMAKE_CURRENT_LIST_DIR}/target_openrisc.cmake)
+elseif("${ARCH}" STREQUAL "tricore")
+  include(${CMAKE_CURRENT_LIST_DIR}/target_tricore.cmake)
 endif()
 
 if(SYSROOT_DIR)

@@ -11,6 +11,7 @@
  */
 
 #include <zephyr/smf.h>
+#include <zephyr/net/dplpmtud.h>
 #include <zephyr/net/tls_credentials.h>
 #include <zephyr/net/net_ip.h>
 
@@ -34,6 +35,9 @@
 #else
 #define ALPN_MAX_PROTOCOLS 0
 #endif /* CONFIG_QUIC_TLS_MAX_APP_PROTOCOLS */
+
+/* Maximum client SNI hostname (RFC 6066 server_name), including NUL. */
+#define QUIC_TLS_MAX_HOSTNAME_LEN 128
 
 #define MAX_CONN_ID_LEN 20
 #define MAX_MY_CONN_ID_LEN 8
@@ -115,6 +119,17 @@ struct quic_buffer {
 #define QUIC_MAX_ACK_DELAY_MS   25
 
 /**
+ * Sent-packet history slots kept free of stream data packets, so that
+ * ack-eliciting control packets sent from paths that cannot back off never
+ * have to evict an in-flight stream entry. Stream data sends refuse to use
+ * these slots and return -EAGAIN instead.
+ */
+#define QUIC_SENT_PKT_HISTORY_RESERVE 4
+
+BUILD_ASSERT(QUIC_SENT_PKT_HISTORY_RESERVE < CONFIG_QUIC_SENT_PKT_HISTORY_SIZE,
+	     "The reserve must leave room for stream data packets");
+
+/**
  * Information about a sent packet for RTT measurement and loss detection.
  * This is stored in a ring buffer per packet number space.
  */
@@ -124,6 +139,9 @@ struct quic_sent_pkt_info {
 
 	/** Time packet was sent (k_uptime_get() value in ms) */
 	int64_t sent_time;
+
+	/** Secret level that protected this packet when it was sent. */
+	uint8_t level;
 
 	/** Size of packet in bytes (for bytes_in_flight tracking) */
 	uint16_t sent_bytes;
@@ -136,6 +154,12 @@ struct quic_sent_pkt_info {
 
 	/** True if loss detection queued this frame for retransmission */
 	bool retransmit_pending;
+
+	/** True if this packet is a DPLPMTUD probe. */
+	bool dplpmtud_probe;
+
+	/** UDP payload size targeted by this DPLPMTUD probe. */
+	uint16_t dplpmtud_probe_size;
 
 	/* Stream frame carried by this packet (for retransmission).
 	 * Only valid when has_stream_frame is true.
@@ -275,6 +299,9 @@ struct quic_token_validation {
 	uint8_t orig_dcid_len;
 };
 
+/* RFC 8899 DPLPMTUD for QUIC uses 1200-byte UDP payloads as the base size. */
+#define QUIC_DPLPMTUD_BASE_PLPMTU NET_DPLPMTUD_BASE_PLPMTU
+
 /** A list of secure tags that TLS context should use. */
 struct sec_tag_list {
 	/** An array of secure tags referencing TLS credentials. */
@@ -331,6 +358,9 @@ struct quic_tls_context {
 		 */
 		const char *alpn_list[ALPN_MAX_PROTOCOLS + 1];
 
+		/** Client SNI hostname (RFC 6066 server_name); empty = not sent. */
+		char hostname[QUIC_TLS_MAX_HOSTNAME_LEN];
+
 #if defined(CONFIG_QUIC_TLS_CERT_VERIFY_CALLBACK)
 		struct tls_cert_verify_cb cert_verify;
 #endif /* CONFIG_NET_SOCKETS_TLS_CERT_VERIFY_CALLBACK */
@@ -351,6 +381,37 @@ struct quic_tls_context {
 	uint8_t server_random[32];
 	bool client_hello_prepared;
 
+	/* Cipher suites actually offered in the ClientHello we sent. The
+	 * ServerHello must select one of these (RFC 8446 ch. 4.1.3); the
+	 * offer can be narrower than the configured list, e.g. an external
+	 * PSK excludes suites whose hash does not match the key.
+	 */
+	uint16_t offered_suites[3];
+	uint8_t offered_suite_count;
+
+	/* PSK configuration and negotiated use. The PSK is either externally
+	 * provisioned (TLS_CREDENTIAL_PSK) or carried over from a session
+	 * ticket; psk_is_resumption records which, as the binder label
+	 * depends on it (RFC 8446 Section 7.1).
+	 */
+	const uint8_t *psk;
+	size_t psk_len;
+	const uint8_t *psk_identity;
+	size_t psk_identity_len;
+	bool psk_configured;
+	bool psk_is_resumption;
+	bool psk_offered;
+	bool use_psk_key_schedule;
+	bool early_data_offered;
+	bool early_data_accepted;
+	bool early_data_rejected;
+	bool session_state_valid;
+	bool issue_session_tickets;
+	uint32_t max_early_data_size;
+	uint8_t resumption_master_secret[QUIC_HASH_MAX_LEN];
+	size_t resumption_master_secret_len;
+	struct quic_session_state session_state;
+
 	/* Certificate request context */
 #define QUIC_CERT_REQ_CONTEXT_LEN 8
 	uint8_t cert_request_context[QUIC_CERT_REQ_CONTEXT_LEN];
@@ -362,6 +423,13 @@ struct quic_tls_context {
 	size_t ecdh_public_key_len;
 	uint8_t peer_public_key[65];
 	size_t peer_public_key_len;
+	/* Second client key_share offer (secp256r1), held alongside the primary
+	 * x25519 offer in ecdh_key_id until the ServerHello selects a group; the
+	 * unselected key is then destroyed. Server side leaves this unused.
+	 */
+	psa_key_id_t ecdh_key_id2;
+	uint8_t ecdh_public_key2[65];
+	size_t ecdh_public_key2_len;
 	uint8_t shared_secret[32];
 
 	/* Certificates (for server or client auth) */
@@ -386,6 +454,12 @@ struct quic_tls_context {
 	/* Received peer certificate for verification */
 	uint8_t peer_cert[CONFIG_QUIC_TLS_MAX_CERT_SIZE];
 	size_t peer_cert_len;
+
+	/* Set once the peer's CertificateVerify has been checked against
+	 * peer_cert. Without it a certificate proves nothing, since anyone can
+	 * replay someone else's certificate.
+	 */
+	bool peer_cert_verified;
 
 	/* QUIC transport parameters */
 #define MAX_QUIC_TP_LEN 256
@@ -461,6 +535,65 @@ struct quic_crypto_context {
 	/** Are the settings initialized
 	 */
 	bool initialized;
+
+	/** The keys of this level were discarded for good (RFC 9001
+	 * ch. 4.9) and must not be set up again for this connection.
+	 */
+	bool discarded;
+};
+
+/**
+ * RFC 9001 Section 6 key update state for 1-RTT packet protection.
+ * Only the packet protection key and IV rotate on an update; the header
+ * protection keys are derived once and never change.
+ */
+struct quic_key_update {
+	/** Current-generation 1-RTT traffic secrets. Advanced in place with
+	 * the "quic ku" label on every update, so the next generation can
+	 * always be derived but older ones cannot be recovered.
+	 */
+	uint8_t rx_secret[QUIC_HASH_MAX_LEN];
+	uint8_t tx_secret[QUIC_HASH_MAX_LEN];
+	size_t secret_len;
+	psa_algorithm_t hash_alg;
+	int cipher_algo;
+
+	/** Previous-generation RX packet protection, kept so packets
+	 * reordered from before the latest update still decrypt.
+	 */
+	struct quic_pp_cipher prev_rx_pp;
+
+	/** Next-generation RX packet protection and the secret it was keyed
+	 * from, derived once on the first phase mismatch and retained across
+	 * failed trial decrypts (RFC 9001 Section 6.3), consumed when an
+	 * update commits. Caching keeps a forged phase bit as cheap to
+	 * reject as any other forged packet.
+	 */
+	struct quic_pp_cipher next_rx_pp;
+	uint8_t next_rx_secret[QUIC_HASH_MAX_LEN];
+
+	/** Lowest packet number decrypted in the current RX key phase.
+	 * Packets below it with a flipped phase bit belong to the previous
+	 * generation, at or above it to the next one.
+	 */
+	uint64_t rx_phase_first_pn;
+
+	/** First packet number sent in the current TX key phase. */
+	uint64_t tx_phase_first_pn;
+
+	/** Key phase bit expected on received packets. */
+	uint8_t rx_phase;
+
+	/** Key phase bit set on sent packets. */
+	uint8_t tx_phase;
+
+	/** The peer has acknowledged a packet sent in the current TX phase.
+	 * RFC 9001 Section 6.1 requires this before a new update may be
+	 * initiated.
+	 */
+	bool tx_phase_acked;
+
+	bool initialized;
 };
 
 /**
@@ -495,6 +628,26 @@ struct quic_deferred_crypto_payload {
 	uint8_t data[CONFIG_QUIC_TX_BUFFER_SIZE];
 };
 #endif /* CONFIG_QUIC_SERVER_ANTI_AMPLIFICATION_LIMIT */
+
+#if defined(CONFIG_QUIC_0RTT)
+#define QUIC_MAX_DEFERRED_0RTT_PACKETS 4
+
+struct quic_deferred_0rtt_packet {
+	size_t len;
+	size_t total_len;
+	size_t pn_offset;
+	uint8_t data[CONFIG_QUIC_ENDPOINT_PENDING_DATA_LEN];
+};
+#endif /* CONFIG_QUIC_0RTT */
+
+/** Result of decrypting one protected packet */
+struct quic_decrypted_packet {
+	uint8_t *payload;           /* Decrypted frames */
+	size_t payload_len;         /* Length of decrypted payload */
+	uint64_t packet_number;     /* Full reconstructed packet number */
+	enum quic_packet_type type; /* Packet type */
+	uint8_t first_byte;         /* Header byte with protection removed */
+};
 
 /**
  * Long header information parsed from an incoming packet, used for initial
@@ -555,6 +708,10 @@ struct quic_endpoint {
 		struct quic_crypto_context initial;
 		struct quic_crypto_context handshake;
 		struct quic_crypto_context application;
+		struct quic_crypto_context early;
+
+		/** Key update state for the application level */
+		struct quic_key_update ku;
 
 		/** Crypto stream state per level (Initial, Handshake, 1-RTT) */
 		struct quic_crypto_stream stream[3];
@@ -675,6 +832,13 @@ struct quic_endpoint {
 		uint8_t data[CONFIG_QUIC_ENDPOINT_PENDING_DATA_LEN];
 	} pending;
 
+#if defined(CONFIG_QUIC_0RTT)
+	struct {
+		struct quic_deferred_0rtt_packet packets[QUIC_MAX_DEFERRED_0RTT_PACKETS];
+		uint8_t count;
+	} deferred_0rtt;
+#endif /* CONFIG_QUIC_0RTT */
+
 	/** Peer connection id pool */
 	struct {
 		uint8_t cid[MAX_CONN_ID_LEN];
@@ -712,6 +876,17 @@ struct quic_endpoint {
 	} anti_amplification;
 #endif /* CONFIG_QUIC_SERVER_ANTI_AMPLIFICATION_LIMIT */
 
+	/** RETIRE_CONNECTION_ID frames that could not be sent when their CID
+	 * was dropped, because the reply budget of the payload that retired
+	 * them was used up or the send itself failed. They are sent from the
+	 * budget of later payloads, so the retirement is delayed, never lost.
+	 */
+	struct {
+		struct k_spinlock lock;
+		uint64_t seq[CONFIG_QUIC_MAX_PEER_CIDS];
+		uint8_t count;
+	} retire_backlog;
+
 	/** Stream-count limits, how many streams we allow the peer to open.
 	 * Mirrored from our own transport parameters and grown in response to
 	 * STREAMS_BLOCKED frames (RFC 9000 ch. 19.14 / 4.6).
@@ -721,6 +896,8 @@ struct quic_endpoint {
 		uint64_t max_uni;    /* Current uni stream limit advertised to peer */
 		uint64_t open_bidi;  /* peer-initiated bidi streams currently open */
 		uint64_t open_uni;   /* peer-initiated uni  streams currently open */
+		uint64_t total_bidi; /* peer-initiated bidi streams ever opened */
+		uint64_t total_uni;  /* peer-initiated uni  streams ever opened */
 	} rx_sl;
 
 	/** Peer's transport parameters */
@@ -732,6 +909,7 @@ struct quic_endpoint {
 		uint64_t initial_max_streams_bidi;
 		uint64_t initial_max_streams_uni;
 		uint64_t max_idle_timeout;
+		uint16_t max_udp_payload_size;
 		uint64_t max_streams_bidi;
 		uint64_t max_streams_uni;
 		bool parsed;
@@ -822,6 +1000,14 @@ struct quic_endpoint {
 		bool release_pending;
 	} recovery;
 
+	/** Serializes TX packet assembly on crypto.tx_buffer and tx_pn. */
+	struct k_mutex send_lock;
+
+	/** DPLPMTUD path handle; probe state lives in the generic path cache. */
+	struct {
+		struct net_dplpmtud_path path;
+	} dplpmtud;
+
 	/** Max TX payload size for this endpoint, based on path MTU discovery.
 	 * Initialized to a default value and updated based on peer's
 	 * transport parameters and any Path MTU Discovery we perform.
@@ -834,6 +1020,12 @@ struct quic_endpoint {
 
 	/** Have we notified streams about endpoint closing */
 	bool is_closing_notified : 1;
+
+	/** Handshake confirmed (RFC 9001 Section 4.1.2): on the server when
+	 * the handshake completes, on the client when HANDSHAKE_DONE is
+	 * received. Gates key update initiation.
+	 */
+	bool handshake_confirmed : 1;
 };
 
 struct quic_context;
@@ -869,6 +1061,11 @@ struct quic_stream_tx_buffer {
 	uint8_t  data[CONFIG_QUIC_STREAM_TX_BUFFER_SIZE];
 	uint64_t base_offset; /* stream offset of data[0] */
 	size_t   len;         /* bytes of unACKed data currently stored */
+};
+
+struct quic_stream_tx_ack_segment {
+	uint64_t offset;
+	uint32_t len;
 };
 
 struct quic_stream_state {
@@ -925,6 +1122,10 @@ __net_socket struct quic_stream {
 	/** TX flow control, highest contiguously ACKed stream offset */
 	uint64_t bytes_acked;
 
+	/** ACKed TX ranges waiting for earlier gaps to be ACKed too. */
+	struct quic_stream_tx_ack_segment acked_ooo[CONFIG_QUIC_STREAM_OOO_SLOTS];
+	uint8_t acked_ooo_count;
+
 	/** TX flow control, remote_max_data when STREAM_DATA_BLOCKED was last sent */
 	uint64_t blocked_sent;
 
@@ -971,6 +1172,9 @@ __net_socket struct quic_stream {
 		struct k_mutex data_available;
 	} cond;
 
+	/** Protects tx_buf, bytes_acked, and acked_ooo state. */
+	struct k_mutex tx_lock;
+
 	/** Receive buffer */
 	struct quic_stream_rx_buffer rx_buf;
 
@@ -988,6 +1192,12 @@ __net_socket struct quic_stream {
 
 	/** TX side reset because peer sent STOP_SENDING */
 	bool tx_reset : 1;
+
+	/** A rejected 0-RTT FIN must be replayed after queued data is resent. */
+	bool replay_fin_pending : 1;
+
+	/** RX side of this stream has carried accepted 0-RTT data. */
+	bool received_early_data : 1;
 };
 
 /**
@@ -1176,6 +1386,26 @@ void quic_context_stream_foreach(struct quic_context *ctx,
  * @param user_data Caller specific data.
  */
 void quic_stream_foreach(quic_stream_cb_t cb, void *user_data);
+int quic_prepare_rejected_early_data_replay(struct quic_endpoint *ep);
+int quic_replay_rejected_early_data(struct quic_endpoint *ep);
+
+/**
+ * @brief Initiate a key update (RFC 9001 Section 6.1).
+ *
+ * Moves the send keys of the application level to the next generation and
+ * flips the key phase bit on subsequently sent 1-RTT packets. The peer is
+ * expected to follow to the same phase.
+ *
+ * @param ep Endpoint with a confirmed handshake.
+ *
+ * @retval 0 on success
+ * @retval -ENOTCONN if the handshake is not confirmed or the application
+ *         keys are not installed yet
+ * @retval -EBUSY if no packet of the current key phase has been
+ *         acknowledged yet (RFC 9001 Section 6.1)
+ * @retval -EIO if deriving or installing the next keys failed
+ */
+int quic_endpoint_initiate_key_update(struct quic_endpoint *ep);
 
 #if defined(CONFIG_NET_TEST)
 /* Test-only function declarations */
@@ -1184,6 +1414,13 @@ int quic_get_len(const uint8_t *buf, size_t buf_len, uint64_t *len);
 int quic_put_len(uint8_t *buf, size_t buf_len, uint64_t len);
 int quic_put_varint(uint8_t *buf, size_t buf_len, uint64_t val);
 int quic_validate_frame_type(uint8_t frame_type, enum quic_secret_level level);
+bool quic_early_data_is_armed(const struct quic_endpoint *ep);
+enum quic_secret_level quic_stream_send_level(const struct quic_endpoint *ep);
+int parse_encrypted_extensions(struct quic_tls_context *ctx,
+			       const uint8_t *msg, size_t msg_len);
+int parse_new_session_ticket(struct quic_tls_context *ctx,
+			     const uint8_t *msg, size_t msg_len);
+int quic_mark_rejected_early_data(struct quic_endpoint *ep);
 
 bool quic_setup_initial_secrets(struct quic_endpoint *ep,
 				const uint8_t *cid, size_t cid_len,
@@ -1228,7 +1465,29 @@ int quic_decrypt_payload(struct quic_pp_cipher *pp, uint64_t packet_number,
 			 size_t *plaintext_len);
 
 int quic_flush_deferred_crypto(struct quic_endpoint *ep);
+bool quic_recovery_tx_slot_available(struct quic_endpoint *ep,
+				     enum quic_secret_level level);
 void quic_crypto_context_destroy(struct quic_crypto_context *ctx);
+void quic_endpoint_discard_keys(struct quic_endpoint *ep,
+				enum quic_secret_level level);
+int quic_send_packet(struct quic_endpoint *ep, enum quic_secret_level level,
+		     const uint8_t *payload, size_t payload_len);
+void quic_key_update_destroy(struct quic_key_update *ku);
+bool quic_setup_ciphers_ex(struct quic_ciphers *ciphers,
+			   psa_algorithm_t hash_alg,
+			   int cipher_algo,
+			   const uint8_t *secret,
+			   size_t secret_len);
+int quic_ku_next_secret(const struct quic_key_update *ku,
+			const uint8_t *secret, uint8_t *next);
+int quic_decrypt_packet(struct quic_endpoint *ep,
+			const uint8_t *packet,
+			size_t packet_len,
+			size_t pn_offset,
+			enum quic_packet_type ptype,
+			uint8_t *plaintext,
+			size_t plaintext_size,
+			struct quic_decrypted_packet *result);
 int quic_build_version_negotiation_packet(uint8_t *out,
 					  size_t out_len,
 					  const uint8_t *peer_scid,
@@ -1244,7 +1503,23 @@ void quic_recovery_on_packet_sent(struct quic_endpoint *ep,
 				  enum quic_secret_level level,
 				  uint64_t pkt_num,
 				  size_t sent_bytes,
-				  bool ack_eliciting);
+				  bool ack_eliciting,
+				  bool dplpmtud_probe,
+				  uint16_t dplpmtud_probe_size);
+void quic_dplpmtud_refresh_state(struct quic_endpoint *ep);
+void quic_dplpmtud_on_probe_acked(struct quic_endpoint *ep, uint16_t probe_size);
+void quic_dplpmtud_on_probe_lost(struct quic_endpoint *ep, uint16_t probe_size);
+/**
+ * Advance the stream TX ACK frontier and compact @a tx_buf.
+ *
+ * Takes @a stream->tx_lock internally. Unit tests may call this directly.
+ * Test setup that touches @a tx_buf, @a bytes_acked, or @a acked_ooo must
+ * call k_mutex_init() on @a tx_lock, and must hold @a tx_lock when mutating
+ * those fields outside this helper and the normal send path.
+ */
+void quic_stream_advance_tx_acked_for_stream(struct quic_stream *stream,
+					     uint64_t acked_start,
+					     uint64_t acked_end);
 int handle_crypto_frame(struct quic_endpoint *ep,
 			 enum quic_secret_level level,
 			 const uint8_t *data,
@@ -1252,6 +1527,17 @@ int handle_crypto_frame(struct quic_endpoint *ep,
 			 size_t *consumed);
 int parse_certificate(struct quic_tls_context *ctx,
 		      const uint8_t *data, size_t len);
+int parse_client_hello(struct quic_tls_context *ctx,
+		       const uint8_t *data, size_t len,
+		       const uint8_t *full_msg, size_t full_msg_len);
+int parse_server_hello(struct quic_tls_context *ctx,
+		       const uint8_t *msg, size_t msg_len);
+int handle_crypto_level_packet(struct quic_endpoint *ep,
+			       enum quic_secret_level level,
+			       const uint8_t *payload,
+			       size_t payload_len,
+			       size_t total_packet_len,
+			       bool *ack_only);
 int process_handshake_message(struct quic_tls_context *ctx,
 			      uint8_t msg_type,
 			      const uint8_t *msg, size_t msg_len,
@@ -1273,6 +1559,13 @@ int quic_validate_address_token(const struct net_sockaddr *addr,
 				const uint8_t *token, size_t token_len,
 				struct quic_token_validation *validation);
 void quic_token_cache_clear(void);
+uint64_t quic_token_now_sec(void);
+bool quic_token_claim_nonce(const uint8_t *nonce, uint64_t expires_at_sec);
+
+/* Snapshot of the reply budget consumed by the last payload parse, so tests
+ * can observe the per-payload cap without reaching into the parser's stack.
+ */
+extern uint16_t quic_test_reply_budget_spent;
 void quic_token_cache_store(const struct net_sockaddr *remote_addr,
 			    const uint8_t *token, size_t token_len);
 size_t quic_token_cache_take(const struct net_sockaddr *remote_addr,
@@ -1285,5 +1578,21 @@ int process_long_header(struct quic_endpoint *ep,
 			net_socklen_t addrlen,
 			struct quic_long_header_info *info,
 			size_t datagram_len);
+struct quic_stream *quic_find_stream(struct quic_context *ctx,
+				     struct quic_endpoint *ep,
+				     uint64_t stream_id);
+
+/* Server session-ticket cache helpers (single-use / freshness). */
+struct quic_server_ticket_entry;
+int tls_server_ticket_cache_store(const uint8_t *ticket, size_t ticket_len,
+				  const uint8_t *psk, size_t psk_len,
+				  uint16_t cipher_suite, uint32_t ticket_lifetime,
+				  uint32_t ticket_age_add, uint32_t max_early_data_size,
+				  const char *alpn);
+bool tls_server_ticket_cache_lookup(const uint8_t *ticket, size_t ticket_len,
+				    struct quic_server_ticket_entry *match);
+void tls_server_ticket_cache_consume(const uint8_t *ticket, size_t ticket_len);
+bool tls_ticket_age_acceptable(uint64_t issued_at_ms, uint32_t ticket_age_add,
+			       uint32_t obfuscated_ticket_age, uint64_t now_ms);
 
 #endif /* CONFIG_NET_TEST */

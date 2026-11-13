@@ -64,6 +64,12 @@ config WHD_DISABLE_SDIO_PULLUP_DURING_SPI_SLEEP
 	  Clears SDIO pullups when the SPI bus is configured for sleep.
 	  By default, this option is set to n, so SDIO pullups will be enabled.
 
+config IFX_WIFI_SOFTAP_SUPPORT
+	bool
+	default n
+	help
+	  Enable WiFi SoftAP support in the driver
+
 config AIROC_WIFI_CUSTOM
 	bool "Custom CYW43xx device/module"
 	help
@@ -253,6 +259,11 @@ config CYW55513_MURATA_2FY_SM
 	bool "CYW55513 MURATA-2FY (SM)"
 	help
 	  Infineon CYW55513 in Murata LBEE5HY2FY (Type 2FY) module (SM)
+
+config CYW55513_MOD_PSE84_SOM
+	bool "CYW55513_MOD_PSE84_SOM"
+	help
+	  Infineon CYW55513_MOD_PSE84_SOM (SM) module
 
 endchoice
 

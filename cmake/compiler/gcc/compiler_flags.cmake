@@ -151,6 +151,8 @@ set_property(TARGET compiler-cpp PROPERTY dialect_cpp2b "-std=c++2b"
   "-Wno-register" "-Wno-volatile")
 set_property(TARGET compiler-cpp PROPERTY dialect_cpp23 "-std=c++23"
   "-Wno-register" "-Wno-volatile")
+set_property(TARGET compiler-cpp PROPERTY dialect_cpp26 "-std=c++26"
+  "-Wno-register" "-Wno-volatile")
 
 # Flag for disabling strict aliasing rule in C and C++
 set_compiler_property(PROPERTY no_strict_aliasing -fno-strict-aliasing)
@@ -176,6 +178,22 @@ set_property(TARGET compiler-cpp PROPERTY no_rtti "-fno-rtti")
 
 # gcc flags for coverage generation
 set_compiler_property(PROPERTY coverage -fprofile-arcs -ftest-coverage -fno-inline)
+
+# gcc flags for heap KASAN instrumentation.
+set_compiler_property(PROPERTY heap_kasan
+  -fsanitize=kernel-address
+  --param=asan-instrumentation-with-call-threshold=0
+  --param=asan-globals=0
+  --param=asan-stack=0
+  --param=asan-instrument-reads=0
+  -fno-tree-loop-distribute-patterns)
+# ARC and OpenRISC require an explicit shadow offset with kernel-address.
+if(CONFIG_ARC OR CONFIG_OPENRISC)
+  set_compiler_property(APPEND PROPERTY heap_kasan -fasan-shadow-offset=0)
+endif()
+
+# Flag to disable heap KASAN instrumentation on a specific source file.
+set_compiler_property(PROPERTY no_heap_kasan -fno-sanitize=kernel-address)
 
 # Security canaries.
 set_compiler_property(PROPERTY security_canaries -fstack-protector)
@@ -238,10 +256,6 @@ set_compiler_property(PROPERTY linker_script -T)
 # Flags to not track macro expansion
 set_compiler_property(PROPERTY no_track_macro_expansion -ftrack-macro-expansion=0)
 
-# GCC 11 by default emits DWARF version 5 which cannot be parsed by
-# pyelftools. Can be removed once pyelftools supports v5.
-check_set_compiler_property(APPEND PROPERTY debug -gdwarf-4)
-
 set_compiler_property(PROPERTY no_common -fno-common)
 
 # GCC compiler flags for imacros. The specific header must be appended by user.
@@ -298,3 +312,6 @@ set_compiler_property(PROPERTY func_instrumentation_exclude_function_list
   "-finstrument-functions-exclude-function-list=${CONFIG_INSTRUMENTATION_EXCLUDE_FUNCTION_LIST}")
 set_compiler_property(PROPERTY func_instrumentation_exclude_file_list
   "-finstrument-functions-exclude-file-list=${CONFIG_INSTRUMENTATION_EXCLUDE_FILE_LIST}")
+
+# Compiler flag to let compiler use __aeabi_read_tp for setting thread pointer for TLS
+check_set_compiler_property(APPEND PROPERTY thread_local_storage -mtp=soft)

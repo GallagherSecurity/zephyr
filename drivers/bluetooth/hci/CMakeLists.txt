@@ -37,6 +37,7 @@ endif() # CONFIG_BUILD_ONLY_NO_BLOBS
 
 # zephyr-keep-sorted-start
 zephyr_library_sources_ifdef(CONFIG_BT_AMBIQ_HCI hci_ambiq.c apollox_blue.c)
+zephyr_library_sources_ifdef(CONFIG_BT_AMEBA hci_rtk_ameba.c)
 zephyr_library_sources_ifdef(CONFIG_BT_BEE hci_bee.c)
 zephyr_library_sources_ifdef(CONFIG_BT_BFLB hci_bflb.c)
 zephyr_library_sources_ifdef(CONFIG_BT_CYW208XX hci_infineon_cyw208xx.c)
@@ -47,6 +48,7 @@ zephyr_library_sources_ifdef(CONFIG_BT_EXT_ADV util_hci_evt.c)
 zephyr_library_sources_ifdef(CONFIG_BT_H4 h4.c)
 zephyr_library_sources_ifdef(CONFIG_BT_H4_NXP_CTLR hci_nxp_setup.c)
 zephyr_library_sources_ifdef(CONFIG_BT_H5 h5.c)
+zephyr_library_sources_ifdef(CONFIG_BT_HCI_ESP_HOSTED_MCU hci_esp_hosted_mcu.c)
 zephyr_library_sources_ifdef(CONFIG_BT_HCI_IPC ipc.c)
 zephyr_library_sources_ifdef(CONFIG_BT_HCI_UART_INFINEON hci_uart_infineon.c)
 zephyr_library_sources_ifdef(CONFIG_BT_NXP hci_nxp.c)

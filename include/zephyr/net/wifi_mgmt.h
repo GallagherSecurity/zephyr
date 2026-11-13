@@ -9,6 +9,7 @@
 /**
  * @file
  * @brief WiFi L2 stack public header
+ * @ingroup wifi_mgmt
  */
 
 #ifndef ZEPHYR_INCLUDE_NET_WIFI_MGMT_H_
@@ -61,6 +62,15 @@ extern "C" {
 #define WIFI_MGMT_SCAN_MAX_BSS_CNT 65535
 
 #define WIFI_MGMT_SKIP_INACTIVITY_POLL IS_ENABLED(CONFIG_WIFI_MGMT_AP_STA_SKIP_INACTIVITY_POLL)
+
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN
+#define WIFI_NAN_MAX_SSI_LEN            CONFIG_WIFI_NAN_MAX_SSI_LEN
+#define WIFI_NAN_MAX_SERVICE_NAME_LEN   64
+/* Holds multi-line NAN_STATUS output from hostap. */
+#define WIFI_NAN_RESP_SIZE              512
+#define WIFI_NAN_MAX_SET_PARAM_LEN      32
+#define WIFI_NAN_MAX_SET_VALUE_LEN      256
+#endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN */
 /** @endcond */
 
 /** @brief Wi-Fi management commands */
@@ -113,6 +123,8 @@ enum net_request_wifi_cmd {
 	NET_REQUEST_WIFI_CMD_CONFIG_PARAM,
 	/** DPP actions */
 	NET_REQUEST_WIFI_CMD_DPP,
+	/** NAN actions */
+	NET_REQUEST_WIFI_CMD_NAN,
 	/** BSS transition management query */
 	NET_REQUEST_WIFI_CMD_BTM_QUERY,
 	/** Flush PMKSA cache entries */
@@ -188,11 +200,13 @@ NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_AP_RTS_THRESHOLD);
 
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_IFACE_STATUS);
 
+/** Request a Wi-Fi 11k configuration */
 #define NET_REQUEST_WIFI_11K_CONFIG				\
 	(NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_11K_CONFIG)
 
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_11K_CONFIG);
 
+/** Request a Wi-Fi 11k neighbor request */
 #define NET_REQUEST_WIFI_11K_NEIGHBOR_REQUEST			\
 	(NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_11K_NEIGHBOR_REQUEST)
 
@@ -210,6 +224,7 @@ NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_PS);
 
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_TWT);
 
+/** Request a Wi-Fi broadcast TWT flow setup */
 #define NET_REQUEST_WIFI_BTWT			\
 	(NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_BTWT)
 
@@ -289,6 +304,14 @@ NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_CONFIG_PARAM);
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_DPP);
 #endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_DPP */
 
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN
+/** Request a Wi-Fi NAN operation */
+#define NET_REQUEST_WIFI_NAN			\
+	(NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_NAN)
+
+NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_NAN);
+#endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN */
+
 /** Request a Wi-Fi BTM query */
 #define NET_REQUEST_WIFI_BTM_QUERY (NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_BTM_QUERY)
 
@@ -312,6 +335,7 @@ NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_ENTERPRISE_CREDS);
 
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_RTS_THRESHOLD_CONFIG);
 
+/** Request a Wi-Fi WPS configuration */
 #define NET_REQUEST_WIFI_WPS_CONFIG (NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_WPS_CONFIG)
 
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_WPS_CONFIG);
@@ -321,26 +345,31 @@ NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_WPS_CONFIG);
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_CONNECT_STORED);
 #endif
 
+/** Request a Wi-Fi roaming start */
 #define NET_REQUEST_WIFI_START_ROAMING				\
 	(NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_START_ROAMING)
 
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_START_ROAMING);
 
+/** Notify that processing of a Wi-Fi neighbor report is complete */
 #define NET_REQUEST_WIFI_NEIGHBOR_REP_COMPLETE			\
 	(NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_NEIGHBOR_REP_COMPLETE)
 
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_NEIGHBOR_REP_COMPLETE);
 
+/** Request a Wi-Fi BSS maximum idle period configuration */
 #define NET_REQUEST_WIFI_BSS_MAX_IDLE_PERIOD				\
 	(NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_BSS_MAX_IDLE_PERIOD)
 
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_BSS_MAX_IDLE_PERIOD);
 
+/** Request a Wi-Fi background scan configuration */
 #define NET_REQUEST_WIFI_BGSCAN					\
 	(NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_BGSCAN)
 
 NET_MGMT_DEFINE_REQUEST_HANDLER(NET_REQUEST_WIFI_BGSCAN);
 
+/** Request a Wi-Fi Direct (P2P) operation */
 #define NET_REQUEST_WIFI_P2P_OPER						\
 	(NET_WIFI_BASE | NET_REQUEST_WIFI_CMD_P2P_OPER)
 
@@ -367,6 +396,12 @@ enum {
 	NET_EVENT_WIFI_CMD_AP_STA_DISCONNECTED_VAL,
 	NET_EVENT_WIFI_CMD_SUPPLICANT_VAL,
 	NET_EVENT_WIFI_CMD_P2P_DEVICE_FOUND_VAL,
+	NET_EVENT_WIFI_CMD_NAN_DISCOVERY_RESULT_VAL,
+	NET_EVENT_WIFI_CMD_NAN_REPLIED_VAL,
+	NET_EVENT_WIFI_CMD_NAN_PUBLISH_TERMINATED_VAL,
+	NET_EVENT_WIFI_CMD_NAN_SUBSCRIBE_TERMINATED_VAL,
+	NET_EVENT_WIFI_CMD_NAN_RECEIVE_VAL,
+
 	NET_EVENT_WIFI_CMD_MAX,
 };
 
@@ -415,6 +450,18 @@ enum net_event_wifi_cmd {
 	NET_MGMT_CMD(NET_EVENT_WIFI_CMD_SUPPLICANT),
 	/** P2P device found */
 	NET_MGMT_CMD(NET_EVENT_WIFI_CMD_P2P_DEVICE_FOUND),
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN
+	/** Supplicant specific event */
+	NET_MGMT_CMD(NET_EVENT_WIFI_CMD_NAN_DISCOVERY_RESULT),
+	/** Supplicant specific event */
+	NET_MGMT_CMD(NET_EVENT_WIFI_CMD_NAN_REPLIED),
+	/** Supplicant specific event */
+	NET_MGMT_CMD(NET_EVENT_WIFI_CMD_NAN_PUBLISH_TERMINATED),
+	/** Supplicant specific event */
+	NET_MGMT_CMD(NET_EVENT_WIFI_CMD_NAN_SUBSCRIBE_TERMINATED),
+	/** Supplicant specific event */
+	NET_MGMT_CMD(NET_EVENT_WIFI_CMD_NAN_RECEIVE),
+#endif
 };
 
 /** Event emitted for Wi-Fi scan result */
@@ -522,6 +569,28 @@ struct wifi_p2p_device_info {
 };
 #endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_P2P */
 
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN
+/** Event emitted when NAN discovery result (subscriber found publisher) */
+#define NET_EVENT_WIFI_NAN_DISCOVERY_RESULT			\
+	(NET_WIFI_EVENT | NET_EVENT_WIFI_CMD_NAN_DISCOVERY_RESULT)
+
+/** Event emitted when NAN publisher received subscribe request */
+#define NET_EVENT_WIFI_NAN_REPLIED				\
+	(NET_WIFI_EVENT | NET_EVENT_WIFI_CMD_NAN_REPLIED)
+
+/** Event emitted when NAN publish is terminated */
+#define NET_EVENT_WIFI_NAN_PUBLISH_TERMINATED			\
+	(NET_WIFI_EVENT | NET_EVENT_WIFI_CMD_NAN_PUBLISH_TERMINATED)
+
+/** Event emitted when NAN subscribe is terminated */
+#define NET_EVENT_WIFI_NAN_SUBSCRIBE_TERMINATED			\
+	(NET_WIFI_EVENT | NET_EVENT_WIFI_CMD_NAN_SUBSCRIBE_TERMINATED)
+
+/** Event emitted NAN follow-up message is received */
+#define NET_EVENT_WIFI_NAN_RECEIVE				\
+	(NET_WIFI_EVENT | NET_EVENT_WIFI_CMD_NAN_RECEIVE)
+#endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN */
+
 /** @brief Wi-Fi version */
 struct wifi_version {
 	/** Driver version */
@@ -628,6 +697,12 @@ struct wifi_connect_req_params {
 	const uint8_t *psk;
 	/** Pre-shared key length */
 	uint8_t psk_length; /* Min 8 - Max 64 */
+	/**
+	 * Pre-shared key is the pre-computed PBKDF2 output.
+	 * `psk_length` MUST be 32 bytes.
+	 * Only applicable for PSK based security types.
+	 */
+	bool psk_is_pbkdf2;
 	/** SAE password (same as PSK but with no length restrictions), optional */
 	const uint8_t *sae_password;
 	/** SAE password length */
@@ -700,6 +775,7 @@ struct wifi_connect_req_params {
 	 * EAP is a framework for network authentication, commonly used in enterprise Wi-Fi.
 	 * This field allows specifying the protocol version if required by the network.
 	 * Applies to Phase 1 (outer authentication).
+	 * A value of -1 will result in version negotiation.
 	 */
 	int eap_ver;
 
@@ -787,6 +863,20 @@ struct wifi_connect_req_params {
 	const uint8_t *server_cert_domain_suffix;
 	/** Length of the server_cert_domain_suffix string, maximum 64 bytes */
 	uint8_t server_cert_domain_suffix_len;
+	/** SSID protection in 4-way handshake (needs RSNXE support)
+	 * 0: Disable (default)
+	 * 1: Enable
+	 */
+	uint8_t ssid_protection;
+	/**
+	 * WPA3 Transition Disable bitmap (WPA3 Spec v3.0, Table 5).
+	 * Sent in EAPOL Message 3 as Transition Disable KDE.
+	 *   Bit 0: WPA3-Personal
+	 *   Bit 1: WPA3-Personal SAE-PK
+	 *   Bit 2: WPA3-Enterprise
+	 *   Bit 3: OWE
+	 */
+	uint8_t transition_disable;
 };
 
 /** @brief Wi-Fi disconnect reason codes. To be overlaid on top of \ref wifi_status
@@ -832,6 +922,7 @@ enum wifi_ap_status {
 
 /** @brief Generic Wi-Fi status for commands and events */
 struct wifi_status {
+	/** Command or event specific status */
 	union {
 		/** Status value */
 		int status;
@@ -842,6 +933,14 @@ struct wifi_status {
 		/** Access point status */
 		enum wifi_ap_status ap_status;
 	};
+	/** IEEE 802.11 status code from the last Authentication or (Re)Association
+	 * Response frame, 0 if not available. See IEEE Std 802.11-2020, Table 9-50.
+	 */
+	uint16_t status_code;
+	/** IEEE 802.11 reason code from the last Deauthentication or Disassociation
+	 * frame, 0 if not available. See IEEE Std 802.11-2020, Table 9-90.
+	 */
+	uint16_t reason_code;
 };
 
 /** @brief Wi-Fi interface status */
@@ -909,6 +1008,7 @@ struct wifi_ps_params {
 	enum wifi_ps_exit_strategy exit_strategy;
 };
 
+/** Maximum number of broadcast TWT agreement sets */
 #define WIFI_BTWT_AGREEMENT_MAX 5
 
 /** @brief Wi-Fi broadcast TWT parameters */
@@ -939,6 +1039,7 @@ struct wifi_twt_params {
 	uint8_t dialog_token;
 	/** Flow ID, used to map setup with teardown */
 	uint8_t flow_id;
+	/** Operation specific parameters */
 	union {
 		/** Setup specific parameters */
 		struct {
@@ -994,11 +1095,15 @@ struct wifi_twt_params {
 
 /* Flow ID is only 3 bits */
 #define WIFI_MAX_TWT_FLOWS 8
-#define WIFI_MAX_TWT_INTERVAL_US (LONG_MAX - 1)
+/* The TWT interval is encoded per IEEE 802.11 as mantissa * 2^exponent
+ * micro-seconds, with a 16-bit mantissa and a 5-bit exponent. The maximum
+ * representable interval is therefore UINT16_MAX * 2^WIFI_MAX_TWT_EXPONENT us.
+ */
+#define WIFI_MAX_TWT_EXPONENT 31
+#define WIFI_MAX_TWT_INTERVAL_US ((uint64_t)UINT16_MAX << WIFI_MAX_TWT_EXPONENT)
 /* 256 (u8) * 1TU */
 #define WIFI_MAX_TWT_WAKE_INTERVAL_US 262144
 #define WIFI_MAX_TWT_WAKE_AHEAD_DURATION_US (LONG_MAX - 1)
-#define WIFI_MAX_TWT_EXPONENT 31
 
 /** @endcond */
 
@@ -1026,7 +1131,12 @@ struct wifi_twt_flow_info {
 	uint32_t twt_wake_ahead_duration;
 };
 
-/** Wi-Fi enterprise mode credentials */
+/** Wi-Fi enterprise mode credentials
+ *
+ * The buffers are owned by the caller and are only guaranteed to be valid
+ * for the duration of the request. A driver that needs them later must keep
+ * its own copy.
+ */
 struct wifi_enterprise_creds_params {
 	/** CA certification */
 	uint8_t *ca_cert;
@@ -1060,9 +1170,9 @@ struct wifi_enterprise_creds_params {
 	uint8_t *server_key;
 	/** Server key length */
 	uint32_t server_key_len;
-	/** Diffie–Hellman parameter */
+	/** Diffie-Hellman parameter */
 	uint8_t *dh_param;
-	/** Diffie–Hellman parameter length */
+	/** Diffie-Hellman parameter length */
 	uint32_t dh_param_len;
 };
 
@@ -1161,6 +1271,66 @@ struct wifi_ap_sta_info {
 	bool twt_capable;
 };
 
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN
+/** @brief NAN discovery result event structure (subscriber found publisher) */
+struct wifi_nan_discovery_result_event {
+	/** Subscribe ID */
+	uint8_t subscribe_id;
+	/** Peer publish ID */
+	uint8_t publish_id;
+	/** Peer MAC address */
+	uint8_t peer_addr[WIFI_MAC_ADDR_LEN];
+	/** FSD (Further Service Discovery) */
+	bool fsd;
+	/** FSD GAS (Generic Advertisement Service) */
+	bool fsd_gas;
+	/** Service protocol type */
+	uint8_t srv_proto_type;
+	/** Service Specific Info length */
+	size_t ssi_len;
+	/** Service Specific Info data */
+	uint8_t ssi[WIFI_NAN_MAX_SSI_LEN];
+};
+
+/** @brief NAN replied event structure (publisher received subscribe request) */
+struct wifi_nan_replied_event {
+	/** Publish ID */
+	uint8_t publish_id;
+	/** Peer MAC address */
+	uint8_t peer_addr[WIFI_MAC_ADDR_LEN];
+	/** Peer subscribe ID */
+	uint8_t subscribe_id;
+	/** Service protocol type */
+	uint8_t srv_proto_type;
+	/** Service Specific Info length */
+	size_t ssi_len;
+	/** Service Specific Info data */
+	uint8_t ssi[WIFI_NAN_MAX_SSI_LEN];
+};
+
+/** @brief NAN publish/subscribe terminated event structure */
+struct wifi_nan_terminated_event {
+	/** Publish/Subscribe ID */
+	uint8_t id;
+	/** Reason string */
+	char reason[32];
+};
+
+/** @brief NAN receive event - follow-up message details */
+struct wifi_nan_receive_event {
+	/** Publish/Subscribe ID */
+	uint8_t id;
+	/** Peer instance ID */
+	uint8_t peer_instance_id;
+	/** Peer MAC address */
+	uint8_t peer_addr[WIFI_MAC_ADDR_LEN];
+	/** Service Specific Info data */
+	uint8_t ssi[WIFI_NAN_MAX_SSI_LEN];
+	/** Service Specific Info length */
+	size_t ssi_len;
+};
+#endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN */
+
 /** @cond INTERNAL_HIDDEN */
 
 /* for use in max info size calculations */
@@ -1176,6 +1346,13 @@ union wifi_mgmt_events {
 #ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_P2P
 	struct wifi_p2p_device_info p2p_device_info;
 #endif
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN
+	struct wifi_nan_discovery_result_event nan_discovery_result;
+	struct wifi_nan_replied_event nan_replied;
+	struct wifi_nan_terminated_event nan_publish_terminated;
+	struct wifi_nan_terminated_event nan_subscribe_terminated;
+	struct wifi_nan_receive_event nan_receive;
+#endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN */
 };
 
 /** @endcond */
@@ -1444,6 +1621,134 @@ struct wifi_dpp_params {
 };
 #endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_DPP */
 
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN
+/** NAN operation */
+enum wifi_nan_operation {
+	WIFI_NAN_OP_START,
+	WIFI_NAN_OP_STOP,
+	WIFI_NAN_OP_SET,
+	WIFI_NAN_OP_UPDATE_CONF,
+	WIFI_NAN_OP_STATUS,
+	WIFI_NAN_OP_PUBLISH,
+	WIFI_NAN_OP_CANCEL_PUBLISH,
+	WIFI_NAN_OP_UPDATE_PUBLISH,
+	WIFI_NAN_OP_SUBSCRIBE,
+	WIFI_NAN_OP_CANCEL_SUBSCRIBE,
+	WIFI_NAN_OP_TRANSMIT,
+};
+
+/** NAN service protocol types */
+enum wifi_nan_service_protocol_type {
+	/** Bonjour */
+	WIFI_NAN_SRV_PROTO_BONJOUR = 1,
+	/** Generic */
+	WIFI_NAN_SRV_PROTO_GENERIC = 2,
+	/** CSA Matter */
+	WIFI_NAN_SRV_PROTO_CSA_MATTER = 3,
+};
+
+/** This structure is used to configure wlan nan publish parameters */
+struct wifi_nan_publish_params {
+	/* Service name for NAN */
+	char service_name[WIFI_NAN_MAX_SERVICE_NAME_LEN];
+	/* NAN service protocol type */
+	enum wifi_nan_service_protocol_type srv_proto_type;
+	/* Time to live (in seconds); 0 = one TX only */
+	uint32_t ttl;
+	/* Default frequency in MHz (defaultPublishChannel) */
+	uint32_t freq;
+	/* Multi-channel frequencies */
+	char freq_list[64];
+	/* Service specific information (binary data) */
+	uint8_t ssi[WIFI_NAN_MAX_SSI_LEN];
+	/* Actual length of SSI data */
+	uint16_t ssi_len;
+	/* Unsolicited transmission (true by default) */
+	bool unsolicited;
+	/* Solicited transmission (true by default) */
+	bool solicited;
+	/* Further Service Discovery (true by default) */
+	bool fsd;
+};
+
+/* This structure is used to configure nan update publish parameters */
+struct wifi_nan_update_publish_params {
+	uint8_t publish_id;
+	/* Service specific information (binary data) */
+	uint8_t ssi[WIFI_NAN_MAX_SSI_LEN];
+	/* Actual length of SSI data */
+	uint16_t ssi_len;
+};
+
+/** This structure is used to configure wlan nan subscribe parameters */
+struct wifi_nan_subscribe_params {
+	/* Service name for NAN */
+	char service_name[WIFI_NAN_MAX_SERVICE_NAME_LEN];
+	/* NAN service protocol type */
+	enum wifi_nan_service_protocol_type srv_proto_type;
+	/* Subscribe type */
+	bool active;
+	/* Time to live (in seconds); 0 = until first result */
+	unsigned int ttl;
+	/* Selected frequency in MHz */
+	unsigned int freq;
+	/* Service specific information (binary data) */
+	uint8_t ssi[WIFI_NAN_MAX_SSI_LEN];
+	/* Actual length of SSI data */
+	uint16_t ssi_len;
+};
+
+/** This structure is used to configure nan transmit parameters */
+struct wifi_nan_transmit_params {
+	/* publish_id or subscribe_id */
+	uint8_t handle;
+	/* peer publish_id or subscribe_id */
+	uint8_t req_instance_id;
+	/* peer MAC address */
+	uint8_t peer_addr[WIFI_MAC_ADDR_LEN];
+	/* Service specific information (binary data) */
+	uint8_t ssi[WIFI_NAN_MAX_SSI_LEN];
+	/* Actual length of SSI data */
+	uint16_t ssi_len;
+};
+
+/** This structure is used to configure a NAN_SET parameter. */
+struct wifi_nan_set_params {
+	/** NAN configuration parameter name. */
+	char param[WIFI_NAN_MAX_SET_PARAM_LEN];
+	/** NAN configuration parameter value. */
+	char value[WIFI_NAN_MAX_SET_VALUE_LEN];
+};
+
+/** @brief Wi-Fi NAN parameters */
+struct wifi_nan_params {
+	/** NAN operation */
+	enum wifi_nan_operation op;
+
+	/** Operation-specific parameters */
+	union {
+		/** Publish parameters */
+		struct wifi_nan_publish_params publish;
+		/** Update publish parameters */
+		struct wifi_nan_update_publish_params update_publish;
+		/** Subscribe parameters */
+		struct wifi_nan_subscribe_params subscribe;
+		/** Transmit parameters */
+		struct wifi_nan_transmit_params transmit;
+		/** NAN_SET parameter and value */
+		struct wifi_nan_set_params set;
+		/** For cancel operations */
+		uint8_t cancel_id;
+	};
+
+	/* Operation response */
+	char resp[WIFI_NAN_RESP_SIZE];
+};
+
+#endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN */
+
+
+/** Maximum length of a WPS PIN */
 #define WIFI_WPS_PIN_MAX_LEN 8
 
 /** Operation for WPS */
@@ -1485,6 +1790,14 @@ enum wifi_p2p_op {
 	WIFI_P2P_INVITE,
 	/** P2P power save */
 	WIFI_P2P_POWER_SAVE,
+	/** P2P list stored persistent networks */
+	WIFI_P2P_LIST_NETWORKS,
+	/** P2P remove persistent network(s) */
+	WIFI_P2P_PERSISTENT_REMOVE,
+	/** P2P set device name */
+	WIFI_P2P_SET_DEV_NAME,
+	/** P2P status */
+	WIFI_P2P_STATUS,
 };
 
 /** Wi-Fi P2P discovery type */
@@ -1509,11 +1822,15 @@ enum wifi_p2p_connection_method {
 
 /** Maximum number of P2P peers that can be returned in a single query */
 #define WIFI_P2P_MAX_PEERS CONFIG_WIFI_P2P_MAX_PEERS
+#define WIFI_P2P_LIST_NETWORKS_BUF_SIZE 2048
+#define WIFI_P2P_STATUS_BUF_SIZE 512
 
 /** Wi-Fi P2P parameters */
 struct wifi_p2p_params {
 	/** P2P operation */
 	enum wifi_p2p_op oper;
+	/** P2P device name */
+	char device_name[WIFI_P2P_DEVICE_NAME_MAX_LEN + 1];
 	/** Discovery type (for find operation) */
 	enum wifi_p2p_discovery_type discovery_type;
 	/** Timeout in seconds (0 = no timeout, run until stopped) */
@@ -1543,6 +1860,8 @@ struct wifi_p2p_params {
 		unsigned int freq;
 		/** Join an existing group (as a client) instead of starting GO negotiation */
 		bool join;
+		/** Add persistent group */
+		bool persistent_set;
 	} connect;
 	/** Group add specific parameters */
 	struct {
@@ -1550,6 +1869,8 @@ struct wifi_p2p_params {
 		int freq;
 		/** Persistent group ID (-1 = not persistent) */
 		int persistent;
+		/** Add persistent group */
+		bool persistent_set;
 		/** Enable HT40 */
 		bool ht40;
 		/** Enable VHT */
@@ -1588,19 +1909,49 @@ struct wifi_p2p_params {
 		/** GO device address length */
 		uint8_t go_dev_addr_length;
 	} invite;
+	/** List networks specific parameters */
+	struct {
+		/** Buffer to hold the LIST_NETWORKS response. */
+		char *buf;
+		/** Size of the allocated buffer in bytes */
+		size_t buf_size;
+	} list_networks;
+	/** Persistent network remove specific parameters */
+	struct {
+		/** Network ID to remove.
+		 *  >= 0 : remove the specific network with this ID.
+		 *  -1   : remove ALL saved networks.
+		 */
+		int id;
+	} persistent_remove;
+	/** Status specific parameters */
+	struct {
+		/** Buffer to hold the STATUS response. */
+		char *buf;
+		/** Size of the allocated buffer in bytes */
+		size_t buf_size;
+	} status;
 };
 #endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_P2P */
 
 /** Wi-Fi AP status
  */
 enum wifi_sap_iface_state {
+	/** Interface is uninitialized */
 	WIFI_SAP_IFACE_UNINITIALIZED,
+	/** Interface is disabled */
 	WIFI_SAP_IFACE_DISABLED,
+	/** Country code update in progress */
 	WIFI_SAP_IFACE_COUNTRY_UPDATE,
+	/** Automatic channel selection in progress */
 	WIFI_SAP_IFACE_ACS,
+	/** HT scan in progress */
 	WIFI_SAP_IFACE_HT_SCAN,
+	/** Dynamic frequency selection in progress */
 	WIFI_SAP_IFACE_DFS,
+	/** Selected channel does not allow initiating radiation */
 	WIFI_SAP_IFACE_NO_IR,
+	/** Interface is enabled */
 	WIFI_SAP_IFACE_ENABLED
 };
 
@@ -1630,12 +1981,17 @@ struct wifi_bgscan_params {
 };
 #endif
 
-/* Extended Capabilities */
+/** IEEE 802.11 Extended Capabilities bit positions */
 enum wifi_ext_capab {
+	/** 20/40 BSS coexistence management support */
 	WIFI_EXT_CAPAB_20_40_COEX = 0,
+	/** General link (GLK) support */
 	WIFI_EXT_CAPAB_GLK = 1,
+	/** Extended channel switching support */
 	WIFI_EXT_CAPAB_EXT_CHAN_SWITCH = 2,
+	/** TIM broadcast support */
 	WIFI_EXT_CAPAB_TIM_BROADCAST = 18,
+	/** BSS transition management support */
 	WIFI_EXT_CAPAB_BSS_TRANSITION = 19,
 };
 
@@ -1680,6 +2036,10 @@ struct wifi_mgmt_ops {
 		    struct wifi_scan_params *params,
 		    scan_result_cb_t cb);
 	/** Connect to a Wi-Fi network
+	 *
+	 * The buffers referenced by @p params are only valid for the duration of
+	 * the call. A driver that needs them after returning must keep its own
+	 * copy.
 	 *
 	 * @param dev Pointer to the device structure for the driver instance.
 	 * @param iface Network interface to use for the connection
@@ -1840,7 +2200,7 @@ struct wifi_mgmt_ops {
 	 *
 	 * @param dev Pointer to the device structure for the driver instance.
 	 * @param iface Network interface to use for the filter operation
-	 * @param packet filter settings
+	 * @param filter Filter settings
 	 *
 	 * @return 0 if ok, < 0 if error
 	 */
@@ -1923,6 +2283,11 @@ struct wifi_mgmt_ops {
 			   struct wifi_version *params);
 	/** Get Wi-Fi connection parameters recently used
 	 *
+	 * Only the SSID is returned among the buffer members, and it is valid
+	 * until the next connect request. The pointers to secrets and to other
+	 * caller-owned buffers are set to NULL, since those buffers are not
+	 * valid once the connect request has returned.
+	 *
 	 * @param dev Pointer to the device structure for the driver instance
 	 * @param iface Network interface to use for the get connection parameters operation
 	 * @param params the Wi-Fi connection parameters recently used
@@ -1936,7 +2301,7 @@ struct wifi_mgmt_ops {
 	 *
 	 * @param dev Pointer to the device structure for the driver instance.
 	 * @param iface Network interface to use for the RTS threshold operation
-	 * @param RTS threshold value
+	 * @param rts_threshold RTS threshold value
 	 *
 	 * @return 0 if ok, < 0 if error
 	 */
@@ -1978,6 +2343,20 @@ struct wifi_mgmt_ops {
 			    struct net_if *iface,
 			    struct wifi_dpp_params *params);
 #endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_DPP */
+#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN
+	/** Dispatch NAN operations by action enum, with or without arguments in string format
+	 *
+	 * @param dev Pointer to the device structure for the driver instance
+	 * @param iface Network interface to use for the NAN operation
+	 * @param params NAN action enum and parameters in string
+	 *
+	 * @return 0 if ok, < 0 if error
+	 */
+	int (*nan_cfg)(const struct device *dev,
+		       struct net_if *iface,
+		       struct wifi_nan_params *params);
+#endif /* CONFIG_WIFI_NM_WPA_SUPPLICANT_NAN */
+
 	/** Flush PMKSA cache entries
 	 *
 	 * @param dev Pointer to the device structure for the driver instance.
@@ -1988,13 +2367,19 @@ struct wifi_mgmt_ops {
 	int (*pmksa_flush)(const struct device *dev, struct net_if *iface);
 	/** Set Wi-Fi enterprise mode CA/client Cert and key
 	 *
+	 * The buffers referenced by @p creds are only valid for the duration of
+	 * the call. The driver must keep its own copy of the credentials it needs
+	 * for later connections, and must not release a copy that is still in
+	 * use by an active connection. A request with all buffers NULL releases
+	 * the stored copies.
+	 *
 	 * @param dev Pointer to the device structure for the driver instance.
 	 * @param iface Network interface to use for the enterprise credentials operation
 	 * @param creds Pointer to the CA/client Cert and key.
 	 *
 	 * @return 0 if ok, < 0 if error
 	 */
-#ifdef CONFIG_WIFI_NM_WPA_SUPPLICANT_CRYPTO_ENTERPRISE
+#ifdef CONFIG_WIFI_CERTIFICATE_LIB
 	int (*enterprise_creds)(const struct device *dev,
 				struct net_if *iface,
 				struct wifi_enterprise_creds_params *creds);
@@ -2037,9 +2422,11 @@ struct wifi_mgmt_ops {
 	 * @param dev Pointer to the device structure for the driver instance
 	 * @param iface Network interface to use for the roaming operation
 	 *
+	 * @deprecated Controlled by connection request params
+	 *
 	 * @return 0 if ok, < 0 if error
 	 */
-	int (*start_11r_roaming)(const struct device *dev, struct net_if *iface);
+	__deprecated int (*start_11r_roaming)(const struct device *dev, struct net_if *iface);
 	/** Set BSS max idle period
 	 *
 	 * @param dev Pointer to the device structure for the driver instance.
@@ -2078,6 +2465,18 @@ struct wifi_mgmt_ops {
 			struct net_if *iface,
 			struct wifi_p2p_params *params);
 #endif
+	/** Get interface supported roles (static driver capability).
+	 * Read once by the supplicant at interface-add time, and treated
+	 * as a static per-interface property. A driver cannot use it to
+	 * signal a role change at runtime.
+	 *
+	 * @param dev  Pointer to the device structure for the driver instance.
+	 * @param iface Network interface to query.
+	 *
+	 * @return BIT(enum wifi_nm_iface_type) of supported roles.
+	 * Return 0 to let the caller use the default.
+	 */
+	 uint32_t (*get_iface_caps)(const struct device *dev, struct net_if *iface);
 };
 
 /** Wi-Fi management offload API */
@@ -2122,12 +2521,34 @@ BUILD_ASSERT(offsetof(struct net_wifi_mgmt_offload, wifi_iface) == 0);
  */
 void wifi_mgmt_raise_connect_result_event(struct net_if *iface, int status);
 
+/** Wi-Fi management connect result event with the IEEE 802.11 codes
+ *
+ * Use this instead of wifi_mgmt_raise_connect_result_event() when the raw
+ * IEEE 802.11 status or reason code behind the failure is known.
+ *
+ * @param iface Network interface
+ * @param status Connect result status and codes
+ */
+void wifi_mgmt_raise_connect_result_status_event(struct net_if *iface,
+						 const struct wifi_status *status);
+
 /** Wi-Fi management disconnect result event
  *
  * @param iface Network interface
  * @param status Disconnect result status
  */
 void wifi_mgmt_raise_disconnect_result_event(struct net_if *iface, int status);
+
+/** Wi-Fi management disconnect result event with the IEEE 802.11 codes
+ *
+ * Use this instead of wifi_mgmt_raise_disconnect_result_event() when the raw
+ * IEEE 802.11 reason code behind the disconnection is known.
+ *
+ * @param iface Network interface
+ * @param status Disconnect result status and codes
+ */
+void wifi_mgmt_raise_disconnect_result_status_event(struct net_if *iface,
+						    const struct wifi_status *status);
 
 /** Wi-Fi management interface status event
  *
@@ -2214,7 +2635,7 @@ void wifi_mgmt_raise_ap_sta_disconnected_event(struct net_if *iface,
  * @brief Raise P2P device found event
  *
  * @param iface Network interface
- * @param device_info P2P device information
+ * @param peer_info P2P device information
  */
 void wifi_mgmt_raise_p2p_device_found_event(struct net_if *iface,
 		struct wifi_p2p_device_info *peer_info);

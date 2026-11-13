@@ -10,8 +10,8 @@
  * @brief Header file for the SCMI Clock Protocol.
  */
 
-#ifndef _INCLUDE_ZEPHYR_DRIVERS_FIRMWARE_SCMI_CLK_H_
-#define _INCLUDE_ZEPHYR_DRIVERS_FIRMWARE_SCMI_CLK_H_
+#ifndef ZEPHYR_INCLUDE_DRIVERS_FIRMWARE_SCMI_CLK_H_
+#define ZEPHYR_INCLUDE_DRIVERS_FIRMWARE_SCMI_CLK_H_
 
 #include <zephyr/drivers/firmware/scmi/protocol.h>
 
@@ -44,6 +44,23 @@
 #define SCMI_CLK_PROTOCOL_SUPPORTED_VERSION	0x30000
 
 /** Clock name length (short version) */
+/**
+ * @brief Extract major version from SCMI protocol version
+ *
+ * @param v Combined 32-bit protocol version <tt>(major << 16 | minor)</tt>
+ * @return Major version number
+ */
+#define SCMI_PROTO_VER_MAJOR(v) ((v) >> 16)
+
+/**
+ * @brief Extract minor version from SCMI protocol version
+ *
+ * @param v Combined 32-bit protocol version <tt>(major << 16 | minor)</tt>
+ * @return Minor version number
+ */
+#define SCMI_PROTO_VER_MINOR(v) ((v) & 0xFFFF)
+
+/** clock name length (short version) */
 #define SCMI_CLK_NAME_LEN 16
 
 /** Get the clock's enabled status based on given attributes */
@@ -91,15 +108,13 @@ struct scmi_clock_rate_config {
  * @brief Describes the content of the CLOCK_ATTRIBUTES command reply
  */
 struct scmi_clock_attributes {
-	/** Reply status */
-	int32_t status;
-	/** Clock attributes */
+	/** clock attributes */
 	uint32_t attributes;
 	/** Clock name */
 	uint8_t clock_name[SCMI_CLK_NAME_LEN];
 	/** Clock enable delay incurred by platform */
 	uint32_t clock_enable_delay;
-} __packed;
+};
 
 /**
  * @brief Send the CLOCK_CONFIG_SET command and get its reply
@@ -112,6 +127,24 @@ struct scmi_clock_attributes {
  */
 int scmi_clock_config_set(struct scmi_protocol *proto,
 			  struct scmi_clock_config *cfg);
+
+/**
+ * @brief Send the CLOCK_CONFIG_GET command and get its reply
+ *
+ * Queries the current configuration of a clock, notably whether it is
+ * enabled. This is a read-only query serviced by the SCMI platform.
+ *
+ * @param proto pointer to SCMI clock protocol data
+ * @param clk_id ID of the clock for which the query is done
+ * @param flags command flags (0 for the base query; extended-config bits are
+ * not decoded here)
+ * @param config pointer set to the returned config word on success. Use
+ * SCMI_CLK_CONFIG_ENABLE_DISABLE() to test the enable state.
+ *
+ * @return 0 on success, negative errno value on failure.
+ */
+int scmi_clock_config_get(struct scmi_protocol *proto, uint32_t clk_id,
+			  uint32_t flags, uint32_t *config);
 /**
  * @brief Query the rate of a clock
  *
@@ -185,4 +218,4 @@ int scmi_clock_get_permissions(struct scmi_protocol *proto, uint32_t clk_id,
  * @}
  */
 
-#endif /* _INCLUDE_ZEPHYR_DRIVERS_FIRMWARE_SCMI_CLK_H_ */
+#endif /* ZEPHYR_INCLUDE_DRIVERS_FIRMWARE_SCMI_CLK_H_ */

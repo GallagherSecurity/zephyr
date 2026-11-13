@@ -225,11 +225,7 @@ static void phy_link_state_changed(const struct device *phy_dev __unused,
 {
 	struct net_if *iface = (struct net_if *)user_data;
 
-	if (state->is_up) {
-		net_eth_carrier_on(iface);
-	} else {
-		net_eth_carrier_off(iface);
-	}
+	net_eth_carrier_set(iface, state->is_up);
 }
 
 static void eth_iface_init(struct net_if *iface)
@@ -245,8 +241,6 @@ static void eth_iface_init(struct net_if *iface)
 
 	/* set MAC address */
 	(void)net_if_set_link_addr(iface, mac_addr, sizeof(mac_addr), NET_LINK_ETHERNET);
-
-	net_lldp_set_lldpdu(iface);
 
 	if (config->phy_dev == NULL) {
 		LOG_WRN("No PHY device");

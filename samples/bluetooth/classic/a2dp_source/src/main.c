@@ -783,13 +783,14 @@ static void bt_ready(int err)
 
 	bt_a2dp_register_ep(&sbc_source_ep, BT_AVDTP_AUDIO, BT_AVDTP_SOURCE);
 
-	bt_a2dp_register_cb(&a2dp_cb);
+	err = bt_a2dp_register_cb(&a2dp_cb);
+	__ASSERT(err == 0, "Failed to register A2DP callbacks");
 
 	k_work_queue_init(&audio_play_work_q);
 	k_work_queue_start(&audio_play_work_q, audio_play_work_q_thread_stack,
 			   CONFIG_BT_A2DP_SOURCE_DATA_SEND_WORKQ_STACK_SIZE,
 			   K_PRIO_COOP(CONFIG_BT_A2DP_SOURCE_DATA_SEND_WORKQ_PRIORITY), NULL);
-	k_thread_name_set(&audio_play_work_q.thread, "audio play");
+	k_thread_name_set(audio_play_work_q.thread_id, "audio play");
 
 	k_work_init(&discover_work, discover_work_handler);
 

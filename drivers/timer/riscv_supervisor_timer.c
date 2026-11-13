@@ -6,153 +6,90 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <limits.h>
-
 #include <zephyr/init.h>
 #include <zephyr/drivers/timer/system_timer.h>
-#include <zephyr/sys_clock.h>
+#include <zephyr/sys/clock.h>
 #include <zephyr/spinlock.h>
 #include <zephyr/irq.h>
 #include <zephyr/arch/riscv/csr.h>
 #include <zephyr/arch/riscv/sbi.h>
 
-#define CYC_PER_TICK (uint32_t)(sys_clock_hw_cycles_per_sec() / CONFIG_SYS_CLOCK_TICKS_PER_SEC)
-
-/* the unsigned long cast limits divisions to native CPU register width */
-#define cycle_diff_t   unsigned long
-#define CYCLE_DIFF_MAX (~(cycle_diff_t)0)
-
-/*
- * We have two constraints on the maximum number of cycles we can wait for.
- *
- * 1) sys_clock_announce() accepts at most INT32_MAX ticks.
- *
- * 2) The number of cycles between two reports must fit in a cycle_diff_t
- *    variable before converting it to ticks.
- *
- * Then:
- *
- * 3) Pick the smallest between (1) and (2).
- *
- * 4) Take into account some room for the unavoidable IRQ servicing latency.
- *    Let's use 3/4 of the max range.
- *
- * Finally let's add the LSB value to the result so to clear out a bunch of
- * consecutive set bits coming from the original max values to produce a
- * nicer literal for assembly generation.
- */
-#define CYCLES_MAX_1 ((uint64_t)INT32_MAX * (uint64_t)CYC_PER_TICK)
-#define CYCLES_MAX_2 ((uint64_t)CYCLE_DIFF_MAX)
-#define CYCLES_MAX_3 MIN(CYCLES_MAX_1, CYCLES_MAX_2)
-#define CYCLES_MAX_4 (CYCLES_MAX_3 / 2 + CYCLES_MAX_3 / 4)
-#define CYCLES_MAX   (CYCLES_MAX_4 + LSB_GET(CYCLES_MAX_4))
-
 #if defined(CONFIG_TEST)
 const int32_t z_sys_timer_irq_for_test = IRQ_S_TIMER;
 #endif
 
-static struct k_spinlock lock;
-static uint64_t last_count;
-static uint64_t last_ticks;
-static uint32_t last_elapsed;
-
 static void sbi_set_timer(uint64_t deadline)
 {
 	register unsigned long a0 __asm__("a0") = (unsigned long)deadline;
+#ifndef CONFIG_64BIT
+	register unsigned long a1 __asm__("a1") = (unsigned long)(deadline >> 32);
+#endif
 	register unsigned long a6 __asm__("a6") = SBI_FUNC_SET_TIMER;
 	register unsigned long a7 __asm__("a7") = SBI_EXT_TIME;
 
-	__asm__ volatile("ecall"
-					: "+r"(a0)
-					: "r"(a6), "r"(a7)
-					: "a1", "memory");
+#ifdef CONFIG_64BIT
+	__asm__ volatile("ecall" : "+r"(a0) : "r"(a6), "r"(a7) : "a1", "memory");
+#else
+	__asm__ volatile("ecall" : "+r"(a0), "+r"(a1) : "r"(a6), "r"(a7) : "memory");
+#endif
 }
 
 static uint64_t stime(void)
 {
+#ifdef CONFIG_64BIT
 	return csr_read(time);
+#else
+	/* guard against lower half rollover */
+	uint32_t hi, lo;
+
+	do {
+		hi = csr_read(timeh);
+		lo = csr_read(time);
+	} while (csr_read(timeh) != hi);
+	return ((uint64_t)hi << 32) | lo;
+#endif
 }
+
+/*
+ * Free-running "time" counter plus an absolute SBI set-timer deadline: a
+ * COMPARE_ORDERED backend. The counter is 64 bits wide whatever the register
+ * width of the build. The generic core owns the tick accounting and the clock
+ * lock; the driver only reads the counter and programs the deadline.
+ */
+#define TIMER_CORE_BACKEND_COMPARE_ORDERED
+#define TIMER_CORE_COUNTER_WIDTH 64
+
+static inline uint64_t timer_driver_cycle_get(void)
+{
+	return stime();
+}
+
+static inline void timer_driver_set_compare(uint64_t cycles)
+{
+	sbi_set_timer(cycles);
+}
+
+#include "system_timer_generic.h"
 
 static void timer_isr(const void *arg)
 {
 	ARG_UNUSED(arg);
 
-	k_spinlock_key_t key = k_spin_lock(&lock);
+	/* Disarm the IRQ. STIP is level sensitive and only the SBI timer call
+	 * clears it, so ask for an infinite expiry, which the SBI spec defines
+	 * as clearing the pending interrupt without scheduling another. This
+	 * interrupt then fires once for the deadline it was armed with,
+	 * whether or not another one is programmed afterwards.
+	 */
+	sbi_set_timer(UINT64_MAX);
 
-	uint64_t now = stime();
-	uint64_t dcycles = now - last_count;
-	uint32_t dticks = (cycle_diff_t)dcycles / CYC_PER_TICK;
-
-	last_count += (cycle_diff_t)dticks * CYC_PER_TICK;
-	last_ticks += dticks;
-	last_elapsed = 0;
-
-	if (!IS_ENABLED(CONFIG_TICKLESS_KERNEL)) {
-		uint64_t next = last_count + CYC_PER_TICK;
-
-		sbi_set_timer(next);
-	}
-
-	k_spin_unlock(&lock, key);
-	sys_clock_announce(dticks);
-}
-
-void sys_clock_set_timeout(int32_t ticks, bool idle)
-{
-	ARG_UNUSED(idle);
-
-	if (!IS_ENABLED(CONFIG_TICKLESS_KERNEL)) {
-		return;
-	}
-
-	k_spinlock_key_t key = k_spin_lock(&lock);
-	uint64_t cyc;
-
-	if (ticks == K_TICKS_FOREVER) {
-		cyc = last_count + CYCLES_MAX;
-	} else {
-		cyc = (last_ticks + last_elapsed + ticks) * CYC_PER_TICK;
-		if ((cyc - last_count) > CYCLES_MAX) {
-			cyc = last_count + CYCLES_MAX;
-		}
-	}
-	sbi_set_timer(cyc);
-
-	k_spin_unlock(&lock, key);
-}
-
-uint32_t sys_clock_elapsed(void)
-{
-	if (!IS_ENABLED(CONFIG_TICKLESS_KERNEL)) {
-		return 0;
-	}
-
-	k_spinlock_key_t key = k_spin_lock(&lock);
-	uint64_t now = stime();
-	uint64_t dcycles = now - last_count;
-	uint32_t dticks = (cycle_diff_t)dcycles / CYC_PER_TICK;
-
-	last_elapsed = dticks;
-	k_spin_unlock(&lock, key);
-	return dticks;
-}
-
-uint32_t sys_clock_cycle_get_32(void)
-{
-	return (uint32_t)stime();
-}
-
-uint64_t sys_clock_cycle_get_64(void)
-{
-	return stime();
+	timer_core_announce();
 }
 
 static int sys_clock_driver_init(void)
 {
 	IRQ_CONNECT(IRQ_S_TIMER, 0, timer_isr, NULL, 0);
-	last_ticks = stime() / CYC_PER_TICK;
-	last_count = last_ticks * CYC_PER_TICK;
-	sbi_set_timer(last_count + CYC_PER_TICK);
+	timer_core_init();
 	irq_enable(IRQ_S_TIMER);
 	return 0;
 }
@@ -160,7 +97,7 @@ static int sys_clock_driver_init(void)
 #ifdef CONFIG_SMP
 void smp_timer_init(void)
 {
-	sbi_set_timer(last_count + CYC_PER_TICK);
+	timer_core_smp_prime();
 	irq_enable(IRQ_S_TIMER);
 }
 #endif

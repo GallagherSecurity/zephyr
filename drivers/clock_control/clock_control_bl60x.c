@@ -9,11 +9,13 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/otp.h>
+#include <zephyr/sys/minmax.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/dt-bindings/clock/bflb_bl60x_clock.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(clock_control_bl60x, CONFIG_CLOCK_CONTROL_LOG_LEVEL);
 
+#include <soc.h>
 #include <bouffalolab/bl60x/bflb_soc.h>
 #include <bouffalolab/bl60x/aon_reg.h>
 #include <bouffalolab/bl60x/glb_reg.h>
@@ -21,7 +23,6 @@ LOG_MODULE_REGISTER(clock_control_bl60x, CONFIG_CLOCK_CONTROL_LOG_LEVEL);
 #include <bouffalolab/bl60x/pds_reg.h>
 #include <bouffalolab/bl60x/l1c_reg.h>
 #include <bouffalolab/bl60x/extra_defines.h>
-#include <bouffalolab/bl60x/sf_ctrl_reg.h>
 #include <zephyr/drivers/clock_control/clock_control_bflb_common.h>
 
 #define CLK_SRC_IS(clk, src)                                                                       \
@@ -46,6 +47,8 @@ LOG_MODULE_REGISTER(clock_control_bl60x, CONFIG_CLOCK_CONTROL_LOG_LEVEL);
 #define CRYSTAL_ID_FREQ_40000000	3
 #define CRYSTAL_ID_FREQ_26000000	4
 #define CRYSTAL_VALUES_CNT		5
+
+#define BL60X_TARGET_BASIC_CLOCK	MHZ(40)
 
 #define CRYSTAL_FREQ_TO_ID(freq) CONCAT(CRYSTAL_ID_FREQ_, freq)
 
@@ -193,7 +196,8 @@ static int clock_control_bl60x_init_crystal(void)
 }
 
 /* HCLK is the core clock */
-static void clock_control_bl60x_set_root_clock_dividers(uint32_t hclk_div, uint32_t bclk_div)
+static __bflb_critfunc void clock_control_bl60x_set_root_clock_dividers(uint32_t hclk_div,
+									uint32_t bclk_div)
 {
 	uint32_t tmp;
 	uint32_t old_rootclk;
@@ -312,14 +316,6 @@ static void clock_control_bl60x_init_pll(const enum bl60x_clkid source, const in
 					 const uint32_t sdmin)
 {
 	uint32_t tmp;
-	uint32_t old_rootclk;
-
-	old_rootclk = clock_bflb_get_root_clock();
-
-	/* security RC32M */
-	if (old_rootclk > 1) {
-		clock_bflb_set_root_clock(BFLB_MAIN_CLOCK_RC32M);
-	}
 
 	clock_control_bl60x_deinit_pll();
 
@@ -418,7 +414,6 @@ static void clock_control_bl60x_init_pll(const enum bl60x_clkid source, const in
 	tmp = (tmp & PDS_CLKPLL_SDM_RESET_UMSK) | (0U << PDS_CLKPLL_SDM_RESET_POS);
 	sys_write32(tmp, PDS_BASE + PDS_PU_RST_CLKPLL_OFFSET);
 
-	clock_bflb_set_root_clock(old_rootclk);
 	clock_bflb_settle();
 }
 
@@ -473,7 +468,7 @@ static int clock_control_bl60x_clock_trim_32M(void)
 }
 
 /* source for most clocks, either XTAL or RC32M */
-static uint32_t clock_control_bl60x_get_xclk(const struct device *dev)
+static __ramfunc uint32_t clock_control_bl60x_get_xclk(const struct device *dev)
 {
 	uint32_t tmp;
 
@@ -490,7 +485,7 @@ static uint32_t clock_control_bl60x_get_xclk(const struct device *dev)
 	}
 }
 
-static uint32_t clock_control_bl60x_get_clk(const struct device *dev)
+static __ramfunc uint32_t clock_control_bl60x_get_clk(const struct device *dev)
 {
 	struct clock_control_bl60x_data *data = dev->data;
 	uint32_t tmp;
@@ -528,7 +523,7 @@ static uint32_t clock_control_bl60x_get_clk(const struct device *dev)
 }
 
 /* most peripherals clock */
-static uint32_t clock_control_bl60x_get_bclk(const struct device *dev)
+static __ramfunc uint32_t clock_control_bl60x_get_bclk(const struct device *dev)
 {
 	uint32_t tmp;
 	uint32_t clock_id;
@@ -579,11 +574,12 @@ static void clock_control_bl60x_setup_pll(const struct device *dev)
 
 	if (data->pll.source == BL60X_CLKID_CLK_CRYSTAL) {
 		clock_control_bl60x_init_pll(data->pll.source, config->crystal_id,
-			BFLB_MUL_CLK(clock_control_bl60x_crystal_SDMIN_table[config->crystal_id],
-				     data->pll.top_frequency, BL60X_PLL_TOP_FREQ));
+			BFLB_MUL_CLK_XIP(
+				clock_control_bl60x_crystal_SDMIN_table[config->crystal_id],
+				data->pll.top_frequency, BL60X_PLL_TOP_FREQ));
 	} else {
 		clock_control_bl60x_init_pll(data->pll.source, CRYSTAL_ID_FREQ_32000000,
-			BFLB_MUL_CLK(
+			BFLB_MUL_CLK_XIP(
 				clock_control_bl60x_crystal_SDMIN_table[CRYSTAL_ID_FREQ_32000000],
 				data->pll.top_frequency, BL60X_PLL_TOP_FREQ));
 	}
@@ -599,7 +595,7 @@ static void clock_control_bl60x_setup_pll(const struct device *dev)
 	sys_write32(tmp, GLB_BASE + GLB_CLK_CFG0_OFFSET);
 }
 
-static void clock_control_bl60x_init_root_as_pll(const struct device *dev)
+static __bflb_critfunc void clock_control_bl60x_init_root_as_pll(const struct device *dev)
 {
 	struct clock_control_bl60x_data *data = dev->data;
 
@@ -619,51 +615,50 @@ static void clock_control_bl60x_init_root_as_pll(const struct device *dev)
 	clock_control_bl60x_set_PKA_clock(1);
 }
 
-static void clock_control_bl60x_init_root_as_crystal(const struct device *dev)
+static __bflb_critfunc void clock_control_bl60x_init_root_as_crystal(const struct device *dev)
 {
 	clock_bflb_set_root_clock(BFLB_MAIN_CLOCK_XTAL);
 	sys_write32(clock_control_bl60x_get_clk(dev), CORECLOCKREGISTER);
 }
 
-static __ramfunc void clock_control_bl60x_update_flash_clk(const struct device *dev)
+static __ramfunc void clock_control_bl60x_update_flash_clk(const struct device *dev,
+							   const enum bl60x_clkid source,
+							   bool final)
 {
 	struct clock_control_bl60x_data *data = dev->data;
 	volatile uint32_t tmp;
+	uint32_t clk;
 
 	tmp = *(volatile uint32_t *)(GLB_BASE + GLB_CLK_CFG2_OFFSET);
 	tmp &= GLB_SF_CLK_DIV_UMSK;
 	tmp &= GLB_SF_CLK_EN_UMSK;
-	tmp |= (data->flashclk.divider - 1) << GLB_SF_CLK_DIV_POS;
 	*(volatile uint32_t *)(GLB_BASE + GLB_CLK_CFG2_OFFSET) = tmp;
-
-	tmp = *(volatile uint32_t *)(SF_CTRL_BASE + SF_CTRL_0_OFFSET);
-	tmp |= SF_CTRL_SF_IF_READ_DLY_EN_MSK;
-	tmp &= ~SF_CTRL_SF_IF_READ_DLY_N_MSK;
-	tmp |= (data->flashclk.read_delay << SF_CTRL_SF_IF_READ_DLY_N_POS);
-	if (data->flashclk.clock_invert) {
-		tmp &= ~SF_CTRL_SF_CLK_OUT_INV_SEL_MSK;
-	} else {
-		tmp |= SF_CTRL_SF_CLK_OUT_INV_SEL_MSK;
-	}
-	if (data->flashclk.rx_clock_invert) {
-		tmp |= SF_CTRL_SF_CLK_SF_RX_INV_SEL_MSK;
-	} else {
-		tmp &= ~SF_CTRL_SF_CLK_SF_RX_INV_SEL_MSK;
-	}
-	*(volatile uint32_t *)(SF_CTRL_BASE + SF_CTRL_0_OFFSET) = tmp;
 
 	tmp = *(volatile uint32_t *)(GLB_BASE + GLB_CLK_CFG2_OFFSET);
 	tmp &= GLB_SF_CLK_SEL_UMSK;
 	tmp &= GLB_SF_CLK_SEL2_UMSK;
-	if (data->flashclk.source == bl60x_clkid_clk_pll) {
+	if (source == bl60x_clkid_clk_pll) {
+		clk = clock_control_bl60x_get_clk(dev);
 		tmp |= 0U << GLB_SF_CLK_SEL_POS;
 		tmp |= 0U << GLB_SF_CLK_SEL2_POS;
-	} else if (data->flashclk.source == bl60x_clkid_clk_crystal) {
+	} else if (source == bl60x_clkid_clk_crystal) {
+		clk = clock_control_bl60x_get_xclk(dev);
 		tmp |= 0U << GLB_SF_CLK_SEL_POS;
 		tmp |= 1U << GLB_SF_CLK_SEL2_POS;
 	} else {
+		clk = clock_control_bl60x_get_bclk(dev);
 		/* If using RC32M or BCLK, use BCLK */
 		tmp |= 2U << GLB_SF_CLK_SEL_POS;
+	}
+
+	/* If flash controller will manage flash, set to standard speed
+	 * and let it set the divider.
+	 */
+	if (IS_ENABLED(CONFIG_SOC_FLASH_BFLB) || !final) {
+		clk = DIV_ROUND_CLOSEST(clk, BL60X_TARGET_BASIC_CLOCK);
+		tmp |= clamp(clk - 1, 0x0, 0x7) << GLB_SF_CLK_DIV_POS;
+	} else {
+		tmp |= (data->flashclk.divider - 1) << GLB_SF_CLK_DIV_POS;
 	}
 
 	*(volatile uint32_t *)(GLB_BASE + GLB_CLK_CFG2_OFFSET) = tmp;
@@ -760,7 +755,7 @@ static int clock_control_bl60x_update_f32k(const struct device *dev)
 	return 0;
 }
 
-static int clock_control_bl60x_update_clocks(const struct device *dev)
+static __bflb_critfunc int clock_control_bl60x_update_clocks(const struct device *dev)
 {
 	struct clock_control_bl60x_data *data = dev->data;
 	uint32_t tmp;
@@ -777,6 +772,8 @@ static int clock_control_bl60x_update_clocks(const struct device *dev)
 	clock_bflb_set_root_clock(BFLB_MAIN_CLOCK_RC32M);
 	clock_control_bl60x_set_root_clock_dividers(0, 0);
 	sys_write32(BFLB_RC32M_FREQUENCY, CORECLOCKREGISTER);
+
+	clock_control_bl60x_update_flash_clk(dev, bl60x_clkid_clk_rc32m, false);
 
 	clock_control_bl60x_set_PKA_clock(0);
 	clock_control_bl60x_cache_2T(false);
@@ -815,6 +812,8 @@ static int clock_control_bl60x_update_clocks(const struct device *dev)
 	} else {
 		/* Root clock already setup as RC32M */
 	}
+
+	clock_control_bl60x_update_flash_clk(dev, data->flashclk.source, true);
 
 	ret = clock_control_bl60x_clock_trim_32M();
 	if (ret < 0) {
@@ -1057,8 +1056,6 @@ static int clock_control_bl60x_init(const struct device *dev)
 
 	clock_bflb_settle();
 
-	clock_control_bl60x_update_flash_clk(dev);
-
 	irq_unlock(key);
 
 	return 0;
@@ -1115,9 +1112,6 @@ static struct clock_control_bl60x_data clock_control_bl60x_data = {
 #else
 		.source = bl60x_clkid_clk_rc32m,
 #endif
-		.read_delay = DT_PROP(DT_INST_CLOCKS_CTLR_BY_NAME(0, flash), read_delay),
-		.clock_invert = DT_PROP(DT_INST_CLOCKS_CTLR_BY_NAME(0, flash), clock_invert),
-		.rx_clock_invert = DT_PROP(DT_INST_CLOCKS_CTLR_BY_NAME(0, flash), rx_clock_invert),
 		.divider = DT_PROP(DT_INST_CLOCKS_CTLR_BY_NAME(0, flash), divider),
 	},
 
